@@ -561,20 +561,75 @@ def _is_network_error(output: str) -> bool:
     return any(p in output_lower for p in _NETWORK_ERROR_PATTERNS)
 
 
+def _is_application_control_error(stderr: str) -> bool:
+    """Detect Windows Application Control / AppLocker / WDAC blocking.
+
+    Application Control is a kernel-level allow-listing policy
+    (AppLocker, Windows Defender Application Control / WDAC, Smart App
+    Control). It refuses to execute any binary not signed or path-
+    listed by IT. Critically, this is NOT regular antivirus:
+
+      - folder exclusions do not help (different mechanism);
+      - the cache-dir env var does not help (the standalone python
+        binary is still blocked wherever it is on disk);
+      - the user cannot bypass it without admin / IT involvement.
+
+    Recognising this class of failure lets the plugin direct the user
+    to the right remediation instead of giving misleading 'add an AV
+    exclusion' advice.
+
+    Args:
+        stderr: The error output to inspect.
+
+    Returns:
+        True if the error is from an application-control policy.
+    """
+    s = stderr.lower()
+    return (
+        "winerror 4551" in s
+        or "application control policy" in s
+        or "stratégie de contrôle d'application" in s
+        or "strategie de controle d'application" in s
+        or "applocker" in s
+        or "code integrity" in s
+        or "smart app control" in s
+        or "blocked by your administrator" in s
+        or "blocked by group policy" in s
+        or "blocked by your organization" in s
+    )
+
+
+def _format_application_control_help() -> str:
+    """Actionable message when WDAC / AppLocker blocks the plugin.
+
+    Tells the user exactly what to ask IT for and what NOT to try,
+    since the usual antivirus-exclusion advice does not apply.
+    """
+    return (
+        "The plugin's portable Python is being blocked by a Windows "
+        "Application Control policy (AppLocker / WDAC / Smart App "
+        "Control) on this machine. This is enforced at the kernel "
+        "level by your IT department; folder exclusions and antivirus "
+        "settings will not help. Send this exact request to IT: "
+        "'Please allow the executables under {cache} for my user "
+        "account, or add the folder to the AppLocker / WDAC allow "
+        "list.' If that is not possible, the plugin will not run on "
+        "this machine.".format(cache=CACHE_DIR)
+    )
+
+
 def _is_antivirus_error(stderr: str) -> bool:
     """Detect antivirus / permission blocking in installer output.
 
-    Recognises both classic Windows blocking signatures (Defender's
+    Recognises classic Windows AV blocking signatures (Defender's
     "operation did not complete because the file contains a virus",
-    AppLocker / Group Policy strings) AND uv's own follow-on errors
-    when a python.exe inside the venv has been quarantined out from
-    under it ("Failed to inspect Python interpreter" / "Failed to
-    query Python interpreter"). In practice on consumer laptops the
-    second pattern is what surfaces - the AV deletes the file silently
-    and uv reports "missing python".
+    access-denied patterns, AV cloud-deletion artefacts). Caller
+    should check ``_is_application_control_error()`` first - WDAC /
+    AppLocker share some surface patterns but need very different
+    remediation advice.
 
     Args:
-        stderr: The error output from pip / uv.
+        stderr: The error output from pip / uv / venv-creation.
 
     Returns:
         True if AV / permission blocking is the most likely cause.
@@ -586,10 +641,6 @@ def _is_antivirus_error(stderr: str) -> bool:
         "winerror 225",
         "permission denied",
         "operation did not complete successfully because the file contains a virus",
-        "blocked by your administrator",
-        "blocked by group policy",
-        "applocker",
-        "blocked by your organization",
         # uv signatures when python.exe was quarantined out from under it
         "failed to inspect python interpreter",
         "failed to query python interpreter",
@@ -1466,6 +1517,8 @@ def create_venv(
             )
             _log(f"Failed to create venv: {error_msg}", Qgis.Critical)
             _cleanup_partial_venv(venv_dir)
+            if _is_application_control_error(error_msg):
+                return False, _format_application_control_help()
             return False, f"Failed to create venv: {error_msg[:1500]}"
 
     except subprocess.TimeoutExpired:
@@ -1477,9 +1530,12 @@ def create_venv(
         _log(f"Venv creation executable not found: {missing_executable}", Qgis.Critical)
         return False, f"Executable not found: {missing_executable}"
     except Exception as e:
-        _log(f"Exception during venv creation: {str(e)}", Qgis.Critical)
+        err_str = str(e)
+        _log(f"Exception during venv creation: {err_str}", Qgis.Critical)
         _cleanup_partial_venv(venv_dir)
-        return False, f"Error: {str(e)[:200]}"
+        if _is_application_control_error(err_str):
+            return False, _format_application_control_help()
+        return False, f"Error: {err_str[:1500]}"
 
 
 # ---------------------------------------------------------------------------
@@ -2360,6 +2416,8 @@ def install_dependencies(
                         False,
                         "Failed to install {}: network error".format(package_name),
                     )
+                if _is_application_control_error(install_error_msg):
+                    return False, _format_application_control_help()
                 if _is_antivirus_error(install_error_msg):
                     return False, _format_antivirus_help(package_name)
                 if last_returncode is not None and _is_windows_process_crash(
@@ -2578,6 +2636,8 @@ def install_dependencies(
                         False,
                         "Failed to install {}: network error".format(failed_pkg),
                     )
+                if _is_application_control_error(error_output):
+                    return False, _format_application_control_help()
                 if _is_antivirus_error(error_output):
                     return False, _format_antivirus_help(failed_pkg)
                 if result.returncode is not None and _is_windows_process_crash(

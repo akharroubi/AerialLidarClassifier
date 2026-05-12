@@ -258,6 +258,33 @@ panel under the **Aerial LiDAR Classifier** tag. If something fails, open
 *View &rarr; Panels &rarr; Log Messages* first &mdash; the answer is almost
 always there.
 
+### Install fails with `WinError 4551` / "Application Control policy" / AppLocker / WDAC
+
+This is **not** antivirus &mdash; it's Windows Application Control (AppLocker,
+WDAC, or Smart App Control), a kernel-level allow-listing policy enforced by
+IT. It refuses to execute *any* binary not on the corporate allow-list, and
+the user cannot bypass it. Symptoms:
+
+- Setup dialog shows `Failed to create venv: [WinError 4551] ...`, or the
+  French equivalent `Une stratégie de contrôle d'application a bloqué ce
+  fichier`.
+- AV exclusions do nothing.
+- Cache redirect via `AERIAL_LIDAR_CLASSIFIER_CACHE_DIR` does nothing
+  (Application Control is per-binary, not per-folder).
+- Running QGIS as administrator does nothing if the policy is machine-wide.
+
+**The only fix is IT involvement.** Send this exact request to your IT
+team:
+
+> Please allow execution under `C:\Users\<my-username>\.qgis_aerial_lidar_classifier\`
+> for my user account &mdash; either by adding the folder to the AppLocker /
+> WDAC allow list, or by signing the python-build-standalone binaries used
+> by this QGIS plugin.
+
+If your IT team will not grant this, the plugin cannot run on a machine
+with that policy in force. Use a personal / unmanaged Windows machine, or
+Linux / macOS, instead.
+
 ### Install fails with "blocked by antivirus / endpoint-security product"
 
 By far the most common first-run failure on Windows laptops, especially
