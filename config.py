@@ -57,7 +57,7 @@ DEFAULT_MODEL_URL = (
 # TreeAIBox release. Empty entries are skipped automatically.
 MODEL_FALLBACK_URLS: List[str] = [
     "https://github.com/akharroubi/AerialLidarClassifier/releases/download/"
-    "models-v1/urbanfiltering_als_esegformer3D_112_30cm_GPU3GB.pth",
+    "v1.0.0/urbanfiltering_als_esegformer3D_112_30cm_GPU3GB.pth",
 ]
 
 # SHA-256 of the official .pth file (lowercase hex, 64 chars). Every
