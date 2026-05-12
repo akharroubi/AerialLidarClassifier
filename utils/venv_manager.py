@@ -790,11 +790,6 @@ def ensure_venv_packages_available() -> bool:
         sys.path.insert(0, site_packages)
         _log(f"Added venv site-packages to sys.path: {site_packages}", Qgis.Info)
 
-    # Fix PROJ database for the venv's pyproj / rasterio / pyogrio.
-    # QGIS may set PROJ_LIB to its own PROJ data, but the venv's pyproj
-    # bundles its own proj.db and needs PROJ_DATA to point there.
-    _fix_proj_data(site_packages)
-
     # On Windows, register DLL directories for native packages (torch,
     # etc.) so that the OS loader can find their DLLs when importing
     # from the venv inside QGIS's process.
