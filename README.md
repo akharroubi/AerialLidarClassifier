@@ -253,31 +253,117 @@ Progress (percent + status string) is reported back through standard
 
 ## Troubleshooting
 
-**The Setup panel keeps appearing on every launch.**
-The dependency check failed. Open *View &rarr; Panels &rarr; Log Messages*,
-filter on the *Aerial LiDAR Classifier* tag, and inspect the lines starting
-with `Dependency check:`. The most common cause is an interrupted first
-install; click *Reinstall* in the Setup panel.
+Every install / dependency / detection step writes to the QGIS Log Messages
+panel under the **Aerial LiDAR Classifier** tag. If something fails, open
+*View &rarr; Panels &rarr; Log Messages* first &mdash; the answer is almost
+always there.
 
-**`nvidia-smi` was not found but I have an NVIDIA GPU.**
-The plugin calls `nvidia-smi` to detect the driver version. Make sure the
-NVIDIA driver is installed and that `nvidia-smi` is on `PATH` (it is by
-default on Windows; on Linux it ships with `nvidia-utils-<version>`).
+### Install fails with "blocked by antivirus / endpoint-security product"
 
-**Inference runs on CPU even though my GPU is detected.**
-Open the dock and set *Compute device* to *CUDA* (or *MPS*) explicitly in the
-advanced parameters. Auto-selection only chooses GPU when the detected device
-has at least 2&nbsp;GB of free memory.
+By far the most common first-run failure on Windows laptops, especially
+corporate / shared / managed machines. Defender or third-party AV scans the
+freshly downloaded portable `python.exe` inside the venv and quarantines it
+between creation and use. The plugin detects this and tells you the exact
+folder to whitelist (typically `C:\Users\<you>\.qgis_aerial_lidar_classifier`).
 
-**`Could not open file as point cloud layer` when auto-loading the result.**
+**If you have admin rights** (Windows Defender, from an *elevated* PowerShell):
+
+```powershell
+Add-MpPreference -ExclusionPath "$env:USERPROFILE\.qgis_aerial_lidar_classifier"
+Remove-Item -Recurse -Force "$env:USERPROFILE\.qgis_aerial_lidar_classifier"
+```
+
+Then click *Reinstall Dependencies* in the Setup panel.
+
+**If you don't have admin rights** (intern / managed laptop):
+
+Either ask IT to add the exclusion above, or redirect the cache to a folder
+that's already whitelisted by your organisation. The plugin honours the
+`AERIAL_LIDAR_CLASSIFIER_CACHE_DIR` environment variable:
+
+```powershell
+[Environment]::SetEnvironmentVariable(
+    "AERIAL_LIDAR_CLASSIFIER_CACHE_DIR",
+    "C:\Dev\aerial_lidar_classifier",
+    "User"
+)
+```
+
+Restart QGIS afterwards. The Setup panel will use the new location.
+
+### The Setup panel keeps appearing on every launch
+
+The dependency check failed. Filter the Log Messages panel on the
+*Aerial LiDAR Classifier* tag and inspect the lines starting with
+`Dependency check:`. Most common causes:
+
+- An interrupted first install &mdash; click *Reinstall* in the Setup panel.
+- A previous install was quarantined (see AV section above).
+- The venv lives somewhere QGIS no longer has read access to (e.g. you
+  moved your user profile). Delete `~/.qgis_aerial_lidar_classifier/` and
+  reinstall.
+
+### "Failed to inspect Python interpreter" or "Failed to query Python interpreter"
+
+These are `uv`'s error messages when the venv's `python.exe` was created
+successfully but then disappeared or refused to start before `uv` could use
+it. **99 % of the time this is antivirus quarantine** &mdash; see the first
+section. The plugin recognises both phrases and routes them through the
+AV-help path automatically.
+
+### `nvidia-smi` was not found but I have an NVIDIA GPU
+
+The plugin queries `nvidia-smi` to read driver version + compute capability.
+On Windows the binary normally lives in `C:\Windows\System32\nvidia-smi.exe`
+(already on `PATH`); the plugin also falls back to
+`C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe`.
+
+To check what's installed:
+
+```powershell
+nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total --format=csv,noheader,nounits
+Get-ChildItem -Path "C:\Program Files\NVIDIA Corporation","C:\Windows\System32" -Filter "nvidia-smi.exe" -ErrorAction SilentlyContinue | Select-Object FullName
+```
+
+If the first command works in a normal PowerShell but the plugin still says
+"GPU not detected", check the Log Messages panel &mdash; every detection
+failure path is now logged with the reason.
+
+If `nvidia-smi` itself fails, the NVIDIA driver is incomplete or stale.
+Reinstall the **Game Ready** or **Studio** driver from
+[nvidia.com/Download/index.aspx](https://www.nvidia.com/Download/index.aspx)
+(not from Windows Update / OEM tools, which can ship a partial driver
+without `nvidia-smi`).
+
+### Inference runs on CPU even though my GPU is detected
+
+Open the dock, expand *Advanced parameters &rarr; Compute device*, and set
+it to *CUDA* (or *MPS*) explicitly. Auto-selection only switches to GPU when
+the detected device reports at least 2&nbsp;GB of free memory at start-up.
+
+### `Could not open file as point cloud layer` when auto-loading the result
+
 This is usually a missing PDAL provider in your QGIS build. Open the file
-manually via *Layer &rarr; Add Layer &rarr; Add Point Cloud Layer* &mdash; if
-that also fails, your QGIS install does not ship the PDAL provider.
+manually via *Layer &rarr; Add Layer &rarr; Add Point Cloud Layer* &mdash;
+if that also fails, your QGIS install does not ship the PDAL provider.
+Use a QGIS package that bundles PDAL (the official Windows / macOS
+installers from qgis.org all do).
 
-**The model download fails behind a corporate proxy.**
+### The model download fails behind a corporate proxy
+
 The plugin uses `QgsBlockingNetworkRequest`, which honours the proxy
-configured in *Settings &rarr; Options &rarr; Network*. Verify those settings
-and retry; the fallback URL in `config.py` is tried automatically.
+configured in *Settings &rarr; Options &rarr; Network*. Verify those
+settings and retry; the fallback URL in `config.py` is tried automatically.
+If both URLs fail you can also drop the `.pth` file (~18&nbsp;MB) manually
+into `~/.qgis_aerial_lidar_classifier/models/` &mdash; the plugin will
+verify its SHA-256 and use it without ever touching the network.
+
+### Install takes a long time / progress bar appears stuck
+
+The PyTorch + CUDA wheels are 1&ndash;3&nbsp;GB depending on which CUDA
+version was selected. On a slow connection the download can genuinely take
+ten minutes or more. The Log Messages panel shows the live progress; if
+you see new lines, the install is still working.
 
 ---
 
