@@ -1,4 +1,4 @@
-﻿"""Python standalone manager for the Aerial LiDAR Classifier plugin.
+"""Python standalone manager for the Aerial LiDAR Classifier plugin.
 
 Downloads and manages a standalone Python interpreter that matches
 the QGIS Python version, ensuring compatibility. The interpreter is

@@ -21,7 +21,15 @@ class DyT(nn.Module):
 class EfficientAttention(nn.Module):
     """Memory-efficient attention implementation using PyTorch's scaled_dot_product_attention"""
 
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., sr_ratio=1):
+    def __init__(
+            self,
+            dim,
+            num_heads=8,
+            qkv_bias=False,
+            qk_scale=None,
+            attn_drop=0.,
+            proj_drop=0.,
+            sr_ratio=1):
         super().__init__()
         assert dim % num_heads == 0
         self.dim = dim
@@ -67,7 +75,8 @@ class EfficientAttention(nn.Module):
         # Scale queries
         q = q * self.scale
         # Use built-in scaled_dot_product_attention for improved efficiency.
-        attn_output = F.scaled_dot_product_attention(q, k, v, dropout_p=self.attn_drop.p, is_causal=False)
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v, dropout_p=self.attn_drop.p, is_causal=False)
 
         # Reassemble output
         x = attn_output.transpose(1, 2).reshape(B, N, C)
@@ -80,7 +89,13 @@ class EfficientAttention(nn.Module):
 class Mlp(nn.Module):
     """MLP with Depthwise Convolution"""
 
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+    def __init__(
+            self,
+            in_features,
+            hidden_features=None,
+            out_features=None,
+            act_layer=nn.GELU,
+            drop=0.):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -107,8 +122,18 @@ class Mlp(nn.Module):
 class Block(nn.Module):
     """Transformer block with memory-efficient implementations"""
 
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, sr_ratio=1):
+    def __init__(
+            self,
+            dim,
+            num_heads,
+            mlp_ratio=4.,
+            qkv_bias=False,
+            qk_scale=None,
+            drop=0.,
+            attn_drop=0.,
+            drop_path=0.,
+            act_layer=nn.GELU,
+            sr_ratio=1):
         super().__init__()
 
         # Use lightweight normalization
@@ -124,7 +149,11 @@ class Block(nn.Module):
 
         # Reduced MLP ratio for memory efficiency
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = Mlp(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            act_layer=act_layer,
+            drop=drop)
 
     def forward(self, x, D, H, W):
         # Pre-norm architecture with residual connections
@@ -237,45 +266,81 @@ class Segformer(nn.Module):
         self.depths = depths
 
         # Patch embeddings
-        self.patch_embed1 = OverlapPatchEmbed(block3d_size=block3d_size, patch_size=patch_size, stride=2,
-                                              in_chans=in_chans, embed_dim=embed_dims[0])
-        self.patch_embed2 = OverlapPatchEmbed(block3d_size=block3d_size // 4, patch_size=patch_size, stride=2,
-                                              in_chans=embed_dims[0], embed_dim=embed_dims[1])
-        self.patch_embed3 = OverlapPatchEmbed(block3d_size=block3d_size // 8, patch_size=patch_size, stride=2,
-                                              in_chans=embed_dims[1], embed_dim=embed_dims[2])
-        self.patch_embed4 = OverlapPatchEmbed(block3d_size=block3d_size // 16, patch_size=patch_size, stride=2,
-                                              in_chans=embed_dims[2], embed_dim=embed_dims[3])
+        self.patch_embed1 = OverlapPatchEmbed(
+            block3d_size=block3d_size,
+            patch_size=patch_size,
+            stride=2,
+            in_chans=in_chans,
+            embed_dim=embed_dims[0])
+        self.patch_embed2 = OverlapPatchEmbed(
+            block3d_size=block3d_size // 4,
+            patch_size=patch_size,
+            stride=2,
+            in_chans=embed_dims[0],
+            embed_dim=embed_dims[1])
+        self.patch_embed3 = OverlapPatchEmbed(
+            block3d_size=block3d_size // 8,
+            patch_size=patch_size,
+            stride=2,
+            in_chans=embed_dims[1],
+            embed_dim=embed_dims[2])
+        self.patch_embed4 = OverlapPatchEmbed(
+            block3d_size=block3d_size // 16,
+            patch_size=patch_size,
+            stride=2,
+            in_chans=embed_dims[2],
+            embed_dim=embed_dims[3])
 
         # Configure stochastic depth decay rule
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
         cur = 0
 
         # Transformer blocks
-        self.block1 = nn.ModuleList([Block(
-            dim=embed_dims[0], num_heads=num_heads[0], mlp_ratio=mlp_ratios[0], qkv_bias=qkv_bias, qk_scale=qk_scale,
-            drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[cur + i],
-            sr_ratio=sr_ratios[0]) for i in range(depths[0])])
+        self.block1 = nn.ModuleList([Block(dim=embed_dims[0],
+                                           num_heads=num_heads[0],
+                                           mlp_ratio=mlp_ratios[0],
+                                           qkv_bias=qkv_bias,
+                                           qk_scale=qk_scale,
+                                           drop=drop_rate,
+                                           attn_drop=attn_drop_rate,
+                                           drop_path=dpr[cur + i],
+                                           sr_ratio=sr_ratios[0]) for i in range(depths[0])])
         self.norm1 = DyT(embed_dims[0])
 
         cur += depths[0]
-        self.block2 = nn.ModuleList([Block(
-            dim=embed_dims[1], num_heads=num_heads[1], mlp_ratio=mlp_ratios[1], qkv_bias=qkv_bias, qk_scale=qk_scale,
-            drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[cur + i],
-            sr_ratio=sr_ratios[1]) for i in range(depths[1])])
+        self.block2 = nn.ModuleList([Block(dim=embed_dims[1],
+                                           num_heads=num_heads[1],
+                                           mlp_ratio=mlp_ratios[1],
+                                           qkv_bias=qkv_bias,
+                                           qk_scale=qk_scale,
+                                           drop=drop_rate,
+                                           attn_drop=attn_drop_rate,
+                                           drop_path=dpr[cur + i],
+                                           sr_ratio=sr_ratios[1]) for i in range(depths[1])])
         self.norm2 = DyT(embed_dims[1])
 
         cur += depths[1]
-        self.block3 = nn.ModuleList([Block(
-            dim=embed_dims[2], num_heads=num_heads[2], mlp_ratio=mlp_ratios[2], qkv_bias=qkv_bias, qk_scale=qk_scale,
-            drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[cur + i],
-            sr_ratio=sr_ratios[2]) for i in range(depths[2])])
+        self.block3 = nn.ModuleList([Block(dim=embed_dims[2],
+                                           num_heads=num_heads[2],
+                                           mlp_ratio=mlp_ratios[2],
+                                           qkv_bias=qkv_bias,
+                                           qk_scale=qk_scale,
+                                           drop=drop_rate,
+                                           attn_drop=attn_drop_rate,
+                                           drop_path=dpr[cur + i],
+                                           sr_ratio=sr_ratios[2]) for i in range(depths[2])])
         self.norm3 = DyT(embed_dims[2])
 
         cur += depths[2]
-        self.block4 = nn.ModuleList([Block(
-            dim=embed_dims[3], num_heads=num_heads[3], mlp_ratio=mlp_ratios[3], qkv_bias=qkv_bias, qk_scale=qk_scale,
-            drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[cur + i],
-            sr_ratio=sr_ratios[3]) for i in range(depths[3])])
+        self.block4 = nn.ModuleList([Block(dim=embed_dims[3],
+                                           num_heads=num_heads[3],
+                                           mlp_ratio=mlp_ratios[3],
+                                           qkv_bias=qkv_bias,
+                                           qk_scale=qk_scale,
+                                           drop=drop_rate,
+                                           attn_drop=attn_drop_rate,
+                                           drop_path=dpr[cur + i],
+                                           sr_ratio=sr_ratios[3]) for i in range(depths[3])])
         self.norm4 = DyT(embed_dims[3])
 
         # Lightweight decoder
@@ -355,22 +420,26 @@ class Segformer(nn.Module):
 
         # Process c4 with reduced memory operations
         # Process in chunks if needed to save memory
-        x = self.linear_c4(c4).permute(0, 2, 1).reshape(n, -1, c4.shape[2], c4.shape[3], c4.shape[4])
+        x = self.linear_c4(c4).permute(0, 2, 1).reshape(
+            n, -1, c4.shape[2], c4.shape[3], c4.shape[4])
 
         # Memory-efficient upsampling and skip connection fusion
         # C4 -> C3
         x = F.interpolate(x, size=c3.size()[2:], mode='trilinear', align_corners=False)
-        c3_feat = self.linear_c3(c3).permute(0, 2, 1).reshape(n, -1, c3.shape[2], c3.shape[3], c3.shape[4])
+        c3_feat = self.linear_c3(c3).permute(0, 2, 1).reshape(
+            n, -1, c3.shape[2], c3.shape[3], c3.shape[4])
         x = self.skip_fusions[0](x, c3_feat)
 
         # C3 -> C2
         x = F.interpolate(x, size=c2.size()[2:], mode='trilinear', align_corners=False)
-        c2_feat = self.linear_c2(c2).permute(0, 2, 1).reshape(n, -1, c2.shape[2], c2.shape[3], c2.shape[4])
+        c2_feat = self.linear_c2(c2).permute(0, 2, 1).reshape(
+            n, -1, c2.shape[2], c2.shape[3], c2.shape[4])
         x = self.skip_fusions[1](x, c2_feat)
 
         # C2 -> C1
         x = F.interpolate(x, size=c1.size()[2:], mode='trilinear', align_corners=False)
-        c1_feat = self.linear_c1(c1).permute(0, 2, 1).reshape(n, -1, c1.shape[2], c1.shape[3], c1.shape[4])
+        c1_feat = self.linear_c1(c1).permute(0, 2, 1).reshape(
+            n, -1, c1.shape[2], c1.shape[3], c1.shape[4])
         x = self.skip_fusions[2](x, c1_feat)
 
         # Final prediction with reduced operations
@@ -379,7 +448,14 @@ class Segformer(nn.Module):
         x = self.linear_pred(x)
 
         # Final upsampling to original size
-        x = F.interpolate(input=x, size=(d_out, h_out, w_out), mode='trilinear', align_corners=False)
+        x = F.interpolate(
+            input=x,
+            size=(
+                d_out,
+                h_out,
+                w_out),
+            mode='trilinear',
+            align_corners=False)
         x = x.type(torch.float32)
 
         return x

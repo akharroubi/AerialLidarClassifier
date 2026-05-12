@@ -1,4 +1,4 @@
-﻿"""Background worker thread for installing plugin dependencies.
+"""Background worker thread for installing plugin dependencies.
 
 Runs the full installation pipeline (download Python, create venv,
 install packages) in a separate thread to keep the QGIS UI responsive.

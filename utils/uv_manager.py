@@ -1,4 +1,4 @@
-﻿"""UV package installer manager for Aerial LiDAR Classifier QGIS Plugin.
+"""UV package installer manager for Aerial LiDAR Classifier QGIS Plugin.
 
 Downloads and manages the uv package installer binary for fast
 dependency installation in the plugin's virtual environment.

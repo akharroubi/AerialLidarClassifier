@@ -65,7 +65,7 @@ MODEL_FALLBACK_URLS: List[str] = [
 # truncated downloads and tampered mirrors. Computed once from the
 # upstream TreeAIBox release; update if the model file is ever
 # re-released. Set to "" to skip verification.
-MODEL_SHA256: str = "cddb791041d46a2e7be3c53d6e94157c9af2218e7ea5595bf3134c4390c1fbc0"
+MODEL_SHA256: str = "cddb791041d46a2e7be3c53d6e94157c9af2218e7ea5595bf3134c4390c1fbc0"  # noqa: E501  # pragma: allowlist secret
 
 
 # =============================================================================

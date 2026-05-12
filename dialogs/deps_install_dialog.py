@@ -1,4 +1,4 @@
-﻿"""Dependency installation dock widget for Aerial LiDAR Classifier QGIS Plugin.
+"""Dependency installation dock widget for Aerial LiDAR Classifier QGIS Plugin.
 
 Provides a user-facing panel for installing AI dependencies on first use.
 Shows GPU detection info, progress bars, and status messages during
@@ -43,8 +43,7 @@ class DepsInstallDockWidget(QDockWidget):
         super().__init__("Aerial LiDAR Classifier - Setup", parent)
         self.setObjectName("AerialLidarClassifierDepsInstallDock")
         self.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
-        )
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
 
         container = QWidget()
         layout = QVBoxLayout(container)
@@ -71,7 +70,7 @@ class DepsInstallDockWidget(QDockWidget):
 
         _home = os.path.expanduser("~")
         _display = (
-            ("~" + CACHE_DIR[len(_home) :])
+            ("~" + CACHE_DIR[len(_home):])
             if CACHE_DIR.startswith(_home)
             else CACHE_DIR
         )
@@ -151,8 +150,7 @@ class DepsInstallDockWidget(QDockWidget):
             "plugin documentation</a> or report a bug on "
             '<a href="https://github.com/akharroubi/AerialLidarClassifier/issues">'
             "GitHub</a>."
-            "</small>"
-        )
+            "</small>")
         help_label.setWordWrap(True)
         help_label.setOpenExternalLinks(True)
         layout.addWidget(help_label)
@@ -188,13 +186,11 @@ class DepsInstallDockWidget(QDockWidget):
                         msg = (
                             "No NVIDIA GPU detected (CUDA not applicable on macOS).\n"
                             "Apple Silicon MPS may still be used at runtime if "
-                            "supported by PyTorch/QGIS. CPU fallback is available."
-                        )
+                            "supported by PyTorch/QGIS. CPU fallback is available.")
                     else:
                         msg = (
                             "No NVIDIA GPU detected (CUDA unavailable on this system).\n"
-                            "CPU mode will be used. MPS is only available on Apple Silicon."
-                        )
+                            "CPU mode will be used. MPS is only available on Apple Silicon.")
                 else:
                     msg = (
                         "No NVIDIA GPU detected.\n"
@@ -213,7 +209,8 @@ class DepsInstallDockWidget(QDockWidget):
                     "used at runtime if available."
                 )
             else:
-                self.gpu_label.setText("Could not detect GPU.\nCPU mode will be used.")
+                self.gpu_label.setText(
+                    "Could not detect GPU.\nCPU mode will be used.")
 
     def _on_reinstall_clicked(self):
         """Handle reinstall button click by removing existing venv first."""

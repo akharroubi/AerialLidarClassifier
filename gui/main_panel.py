@@ -174,7 +174,10 @@ class ClassifierDockWidget(QDockWidget):
                     self.task.cancel()
             except Exception:
                 pass
-            for signal_name in ("progressChanged", "taskCompleted", "taskTerminated"):
+            for signal_name in (
+                "progressChanged",
+                "taskCompleted",
+                    "taskTerminated"):
                 try:
                     getattr(self.task, signal_name).disconnect()
                 except Exception:
@@ -190,7 +193,8 @@ class ClassifierDockWidget(QDockWidget):
 
     def _load_settings(self):
         s = QgsSettings()
-        self._saved_suffix = s.value(f"{SETTINGS_PREFIX}/suffix", "_classified")
+        self._saved_suffix = s.value(
+            f"{SETTINGS_PREFIX}/suffix", "_classified")
         self._saved_field = s.value(
             f"{SETTINGS_PREFIX}/field_name", "classification"
         )
@@ -211,8 +215,9 @@ class ClassifierDockWidget(QDockWidget):
             f"{SETTINGS_PREFIX}/tile_size_m", 500.0, type=float
         )
         self._saved_tile_buffer_m = s.value(
-            f"{SETTINGS_PREFIX}/tile_buffer_m", TILE_DEFAULT_BUFFER_M, type=float
-        )
+            f"{SETTINGS_PREFIX}/tile_buffer_m",
+            TILE_DEFAULT_BUFFER_M,
+            type=float)
         self._saved_tile_streaming = s.value(
             f"{SETTINGS_PREFIX}/tile_streaming", False, type=bool
         )
@@ -225,8 +230,8 @@ class ClassifierDockWidget(QDockWidget):
             self.field_edit.text().strip() or "classification",
         )
         s.setValue(
-            f"{SETTINGS_PREFIX}/load_result", self.load_result_check.isChecked()
-        )
+            f"{SETTINGS_PREFIX}/load_result",
+            self.load_result_check.isChecked())
         s.setValue(f"{SETTINGS_PREFIX}/use_gpu", self.gpu_check.isChecked())
         if self.output_widget.filePath():
             s.setValue(
@@ -339,8 +344,9 @@ class ClassifierDockWidget(QDockWidget):
         # Right-side icon buttons (download model / clear gpu)
         self.download_btn = QToolButton()
         self.download_btn.setIcon(
-            _qgis_icon("mActionFileSaveAs.svg", QStyle.StandardPixmap.SP_ArrowDown)
-        )
+            _qgis_icon(
+                "mActionFileSaveAs.svg",
+                QStyle.StandardPixmap.SP_ArrowDown))
         self.download_btn.setToolTip("Download model weights")
         self.download_btn.setAutoRaise(True)
         self.download_btn.clicked.connect(self._download_model)
@@ -387,7 +393,8 @@ class ClassifierDockWidget(QDockWidget):
                 )
             except Exception:
                 pass
-        self.layer_combo.setAllowEmptyLayer(True, "(select a point-cloud layer)")
+        self.layer_combo.setAllowEmptyLayer(
+            True, "(select a point-cloud layer)")
         self.layer_combo.setShowCrs(False)
         layer_row.addWidget(self.layer_combo, 1)
 
@@ -420,7 +427,9 @@ class ClassifierDockWidget(QDockWidget):
         )
 
         add_files_action = QAction(
-            _qgis_icon("mActionAdd.svg", QStyle.StandardPixmap.SP_FileDialogStart),
+            _qgis_icon(
+                "mActionAdd.svg",
+                QStyle.StandardPixmap.SP_FileDialogStart),
             "Add files...",
             self,
         )
@@ -493,7 +502,8 @@ class ClassifierDockWidget(QDockWidget):
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
         self.output_widget = QgsFileWidget()
-        self.output_widget.setStorageMode(QgsFileWidget.StorageMode.GetDirectory)
+        self.output_widget.setStorageMode(
+            QgsFileWidget.StorageMode.GetDirectory)
         self.output_widget.setDialogTitle("Select output folder")
         if self._saved_output_dir:
             self.output_widget.setFilePath(self._saved_output_dir)
@@ -587,7 +597,8 @@ class ClassifierDockWidget(QDockWidget):
 
         self.tile_auto_check = QCheckBox("Auto-size (~10 M points per tile)")
         self.tile_auto_check.setChecked(self._saved_tile_auto)
-        self.tile_auto_check.toggled.connect(self._update_tile_controls_enabled)
+        self.tile_auto_check.toggled.connect(
+            self._update_tile_controls_enabled)
         perf_form.addRow("", self.tile_auto_check)
 
         self.tile_size_spin = QDoubleSpinBox()
@@ -669,7 +680,8 @@ class ClassifierDockWidget(QDockWidget):
         on = self.tile_check.isChecked()
         self.tile_auto_check.setEnabled(on)
         self.tile_buffer_spin.setEnabled(on)
-        self.tile_size_spin.setEnabled(on and not self.tile_auto_check.isChecked())
+        self.tile_size_spin.setEnabled(
+            on and not self.tile_auto_check.isChecked())
         if hasattr(self, "tile_streaming_check"):
             self.tile_streaming_check.setEnabled(on)
             # When tiling is turned off, also force-uncheck streaming
@@ -894,7 +906,8 @@ class ClassifierDockWidget(QDockWidget):
             self._on_files_dropped([Path(p) for p in paths])
 
     def _add_folder(self):
-        folder = QFileDialog.getExistingDirectory(self, "Select folder of LAS/LAZ files")
+        folder = QFileDialog.getExistingDirectory(
+            self, "Select folder of LAS/LAZ files")
         if folder:
             found = find_las_files(folder)
             if not found:
@@ -945,7 +958,8 @@ class ClassifierDockWidget(QDockWidget):
         dlg_layout.addWidget(QLabel("Tick the layers to add:"))
 
         layer_list = QListWidget()
-        layer_list.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        layer_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection)
         for name, path in candidates:
             item = QListWidgetItem(f"{name}    —   {path.name}")
             item.setToolTip(str(path))
@@ -1012,7 +1026,8 @@ class ClassifierDockWidget(QDockWidget):
         ]
         for path in selected_paths:
             for row in range(self.file_list.count() - 1, -1, -1):
-                if self.file_list.item(row).data(Qt.ItemDataRole.UserRole) == path:
+                if self.file_list.item(row).data(
+                        Qt.ItemDataRole.UserRole) == path:
                     self.file_list.takeItem(row)
                     break
         self.files = [f for f in self.files if f not in selected_paths]
@@ -1039,7 +1054,9 @@ class ClassifierDockWidget(QDockWidget):
         )
 
     def _update_run_button(self):
-        enabled = bool(self.files) and self.model_ready and bool(self.output_widget.filePath())
+        enabled = bool(
+            self.files) and self.model_ready and bool(
+            self.output_widget.filePath())
         self.run_btn.setEnabled(enabled)
 
     # ------------------------------------------------------------------
@@ -1108,7 +1125,8 @@ class ClassifierDockWidget(QDockWidget):
         self.cancel_btn.setEnabled(False)
         self.progress_bar.setValue(100)
         count = len(self.task.output_files) if self.task else 0
-        self.current_file_label.setText(f"Complete - {count} file(s) processed")
+        self.current_file_label.setText(
+            f"Complete - {count} file(s) processed")
         self._log(f"Classification complete: {count} file(s) processed")
 
         if self.load_result_check.isChecked() and self.task:
@@ -1149,7 +1167,8 @@ class ClassifierDockWidget(QDockWidget):
         try:
             from qgis.core import QgsPointCloudLayer
         except ImportError:
-            log_warning("QgsPointCloudLayer not available in this QGIS version")
+            log_warning(
+                "QgsPointCloudLayer not available in this QGIS version")
             self.message_bar.pushMessage(
                 "Cannot auto-load: QgsPointCloudLayer not available in "
                 "this QGIS build. Drag the file from the file manager.",
@@ -1194,7 +1213,8 @@ class ClassifierDockWidget(QDockWidget):
 
         if failures:
             head = failures[0]
-            extra = f" (+{len(failures) - 1} more)" if len(failures) > 1 else ""
+            extra = f" (+{len(failures) -
+                          1} more)" if len(failures) > 1 else ""
             self.message_bar.pushMessage(
                 f"Output ready but auto-load failed for "
                 f"'{head[0].name}'{extra}: {head[1]}. "
@@ -1218,5 +1238,3 @@ class ClassifierDockWidget(QDockWidget):
     def _on_log_message(self, message, tag, level):
         if tag == LOG_TAG:
             self._log(message)
-
-
