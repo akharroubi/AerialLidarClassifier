@@ -2,6 +2,82 @@
 
 from .logger import log_info, log_warning
 
+
+def enable_point_cloud_3d_rendering(layer) -> bool:
+    """Attach a classification-coloured 3D renderer to a point-cloud layer.
+
+    When QGIS adds a ``QgsPointCloudLayer`` via Python without an
+    explicit 3D renderer, opening a 3D Map View shows the layer as a
+    flat 2D sprite (or invisibly). This helper wires up a 3D symbol
+    keyed on the standard ASPRS ``Classification`` attribute so the
+    layer renders correctly as a 3D point cloud immediately after
+    auto-load - no manual ``Layer Properties -> 3D View`` step.
+
+    Symbol preference: classification-categorised first (proper ASPRS
+    palette), then colour-ramp-by-attribute, then single colour. Each
+    is wrapped in feature-detection ``try/except`` so we degrade
+    gracefully on older / leaner QGIS builds.
+
+    Args:
+        layer: A ``QgsPointCloudLayer`` already added to the project.
+
+    Returns:
+        True if a 3D renderer was attached, False otherwise (in which
+        case the user can still open Layer Properties manually).
+    """
+    try:
+        from qgis.core import QgsPointCloudLayer3DRenderer
+    except ImportError:
+        log_warning(
+            "3D point-cloud rendering classes not available in this "
+            "QGIS build; skipping auto-3D setup."
+        )
+        return False
+
+    symbol = None
+    # Preferred: classification-categorised symbol (matches user
+    # intent for an ASPRS-classified file).
+    try:
+        from qgis.core import QgsClassificationPointCloud3DSymbol
+        symbol = QgsClassificationPointCloud3DSymbol()
+        symbol.setAttribute("Classification")
+    except (ImportError, AttributeError):
+        pass
+
+    # Fallback 1: colour ramp keyed on Classification.
+    if symbol is None:
+        try:
+            from qgis.core import QgsColorRampPointCloud3DSymbol
+            symbol = QgsColorRampPointCloud3DSymbol()
+            symbol.setAttribute("Classification")
+        except (ImportError, AttributeError):
+            pass
+
+    # Fallback 2: single colour - at least the points show up in 3D.
+    if symbol is None:
+        try:
+            from qgis.core import QgsSingleColorPointCloud3DSymbol
+            symbol = QgsSingleColorPointCloud3DSymbol()
+        except (ImportError, AttributeError):
+            log_warning(
+                "No usable point-cloud 3D symbol class in this QGIS "
+                "build; 3D rendering remains off for the layer."
+            )
+            return False
+
+    # Reasonable default point size; user can change in Layer Properties.
+    try:
+        symbol.setPointSize(2.0)
+    except (AttributeError, TypeError):
+        pass
+
+    renderer3d = QgsPointCloudLayer3DRenderer()
+    renderer3d.setSymbol(symbol)
+    layer.setRenderer3D(renderer3d)
+    log_info(f"3D rendering enabled for layer '{layer.name()}'")
+    return True
+
+
 # Lazy torch import to avoid loading CUDA DLLs at plugin start.
 _torch = None
 

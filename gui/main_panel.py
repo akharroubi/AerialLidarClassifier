@@ -1192,6 +1192,10 @@ class ClassifierDockWidget(QDockWidget):
             )
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
+                # Attach a 3D renderer so 3D Map Views show the points
+                # correctly instead of as a flat 2D sprite.
+                from ..utils.helpers import enable_point_cloud_3d_rendering
+                enable_point_cloud_3d_rendering(layer)
                 log_info(f"Loaded layer: {output_path.stem}")
                 loaded += 1
                 continue

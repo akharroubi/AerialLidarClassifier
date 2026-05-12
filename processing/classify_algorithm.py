@@ -561,6 +561,13 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         # Add to project (and to context so the Processing post-processor
         # also tracks the layer when the algorithm is run from a model).
         QgsProject.instance().addMapLayer(layer)
+
+        # Wire up a 3D renderer so the layer renders correctly as soon
+        # as the user opens a 3D Map View - without this, QGIS shows the
+        # layer as a flat 2D sprite inside the 3D view.
+        from ..utils.helpers import enable_point_cloud_3d_rendering
+        enable_point_cloud_3d_rendering(layer)
+
         feedback.pushInfo(
             self.tr(f"Loaded layer '{output_path.stem}' into the project.")
         )
