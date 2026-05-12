@@ -28,7 +28,8 @@ def sliding_blocks_point_indices(pts, block_size, overlap_ratio):
     pts = np.asarray(pts, float)
     ndim = pts.shape[1]
     if ndim not in (2, 3):
-        raise ValueError("Only 2D or 3D points are supported (shape (N,2) or (N,3)).")
+        raise ValueError(
+            "Only 2D or 3D points are supported (shape (N,2) or (N,3)).")
 
     bs = np.asarray(block_size, float)
     if bs.size != ndim:
@@ -45,12 +46,15 @@ def sliding_blocks_point_indices(pts, block_size, overlap_ratio):
     idx0 = np.floor(rel).astype(int)  # shape (N, ndim)
 
     # Prepare indices for the current block and the previous block (clipped)
-    ixs = np.clip(np.stack([idx0[:, 0], idx0[:, 0] - 1], axis=1), 0, dims[0] - 1)
-    iys = np.clip(np.stack([idx0[:, 1], idx0[:, 1] - 1], axis=1), 0, dims[1] - 1)
+    ixs = np.clip(
+        np.stack([idx0[:, 0], idx0[:, 0] - 1], axis=1), 0, dims[0] - 1)
+    iys = np.clip(
+        np.stack([idx0[:, 1], idx0[:, 1] - 1], axis=1), 0, dims[1] - 1)
     N = pts.shape[0]
 
     if ndim == 3:
-        izs = np.clip(np.stack([idx0[:, 2], idx0[:, 2] - 1], axis=1), 0, dims[2] - 1)
+        izs = np.clip(
+            np.stack([idx0[:, 2], idx0[:, 2] - 1], axis=1), 0, dims[2] - 1)
         combos = [(a, b, c) for a in (0, 1) for b in (0, 1) for c in (0, 1)]
         ix = np.stack([ixs[np.arange(N), a] for a, _, _ in combos], axis=1)
         iy = np.stack([iys[np.arange(N), b] for _, b, _ in combos], axis=1)
@@ -64,7 +68,8 @@ def sliding_blocks_point_indices(pts, block_size, overlap_ratio):
                   ) & (pts[:, 2, None] < p_min[2] + iz * stride[2] + bs[2])
         mask = cond_x & cond_y & cond_z
 
-        block_ids = (ix * (dims[1] * dims[2]) + iy * dims[2] + iz).ravel()[mask.ravel()]
+        block_ids = (ix * (dims[1] * dims[2]) + iy *
+                     dims[2] + iz).ravel()[mask.ravel()]
     else:
         # 2D case: only 4 combinations of (ix,iy)
         combos = [(a, b) for a in (0, 1) for b in (0, 1)]
@@ -113,7 +118,8 @@ def filterPoints(
         use_cuda=True,
         progress_callback=lambda x: None):
     progress_callback(10)
-    # laod variables from the config file (e.g. woodcls_branch_tls_segformer3D_112_4cm(GPU8GB).json
+    # laod variables from the config file (e.g.
+    # woodcls_branch_tls_segformer3D_112_4cm(GPU8GB).json
     try:
         with open(config_file) as json_file:
             configs = json.load(json_file)
@@ -199,7 +205,8 @@ def filterPoints(
         nb_idxs.append(nb_idx_u)  # indicies of unique voxels from each block
         # indices used to reproject the unique voxels to original order
         nb_inverse_idxs.append(nb_inverse_idx)
-        nb_pcd_idxs.append(nb_pcd_idx)  # within-voxel point indices from the point cloud
+        # within-voxel point indices from the point cloud
+        nb_pcd_idxs.append(nb_pcd_idx)
 
     progress_callback(15)
 
@@ -215,7 +222,10 @@ def filterPoints(
             if len(nb_idx) > 0:
                 x[nb_idx, :] = 1.0
 
-            x = torch.swapaxes(torch.moveaxis(x.reshape((1, *nbmat_sz, 1)).float(), -1, 1), -1, 2)
+            x = torch.swapaxes(
+                torch.moveaxis(
+                    x.reshape(
+                        (1, *nbmat_sz, 1)).float(), -1, 1), -1, 2)
             with torch.no_grad():
                 h = model(x.to(device))
 
@@ -243,7 +253,10 @@ def filterPoints(
             if len(nb_idx) > 0:
                 x[nb_idx, :] = 1.0
 
-            x = torch.swapaxes(torch.moveaxis(x.reshape((1, *nbmat_sz, 1)).float(), -1, 1), -1, 2)
+            x = torch.swapaxes(
+                torch.moveaxis(
+                    x.reshape(
+                        (1, *nbmat_sz, 1)).float(), -1, 1), -1, 2)
             with torch.no_grad():
                 h = model(x.to(device))
 
@@ -261,7 +274,8 @@ def filterPoints(
         # pcd_pred[pcd_pred > 2.0] = 2.0
         if if_bottom_only:
             seen = np.zeros_like(pcd_pred, dtype=bool)
-            seen[np.concatenate(nb_pcd_idxs)] = True  # mark every index that was ever visited
+            # mark every index that was ever visited
+            seen[np.concatenate(nb_pcd_idxs)] = True
             pcd_pred[~seen] = True
 
         progress_callback(100)

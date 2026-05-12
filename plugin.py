@@ -321,7 +321,8 @@ class AerialLidarClassifierPlugin:
         from .gui.main_panel import ClassifierDockWidget
         self.dock = ClassifierDockWidget(self.iface, self.iface.mainWindow())
         self.dock.visibilityChanged.connect(self._on_dock_visibility_changed)
-        self.iface.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
+        self.iface.addDockWidget(
+            Qt.DockWidgetArea.RightDockWidgetArea, self.dock)
 
     def _on_dock_visibility_changed(self, visible: bool):
         if self.toggle_action:

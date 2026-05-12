@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from timm.models.layers import DropPath, trunc_normal_, to_3tuple
+from timm.models.layers import DropPath, to_3tuple
 
 
 class DyT(nn.Module):
@@ -52,13 +52,23 @@ class EfficientAttention(nn.Module):
         # Spatial reduction for memory efficiency
         self.sr_ratio = sr_ratio
         if sr_ratio > 1:
-            self.sr = nn.Conv3d(dim, dim, kernel_size=sr_ratio, stride=sr_ratio)
+            self.sr = nn.Conv3d(
+                dim, dim, kernel_size=sr_ratio, stride=sr_ratio)
             self.sr_norm = DyT(dim)
 
     def forward(self, x, D, H, W):
         B, N, C = x.shape
         # Compute queries
-        q = self.q(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        q = self.q(x).reshape(
+            B,
+            N,
+            self.num_heads,
+            C //
+            self.num_heads).permute(
+            0,
+            2,
+            1,
+            3)
 
         # Apply spatial reduction for keys and values if needed
         if self.sr_ratio > 1:
@@ -66,11 +76,15 @@ class EfficientAttention(nn.Module):
             x_ = self.sr(x_)
             x_ = x_.reshape(B, C, -1).permute(0, 2, 1)
             x_ = self.sr_norm(x_)
-            k = self.k(x_).reshape(B, -1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-            v = self.v(x_).reshape(B, -1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+            k = self.k(x_).reshape(B, -1, self.num_heads, C //
+                                   self.num_heads).permute(0, 2, 1, 3)
+            v = self.v(x_).reshape(B, -1, self.num_heads, C //
+                                   self.num_heads).permute(0, 2, 1, 3)
         else:
-            k = self.k(x).reshape(B, -1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
-            v = self.v(x).reshape(B, -1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+            k = self.k(x).reshape(B, -1, self.num_heads, C //
+                                  self.num_heads).permute(0, 2, 1, 3)
+            v = self.v(x).reshape(B, -1, self.num_heads, C //
+                                  self.num_heads).permute(0, 2, 1, 3)
 
         # Scale queries
         q = q * self.scale
@@ -144,7 +158,8 @@ class Block(nn.Module):
             dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,
             attn_drop=attn_drop, proj_drop=drop, sr_ratio=sr_ratio)
 
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+        self.drop_path = DropPath(
+            drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = DyT(dim)
 
         # Reduced MLP ratio for memory efficiency
@@ -165,7 +180,13 @@ class Block(nn.Module):
 class OverlapPatchEmbed(nn.Module):
     """Image to Patch Embedding with overlapping patches"""
 
-    def __init__(self, block3d_size=224, patch_size=7, stride=4, in_chans=1, embed_dim=768):
+    def __init__(
+            self,
+            block3d_size=224,
+            patch_size=7,
+            stride=4,
+            in_chans=1,
+            embed_dim=768):
         super().__init__()
         block3d_size = to_3tuple(block3d_size)
         patch_size = to_3tuple(patch_size)
@@ -180,9 +201,14 @@ class OverlapPatchEmbed(nn.Module):
 
         # Memory-efficient projection
         self.proj = nn.Conv3d(
-            in_chans, embed_dim, kernel_size=patch_size, stride=stride,
-            padding=(patch_size[0] // 2, patch_size[1] // 2, patch_size[2] // 2)
-        )
+            in_chans,
+            embed_dim,
+            kernel_size=patch_size,
+            stride=stride,
+            padding=(
+                patch_size[0] // 2,
+                patch_size[1] // 2,
+                patch_size[2] // 2))
 
         self.norm = DyT(embed_dim)
 
@@ -292,7 +318,11 @@ class Segformer(nn.Module):
             embed_dim=embed_dims[3])
 
         # Configure stochastic depth decay rule
-        dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]
+        dpr = [
+            x.item() for x in torch.linspace(
+                0,
+                drop_path_rate,
+                sum(depths))]
         cur = 0
 
         # Transformer blocks
@@ -344,10 +374,18 @@ class Segformer(nn.Module):
         self.norm4 = DyT(embed_dims[3])
 
         # Lightweight decoder
-        self.linear_c4 = LinearMLP(input_dim=embed_dims[3], embed_dim=decoder_dim)
-        self.linear_c3 = LinearMLP(input_dim=embed_dims[2], embed_dim=decoder_dim)
-        self.linear_c2 = LinearMLP(input_dim=embed_dims[1], embed_dim=decoder_dim)
-        self.linear_c1 = LinearMLP(input_dim=embed_dims[0], embed_dim=decoder_dim)
+        self.linear_c4 = LinearMLP(
+            input_dim=embed_dims[3],
+            embed_dim=decoder_dim)
+        self.linear_c3 = LinearMLP(
+            input_dim=embed_dims[2],
+            embed_dim=decoder_dim)
+        self.linear_c2 = LinearMLP(
+            input_dim=embed_dims[1],
+            embed_dim=decoder_dim)
+        self.linear_c1 = LinearMLP(
+            input_dim=embed_dims[0],
+            embed_dim=decoder_dim)
 
         # Memory-efficient skip connections
         self.skip_fusions = nn.ModuleList([
@@ -383,28 +421,32 @@ class Segformer(nn.Module):
         # Stage 1
         x, D, H, W = self.patch_embed1(x)
         x = self._forward_block(x, self.block1, self.norm1, D, H, W)
-        x_reshaped = x.reshape(B, D, H, W, -1).permute(0, 4, 1, 2, 3).contiguous()
+        x_reshaped = x.reshape(B, D, H, W, -
+                               1).permute(0, 4, 1, 2, 3).contiguous()
         features.append(x_reshaped)
 
         # Stage 2
         # x = x_reshaped.permute(0, 2, 3, 4, 1).reshape(B, D * H * W, -1)
         x, D, H, W = self.patch_embed2(x_reshaped)
         x = self._forward_block(x, self.block2, self.norm2, D, H, W)
-        x_reshaped = x.reshape(B, D, H, W, -1).permute(0, 4, 1, 2, 3).contiguous()
+        x_reshaped = x.reshape(B, D, H, W, -
+                               1).permute(0, 4, 1, 2, 3).contiguous()
         features.append(x_reshaped)
 
         # Stage 3
         # x = x_reshaped.permute(0, 2, 3, 4, 1).reshape(B, D * H * W, -1)
         x, D, H, W = self.patch_embed3(x_reshaped)
         x = self._forward_block(x, self.block3, self.norm3, D, H, W)
-        x_reshaped = x.reshape(B, D, H, W, -1).permute(0, 4, 1, 2, 3).contiguous()
+        x_reshaped = x.reshape(B, D, H, W, -
+                               1).permute(0, 4, 1, 2, 3).contiguous()
         features.append(x_reshaped)
 
         # Stage 4
         # x = x_reshaped.permute(0, 2, 3, 4, 1).reshape(B, D * H * W, -1)
         x, D, H, W = self.patch_embed4(x_reshaped)
         x = self._forward_block(x, self.block4, self.norm4, D, H, W)
-        x_reshaped = x.reshape(B, D, H, W, -1).permute(0, 4, 1, 2, 3).contiguous()
+        x_reshaped = x.reshape(B, D, H, W, -
+                               1).permute(0, 4, 1, 2, 3).contiguous()
         features.append(x_reshaped)
 
         return features
@@ -425,19 +467,34 @@ class Segformer(nn.Module):
 
         # Memory-efficient upsampling and skip connection fusion
         # C4 -> C3
-        x = F.interpolate(x, size=c3.size()[2:], mode='trilinear', align_corners=False)
+        x = F.interpolate(
+            x,
+            size=c3.size()[
+                2:],
+            mode='trilinear',
+            align_corners=False)
         c3_feat = self.linear_c3(c3).permute(0, 2, 1).reshape(
             n, -1, c3.shape[2], c3.shape[3], c3.shape[4])
         x = self.skip_fusions[0](x, c3_feat)
 
         # C3 -> C2
-        x = F.interpolate(x, size=c2.size()[2:], mode='trilinear', align_corners=False)
+        x = F.interpolate(
+            x,
+            size=c2.size()[
+                2:],
+            mode='trilinear',
+            align_corners=False)
         c2_feat = self.linear_c2(c2).permute(0, 2, 1).reshape(
             n, -1, c2.shape[2], c2.shape[3], c2.shape[4])
         x = self.skip_fusions[1](x, c2_feat)
 
         # C2 -> C1
-        x = F.interpolate(x, size=c1.size()[2:], mode='trilinear', align_corners=False)
+        x = F.interpolate(
+            x,
+            size=c1.size()[
+                2:],
+            mode='trilinear',
+            align_corners=False)
         c1_feat = self.linear_c1(c1).permute(0, 2, 1).reshape(
             n, -1, c1.shape[2], c1.shape[3], c1.shape[4])
         x = self.skip_fusions[2](x, c1_feat)

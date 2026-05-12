@@ -113,20 +113,41 @@ class DataItem:
 #   Unclassified = light gray.
 DEFAULT_CLASS_MAPPING: Dict[int, ClassInfo] = {
     1: ClassInfo(1, "Ground", 2, "#A87E55"),       # ASPRS 2 - Ground (brown)
-    2: ClassInfo(2, "Vegetation", 5, "#228B22"),   # ASPRS 5 - High Veg (dark green)
-    3: ClassInfo(3, "Vehicles", 1, "#C0C0C0"),     # ASPRS 1 - Unclassified (light gray)
-    4: ClassInfo(4, "Wiring", 14, "#FFA500"),      # ASPRS 14 - Wire-Conductor (orange)
-    5: ClassInfo(5, "Fence", 1, "#C0C0C0"),        # ASPRS 1 - Unclassified (light gray)
-    6: ClassInfo(6, "Pole", 15, "#FF00FF"),        # ASPRS 15 - Transmission Tower (magenta)
+    # ASPRS 5 - High Veg (dark green)
+    2: ClassInfo(2, "Vegetation", 5, "#228B22"),
+    # ASPRS 1 - Unclassified (light gray)
+    3: ClassInfo(3, "Vehicles", 1, "#C0C0C0"),
+    # ASPRS 14 - Wire-Conductor (orange)
+    4: ClassInfo(4, "Wiring", 14, "#FFA500"),
+    # ASPRS 1 - Unclassified (light gray)
+    5: ClassInfo(5, "Fence", 1, "#C0C0C0"),
+    # ASPRS 15 - Transmission Tower (magenta)
+    6: ClassInfo(6, "Pole", 15, "#FF00FF"),
     7: ClassInfo(7, "Building", 6, "#FF0000"),     # ASPRS 6 - Building (red)
 }
 
 # Standard ASPRS class names for dropdowns
 ASPRS_CLASSES = {
-    0: "Unclassified", 1: "Unassigned", 2: "Ground", 3: "Low Vegetation",
-    4: "Medium Vegetation", 5: "High Vegetation", 6: "Building", 7: "Low Point",
-    8: "Reserved", 9: "Water", 10: "Rail", 11: "Road Surface", 12: "Reserved",
-    13: "Wire - Guard", 14: "Wire - Conductor", 15: "Transmission Tower",
-    16: "Wire - Connector", 17: "Bridge Deck", 18: "High Noise", 19: "Overhead Structure",
-    20: "Ignored Ground", 21: "Snow", 22: "Temporal Exclusion"
-}
+    0: "Unclassified",
+    1: "Unassigned",
+    2: "Ground",
+    3: "Low Vegetation",
+    4: "Medium Vegetation",
+    5: "High Vegetation",
+    6: "Building",
+    7: "Low Point",
+    8: "Reserved",
+    9: "Water",
+    10: "Rail",
+    11: "Road Surface",
+    12: "Reserved",
+    13: "Wire - Guard",
+    14: "Wire - Conductor",
+    15: "Transmission Tower",
+    16: "Wire - Connector",
+    17: "Bridge Deck",
+    18: "High Noise",
+    19: "Overhead Structure",
+    20: "Ignored Ground",
+    21: "Snow",
+    22: "Temporal Exclusion"}

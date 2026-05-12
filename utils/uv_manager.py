@@ -15,7 +15,6 @@ import sys
 import tarfile
 import tempfile
 import zipfile
-from typing import Callable, Optional, Tuple
 
 from qgis.core import Qgis, QgsBlockingNetworkRequest, QgsMessageLog
 from qgis.PyQt.QtCore import QUrl
@@ -39,7 +38,10 @@ def _log(message, level=Qgis.Info):
         message: The message to log.
         level: The log level (Qgis.Info, Qgis.Warning, Qgis.Critical).
     """
-    QgsMessageLog.logMessage(str(message), "Aerial LiDAR Classifier", level=level)
+    QgsMessageLog.logMessage(
+        str(message),
+        "Aerial LiDAR Classifier",
+        level=level)
 
 
 def get_uv_path():
@@ -136,8 +138,7 @@ def download_uv(progress_callback=None, cancel_check=None):
             error_msg = request.errorMessage()
             if "404" in error_msg or "Not Found" in error_msg:
                 error_msg = (
-                    f"uv {UV_VERSION} not available for this platform. URL: {url}"
-                )
+                    f"uv {UV_VERSION} not available for this platform. URL: {url}")
             else:
                 error_msg = f"Download failed: {error_msg}"
             _log(error_msg, Qgis.Critical)

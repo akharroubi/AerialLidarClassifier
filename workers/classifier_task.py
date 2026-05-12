@@ -275,7 +275,7 @@ class ClassificationTask(QgsTask):
     def run(self) -> bool:
         try:
             import laspy
-            t = _get_torch()  # noqa: F841 - ensures torch DLL path is set
+            _get_torch()  # ensures torch DLL path is set on Windows
             from ..core.classifier_core import filterPoints
 
             self.out_dir.mkdir(parents=True, exist_ok=True)

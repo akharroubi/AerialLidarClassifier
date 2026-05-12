@@ -72,7 +72,6 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "<b>UrbanFiltering</b> model from the "
             "<a href=\"https://github.com/NRCan/TreeAIBox\">TreeAIBox</a> "
             "project (Z. Xi - NRCan, &copy; Crown Copyright, CC BY-NC 4.0).</p>"
-
             "<h4>Output classes</h4>"
             "<p>The model produces five primary classes mapped to standard "
             "ASPRS LAS 1.4 codes, plus two auxiliary classes routed to "
@@ -87,14 +86,12 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "<tr><td>Vehicles <i>(aux.)</i></td><td>1 - Unclassified</td></tr>"
             "<tr><td>Fence <i>(aux.)</i></td><td>1 - Unclassified</td></tr>"
             "</table>"
-
             "<h4>ASPRS compliance</h4>"
             "<p>By default the classification is written to the standard "
             "LAS <code>classification</code> dimension. The file is "
             "automatically promoted to <b>LAS 1.4 / point format 6</b> "
             "when an assigned code exceeds the 5-bit legacy limit of point "
             "formats 0-5, so any ASPRS code 0-255 is encoded losslessly.</p>"
-
             "<h4>Parameters</h4>"
             "<ul>"
             "<li><b>Input point cloud</b> - a single LAS, LAZ or "
@@ -117,7 +114,6 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "in -> <code>.las</code> out, anything else -> <code>.laz</code>. "
             "COPC inputs are written as plain LAZ (the COPC spatial "
             "index is not regenerated).</p>"
-
             "<h4>Advanced parameters - tiling and streaming</h4>"
             "<p>Open the <b>Advanced Parameters</b> fold below to access:</p>"
             "<ul>"
@@ -139,15 +135,13 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "Memory footprint is roughly 4 bytes/point + one tile + one "
             "chunk. Requires tiling to be enabled.</li>"
             "</ul>"
-
             "<h4>Notes</h4>"
             "<ul>"
             "<li>The class mapping is internal and not user-editable - the "
             "output is always ASPRS-compliant by construction. The five "
             "primary classes map to their standard ASPRS codes; Vehicles "
             "and Fences map to <i>Unclassified</i> (ASPRS 1).</li>"
-            "</ul>"
-        )
+            "</ul>")
 
     def initAlgorithm(self, config=None):  # noqa: N802
         self.addParameter(
@@ -251,7 +245,10 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         self.addParameter(param)
 
     # ------------------------------------------------------------------
-    def _guard_input_output_collision(self, input_path: Path, output_path: Path) -> None:
+    def _guard_input_output_collision(
+            self,
+            input_path: Path,
+            output_path: Path) -> None:
         """Raise if writing would overwrite the input file in place."""
         try:
             same = input_path.resolve() == output_path.resolve()
@@ -307,7 +304,8 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         output_folder = Path(
             self.parameterAsString(parameters, self.OUTPUT_FOLDER, context)
         )
-        suffix = self.parameterAsString(parameters, self.SUFFIX, context) or "_classified"
+        suffix = self.parameterAsString(
+            parameters, self.SUFFIX, context) or "_classified"
         field_name = (
             self.parameterAsString(parameters, self.FIELD_NAME, context)
             or "classification"
@@ -339,7 +337,8 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException(
                 self.tr("CUDA was requested but no usable GPU is available.")
             )
-        use_cuda = (device_choice == 0 and cuda_available) or device_choice == 1
+        use_cuda = (
+            device_choice == 0 and cuda_available) or device_choice == 1
 
         # Imports deferred until dependencies are confirmed
         import laspy

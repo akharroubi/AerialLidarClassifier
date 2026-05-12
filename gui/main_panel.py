@@ -59,7 +59,6 @@ from ..config import (
     DEFAULT_CLASS_MAPPING,
     MODEL_INFO,
     PLUGIN_NAME,
-    PLUGIN_VERSION,
     SETTINGS_PREFIX,
     TILE_DEFAULT_BUFFER_M,
 )

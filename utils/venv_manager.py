@@ -3115,7 +3115,7 @@ def create_venv_and_install(
         with open(test_file, "w") as f:
             f.write("test")
         os.remove(test_file)
-    except OSError as e:
+    except OSError:
         if os.environ.get("AERIAL_LIDAR_CLASSIFIER_CACHE_DIR") or os.environ.get(
                 "AERIAL_LIDAR_CLASSIFIER_VENV_DIR"):
             hint = f"The AERIAL_LIDAR_CLASSIFIER_CACHE_DIR is set to: {CACHE_DIR}"

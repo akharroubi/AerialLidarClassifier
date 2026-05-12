@@ -30,7 +30,8 @@ STANDALONE_DIR = os.path.join(CACHE_DIR, "python_standalone")
 # Release tag from python-build-standalone
 RELEASE_TAG = "20241219"
 
-# Mapping of Python minor versions to their latest patch versions in the release
+# Mapping of Python minor versions to their latest patch versions in the
+# release
 PYTHON_VERSIONS = {
     (3, 9): "3.9.21",
     (3, 10): "3.10.16",
@@ -64,13 +65,17 @@ def _safe_extract_tar(tar: tarfile.TarFile, dest_dir: str) -> None:
     use_filter = sys.version_info >= (3, 12)
     for member in tar.getmembers():
         member_path = os.path.realpath(os.path.join(dest_dir, member.name))
-        if not member_path.startswith(dest_dir + os.sep) and member_path != dest_dir:
-            raise ValueError(f"Attempted path traversal in tar archive: {member.name}")
+        if not member_path.startswith(
+                dest_dir + os.sep) and member_path != dest_dir:
+            raise ValueError(
+                f"Attempted path traversal in tar archive: {
+                    member.name}")
         # On Python <3.12 the ``filter="data"`` safety mechanism is not
         # available, so explicitly reject symlinks and hardlinks that
         # could escape the destination directory.
         if not use_filter and (member.issym() or member.islnk()):
-            raise ValueError(f"Refusing symlink/hardlink in tar archive: {member.name}")
+            raise ValueError(
+                f"Refusing symlink/hardlink in tar archive: {member.name}")
         if use_filter:
             tar.extract(member, dest_dir, filter="data")
         else:
@@ -90,8 +95,10 @@ def _safe_extract_zip(zip_file: zipfile.ZipFile, dest_dir: str) -> None:
     dest_dir = os.path.realpath(dest_dir)
     for member in zip_file.namelist():
         member_path = os.path.realpath(os.path.join(dest_dir, member))
-        if not member_path.startswith(dest_dir + os.sep) and member_path != dest_dir:
-            raise ValueError(f"Attempted path traversal in zip archive: {member}")
+        if not member_path.startswith(
+                dest_dir + os.sep) and member_path != dest_dir:
+            raise ValueError(
+                f"Attempted path traversal in zip archive: {member}")
         zip_file.extract(member, dest_dir)
 
 
@@ -181,8 +188,7 @@ def get_download_url() -> str:
     platform_str, ext = _get_platform_info()
 
     filename = (
-        f"cpython-{python_version}+{RELEASE_TAG}-{platform_str}-install_only{ext}"
-    )
+        f"cpython-{python_version}+{RELEASE_TAG}-{platform_str}-install_only{ext}")
     url = (
         f"https://github.com/astral-sh/python-build-standalone/releases/"
         f"download/{RELEASE_TAG}/{filename}"
@@ -285,12 +291,17 @@ def download_python_standalone(
 
         if progress_callback:
             total_mb = len(content) / (1024 * 1024)
-            progress_callback(5, f"Downloaded {total_mb:.1f} MB, extracting...")
+            progress_callback(
+                5, f"Downloaded {
+                    total_mb:.1f} MB, extracting...")
 
         with open(temp_path, "wb") as f:
             f.write(content.data())
 
-        _log(f"Download complete ({len(content)} bytes), extracting...", Qgis.Info)
+        _log(
+            f"Download complete ({
+                len(content)} bytes), extracting...",
+            Qgis.Info)
 
         if progress_callback:
             progress_callback(6, "Extracting Python...")
@@ -328,7 +339,11 @@ def download_python_standalone(
 
         if sys.platform == "win32":
             error_lower = str(e).lower()
-            if any(w in error_lower for w in ("denied", "access", "permission")):
+            if any(
+                w in error_lower for w in (
+                    "denied",
+                    "access",
+                    "permission")):
                 antivirus_help = (
                     "This may be caused by antivirus software blocking "
                     "the extraction.\nPlease try:\n"

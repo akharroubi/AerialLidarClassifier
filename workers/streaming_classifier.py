@@ -315,7 +315,8 @@ def _pass2_partition(
 
             global_offset += n_chunk
             chunk_idx += 1
-            progress_callback(min(40.0, (global_offset / max(n_points, 1)) * 40.0))
+            progress_callback(
+                min(40.0, (global_offset / max(n_points, 1)) * 40.0))
 
     return True
 
@@ -388,8 +389,8 @@ def _pass3_inference(
 
         if tile_preds is None:
             emit_warning(
-                f"Streaming tile {tile_idx + 1}/{n_tiles} returned no predictions."
-            )
+                f"Streaming tile {
+                    tile_idx + 1}/{n_tiles} returned no predictions.")
             continue
 
         in_core = (
@@ -616,7 +617,8 @@ def _pass4_write(
 
                 writer.write_points(out_chunk)
                 global_offset += n
-                progress_callback(min(99.0, 90.0 + (global_offset / max(n_points, 1)) * 9.0))
+                progress_callback(
+                    min(99.0, 90.0 + (global_offset / max(n_points, 1)) * 9.0))
 
     return True
 

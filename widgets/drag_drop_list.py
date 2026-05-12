@@ -15,7 +15,8 @@ class DragDropList(QListWidget):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection)
         self.setAlternatingRowColors(True)
         self.setUniformItemSizes(True)
 

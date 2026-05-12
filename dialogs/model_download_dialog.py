@@ -54,8 +54,7 @@ class ModelDownloadDialog(QDialog):
 
         info = QLabel(
             "The deep learning model weights need to be downloaded on first use. "
-            "The file is approximately 18 MB."
-        )
+            "The file is approximately 18 MB.")
         info.setWordWrap(True)
         layout.addWidget(info)
 
@@ -117,7 +116,8 @@ class ModelDownloadDialog(QDialog):
             self.progress_bar.setValue(pct)
             mb_dl = downloaded / (1024 * 1024)
             mb_total = total / (1024 * 1024)
-            self.status_label.setText(f"Downloading... {mb_dl:.1f} / {mb_total:.1f} MB")
+            self.status_label.setText(
+                f"Downloading... {mb_dl:.1f} / {mb_total:.1f} MB")
         else:
             mb_dl = downloaded / (1024 * 1024)
             self.status_label.setText(f"Downloading... {mb_dl:.1f} MB")
