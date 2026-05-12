@@ -230,10 +230,54 @@ def _write_deps_hash():
 # ---------------------------------------------------------------------------
 
 
+def _find_nvidia_smi() -> Optional[str]:
+    """Locate the nvidia-smi binary.
+
+    On Linux/macOS this is just ``shutil.which``. On Windows the driver
+    installer doesn't always put nvidia-smi on PATH for the QGIS
+    subprocess environment - it commonly lives in ``System32`` or
+    ``Program Files\\NVIDIA Corporation\\NVSMI``. This helper falls
+    back to those locations so detection works on stock laptop driver
+    installs.
+    """
+    found = shutil.which("nvidia-smi")
+    if found:
+        return found
+
+    if sys.platform != "win32":
+        return None
+
+    candidates = []
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    candidates.append(os.path.join(system_root, "System32", "nvidia-smi.exe"))
+    for env_key in ("ProgramW6432", "ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(env_key)
+        if base:
+            candidates.append(
+                os.path.join(base, "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe")
+            )
+    # Hard-coded defaults as a last resort.
+    candidates.append(r"C:\Windows\System32\nvidia-smi.exe")
+    candidates.append(
+        r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe"
+    )
+
+    seen = set()
+    for path in candidates:
+        if path in seen:
+            continue
+        seen.add(path)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def detect_nvidia_gpu() -> Tuple[bool, dict]:
     """Detect if an NVIDIA GPU is present by querying nvidia-smi.
 
-    Results are cached for the lifetime of the QGIS session.
+    Results are cached for the lifetime of the QGIS session. Every
+    failure path is logged so users can diagnose "GPU not detected"
+    without having to instrument the code themselves.
 
     Returns:
         Tuple of (has_gpu, info_dict). info_dict keys: name, compute_cap,
@@ -243,11 +287,27 @@ def detect_nvidia_gpu() -> Tuple[bool, dict]:
     if _gpu_detect_cache is not None:
         return _gpu_detect_cache
 
+    smi_path = _find_nvidia_smi()
+    if smi_path is None:
+        _log(
+            "GPU detection: nvidia-smi not found on PATH or in the "
+            "usual NVIDIA install locations "
+            "(C:\\Windows\\System32 / Program Files\\NVIDIA "
+            "Corporation\\NVSMI). If you have an NVIDIA GPU, install "
+            "the official driver from nvidia.com - the plugin will "
+            "fall back to CPU until nvidia-smi is reachable.",
+            Qgis.Warning,
+        )
+        _gpu_detect_cache = (False, {})
+        return _gpu_detect_cache
+
+    _log(f"GPU detection: using nvidia-smi at {smi_path}", Qgis.Info)
+
     try:
         subprocess_kwargs = _get_subprocess_kwargs()
         result = subprocess.run(
             [
-                "nvidia-smi",
+                smi_path,
                 "--query-gpu=name,compute_cap,driver_version,memory.total",
                 "--format=csv,noheader,nounits",
             ],
@@ -256,52 +316,76 @@ def detect_nvidia_gpu() -> Tuple[bool, dict]:
             timeout=5,
             **subprocess_kwargs,
         )
-        if result.returncode == 0 and result.stdout.strip():
-            lines = result.stdout.strip().split("\n")
-            best_gpu = {}
-            best_compute_cap = -1.0
 
-            for line in lines:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = [p.strip() for p in line.split(",")]
-
-                gpu_info = {}
-                if len(parts) >= 1 and parts[0]:
-                    gpu_info["name"] = parts[0]
-                if len(parts) >= 2 and parts[1]:
-                    try:
-                        gpu_info["compute_cap"] = float(parts[1])
-                    except ValueError:
-                        pass
-                if len(parts) >= 3 and parts[2]:
-                    gpu_info["driver_version"] = parts[2]
-                if len(parts) >= 4 and parts[3]:
-                    try:
-                        gpu_info["memory_mb"] = int(float(parts[3]))
-                    except ValueError:
-                        pass
-
-                cc = gpu_info.get("compute_cap", 0.0)
-                if cc > best_compute_cap:
-                    best_compute_cap = cc
-                    best_gpu = gpu_info
-
-            if not best_gpu:
-                _gpu_detect_cache = (False, {})
-                return _gpu_detect_cache
-
+        if result.returncode != 0:
+            err_tail = (result.stderr or result.stdout or "").strip()[:300]
             _log(
-                "NVIDIA GPU detected (best of {}): {}".format(len(lines), best_gpu),
-                Qgis.Info,
+                f"nvidia-smi exited with code {result.returncode}: "
+                f"{err_tail or '(no output)'}",
+                Qgis.Warning,
             )
-            _gpu_detect_cache = (True, best_gpu)
+            _gpu_detect_cache = (False, {})
             return _gpu_detect_cache
-    except FileNotFoundError:
-        pass
+
+        if not result.stdout.strip():
+            _log(
+                "nvidia-smi returned no output - the driver may be "
+                "installed but no GPU is currently visible to it "
+                "(check Optimus power-saving / GPU disabled in BIOS).",
+                Qgis.Warning,
+            )
+            _gpu_detect_cache = (False, {})
+            return _gpu_detect_cache
+
+        lines = result.stdout.strip().split("\n")
+        best_gpu = {}
+        best_compute_cap = -1.0
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split(",")]
+
+            gpu_info = {}
+            if len(parts) >= 1 and parts[0]:
+                gpu_info["name"] = parts[0]
+            if len(parts) >= 2 and parts[1]:
+                try:
+                    gpu_info["compute_cap"] = float(parts[1])
+                except ValueError:
+                    pass
+            if len(parts) >= 3 and parts[2]:
+                gpu_info["driver_version"] = parts[2]
+            if len(parts) >= 4 and parts[3]:
+                try:
+                    gpu_info["memory_mb"] = int(float(parts[3]))
+                except ValueError:
+                    pass
+
+            cc = gpu_info.get("compute_cap", 0.0)
+            if cc > best_compute_cap:
+                best_compute_cap = cc
+                best_gpu = gpu_info
+
+        if not best_gpu:
+            _log(
+                f"nvidia-smi output parsed to empty GPU info: "
+                f"{result.stdout.strip()[:300]}",
+                Qgis.Warning,
+            )
+            _gpu_detect_cache = (False, {})
+            return _gpu_detect_cache
+
+        _log(
+            "NVIDIA GPU detected (best of {}): {}".format(len(lines), best_gpu),
+            Qgis.Info,
+        )
+        _gpu_detect_cache = (True, best_gpu)
+        return _gpu_detect_cache
+
     except subprocess.TimeoutExpired:
-        _log("nvidia-smi timed out", Qgis.Warning)
+        _log("nvidia-smi timed out after 5s", Qgis.Warning)
     except Exception as e:
         _log(f"nvidia-smi check failed: {e}", Qgis.Warning)
 
