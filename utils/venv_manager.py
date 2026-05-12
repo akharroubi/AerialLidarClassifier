@@ -1322,21 +1322,43 @@ def create_venv(
 
     use_uv = uv_exists()
 
-    if use_uv:
-        uv_path = get_uv_path()
-        uv_python = (
-            system_python or f"{sys.version_info.major}.{sys.version_info.minor}"
+    # Venv creation strategy
+    # ----------------------
+    # We prefer ``python -m venv --copies`` over ``uv venv`` whenever a
+    # base interpreter is available. The ``--copies`` flag makes the
+    # venv's python.exe a byte-for-byte copy of the base interpreter
+    # instead of the small "redirector launcher" that the default mode
+    # (and uv) produces. The redirector is a tiny custom executable
+    # that Windows antivirus heuristics frequently quarantine on
+    # consumer / corporate laptops because it has no cloud-reputation
+    # entry. A copy of the well-known python-build-standalone binary
+    # passes AV cleanly.
+    #
+    # Cost: an extra ~30 MB of disk and ~1-2 seconds of venv creation
+    # time, which is invisible next to the 1-3 GB of wheel downloads
+    # that follow. uv is only used as a fallback when no base
+    # interpreter is reachable (rare - the standalone Python is
+    # downloaded on first run).
+    if system_python:
+        cmd = [system_python, "-m", "venv", "--copies", venv_dir]
+        _log(
+            f"Creating venv with `python -m venv --copies` "
+            f"(AV-friendly): {system_python}",
+            Qgis.Info,
         )
-        cmd = [uv_path, "venv"]
-        if system_python is None:
-            cmd.append("--managed-python")
-        cmd += ["--python", uv_python, venv_dir]
-        _log(f"Creating venv with uv: {uv_path}", Qgis.Info)
+    elif use_uv:
+        uv_path = get_uv_path()
+        uv_python = f"{sys.version_info.major}.{sys.version_info.minor}"
+        cmd = [
+            uv_path, "venv", "--managed-python",
+            "--python", uv_python, venv_dir,
+        ]
+        _log(
+            f"Creating venv with uv-managed Python (fallback): {uv_path}",
+            Qgis.Warning,
+        )
     else:
-        if system_python is None:
-            return False, python_lookup_error
-        cmd = [system_python, "-m", "venv", venv_dir]
-        _log("Creating venv with python -m venv", Qgis.Info)
+        return False, python_lookup_error
 
     try:
         env = _get_clean_env_for_venv()
@@ -1352,9 +1374,11 @@ def create_venv(
         )
 
         if result.returncode != 0 and use_uv and system_python:
-            # uv venv failed; fall back to stdlib venv
+            # uv venv failed; fall back to stdlib venv with --copies
+            # (same AV-friendly rationale as the primary path).
             _log(
-                "uv venv failed ({}), falling back to python -m venv".format(
+                "uv venv failed ({}), falling back to "
+                "python -m venv --copies".format(
                     result.stderr.strip() if result.stderr else result.returncode
                 ),
                 Qgis.Warning,
@@ -1364,7 +1388,7 @@ def create_venv(
             remove_uv()
             use_uv = False
             _cleanup_partial_venv(venv_dir)
-            cmd = [system_python, "-m", "venv", venv_dir]
+            cmd = [system_python, "-m", "venv", "--copies", venv_dir]
             result = subprocess.run(
                 cmd,
                 capture_output=True,
