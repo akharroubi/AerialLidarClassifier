@@ -1,0 +1,152 @@
+# Changelog
+
+All notable changes to **Aerial LiDAR Classifier** will be documented here.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+and the project follows [Semantic Versioning](https://semver.org/).
+
+## [1.0.0] - 2026-05-19
+
+### Added
+- Initial public release on the QGIS plugin repository.
+
+### Dependency management (rewritten)
+- The plugin now installs PyTorch + LiDAR dependencies into an
+  **isolated virtual environment** under
+  `~/.qgis_aerial_lidar_classifier/venv_pyX.Y/` instead of touching the
+  QGIS Python site-packages. This means no conflicts with QGIS itself
+  or with other Python-heavy QGIS plugins.
+- Setup pipeline: download a portable Python (matching the QGIS minor
+  version) from python-build-standalone, download `uv`, create the
+  venv, and install the wheels in one go.
+- **NVIDIA GPU detection is now compute-capability- and driver-aware**.
+  `nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total`
+  is parsed and the right CUDA wheel index is picked - including
+  `cu128` for Blackwell / RTX 50-series and `cu126` on Windows when
+  the driver supports it.
+- A minimum-driver table per CUDA toolkit means we now refuse to
+  install a wheel the user's driver cannot load, instead of failing
+  later at `import torch`.
+- Windows DLL search paths are registered automatically on every load.
+- macOS Rosetta-on-Apple-Silicon detection warns about emulation.
+- Pip / uv errors are pattern-matched (SSL, proxy, network, AV) to
+  give the user actionable messages instead of stderr dumps.
+- A dependency hash + install-logic version is persisted; bumping
+  either forces a clean reinstall on next open. A "Reinstall" button
+  in the setup dock lets the user trigger this manually.
+
+### QGIS plugin guidelines compliance
+- `metadata.txt` now carries an explicit `license=GPL-3.0-or-later`.
+- The model downloader now uses `QgsBlockingNetworkRequest` so the
+  user's QGIS proxy + authentication + certificate settings are
+  respected (instead of calling `requests` directly).
+- The `requests` package was dropped from REQUIRED_PACKAGES.
+
+### Credits
+- Semantic segmentation of aerial LiDAR point clouds into 7 ASPRS classes
+  using the 3D SegFormer **UrbanFiltering** model from the
+  [TreeAIBox](https://github.com/NRCan/TreeAIBox) project
+  (Zhouxin Xi, tested by Charumitha Selvaraj — Natural Resources Canada,
+  Crown Copyright, distributed under CC BY-NC 4.0).
+- Native QGIS-style **dock panel** (right-side, collapsible groups,
+  `QgsFileWidget`, `QgsCollapsibleGroupBox`, `QgsMessageBar`) replacing
+  the previous floating dialog.
+- QGIS **Processing algorithm** + **provider** so the classifier can be
+  used from the Processing Toolbox, the Graphical Modeler and the
+  `qgis_process` CLI.
+- One-click dependency installer for PyTorch (CPU / CUDA 11.8 / CUDA 12.x),
+  laspy, lazrs, timm, numpy_indexed and requests.
+- Automatic NVIDIA GPU detection (CUDA) with CPU fallback and Apple
+  Silicon MPS probing.
+- On-demand model download to the QGIS profile cache with atomic file
+  writes (no partial files left on disk on failure).
+- Translation scaffolding via the standard `i18n/` directory.
+
+### ASPRS compliance
+- **Output is now fully ASPRS-compliant by default.** The classification
+  is written to the standard LAS `classification` dimension (not an
+  extra-byte field).
+- The LAS file is automatically promoted to **point record format 6 and
+  LAS 1.4** when the assigned ASPRS code exceeds the 5-bit limit of the
+  legacy formats (so any code 0-255 can be encoded losslessly).
+- A new **"Write to ASPRS-standard 'classification' field (recommended)"**
+  toggle in the Output group lets advanced users opt out and write to a
+  custom extra-byte field instead.
+
+### Default class mapping
+- The classifier always emits the standard ASPRS-1.4 codes:
+  Ground (2), Vegetation (5), Building (6), Wires (14), Pole (15).
+  Vehicles and Fences are mapped to **ASPRS 1 (Unclassified)** because
+  the LAS spec has no dedicated code for them.
+- The class mapping is **internal-only**: the dock no longer exposes a
+  Class-mapping editor and the matching `class_manager_dialog.py` and
+  QgsSettings persistence helpers were removed. The output is always
+  ASPRS-compliant by construction, which is the only behaviour anyone
+  actually needs in production.
+
+### Output format (simplified)
+- No output-format dropdown. The output extension mirrors the input:
+  `.las` -> `.las`, anything else (including `.copc.laz`) -> `.laz`.
+  COPC inputs are written as plain LAZ (the COPC spatial index is
+  not regenerated). The `OUTPUT_FORMAT` parameter and the PDAL
+  transcoder were removed.
+
+### Spatial tiling for large files
+- New **Performance / Tiling** group in the dock and matching
+  `TILE_ENABLED` / `TILE_SIZE_M` / `TILE_BUFFER_M` parameters in the
+  Processing algorithm.
+- When enabled, the input is split into N x N spatial tiles with a
+  configurable buffer halo. Each tile is classified independently,
+  predictions for buffer points are discarded, and core predictions
+  are merged back. Auto-size targets ~10 M points per tile.
+
+### Preserve existing classes (removed)
+- The "Preserve existing classes" workflow has been removed in
+  favour of a simpler UX. The output is always overwritten with the
+  model's predictions. Users who need partial preservation can run
+  the classifier on a custom extra-byte field name and post-merge
+  externally.
+
+### Streaming I/O (files larger than RAM)
+- New **Streaming I/O** sub-option under tiling (and `TILE_STREAMING`
+  parameter in the Processing algorithm). Implements a 4-pass
+  algorithm:
+    1. Header scan to compute the tile grid.
+    2. Stream-read the input via ``laspy.chunk_iterator`` and route
+       points into per-tile disk-backed ``.npz`` sidecars.
+    3. Per-tile inference loaded from disk; only core (non-buffer)
+       predictions are written into a global predictions array
+       indexed by the original point order.
+    4. Stream-read the input again into a streaming writer that
+       constructs each output chunk against the *output* schema,
+       copies all common dimensions from the input by name, applies
+       preserve-classes overrides, and sets the chosen classification
+       field with the predictions slice.
+- Memory footprint is roughly *(global predictions = 4 bytes / point) +
+  (one tile in RAM) + (one chunk in the writer)*.
+- Full feature parity with the in-memory path:
+    - Writes to either the standard ASPRS ``classification`` dimension
+      **or** a custom extra-byte field (the field is added to the
+      output header before writing and populated chunk-by-chunk).
+    - Applies the **Preserve existing classes** workflow per chunk
+      against any chosen input dimension.
+    - **Automatically upgrades the file to LAS 1.4 / point format 6**
+      when an assigned ASPRS code exceeds the legacy 5-bit limit, by
+      converting the header up-front and re-packing each chunk into
+      the new point format on write.
+
+### Fixes
+- **COPC writing no longer crashes** with `'list' object has no
+  attribute 'write_to'`. The COPC-VLR stripper now mutates the
+  existing `laspy.vlrs.vlrlist.VLRList` in place instead of replacing
+  it with a plain Python list, preserving the writer's expected API.
+- **Auto-load failures are now visible.** When `QgsPointCloudLayer`
+  reports an invalid output, the actual PDAL provider error surfaces
+  in the panel's message bar (and the log), instead of disappearing
+  into a silent warning.
+
+### Result loading
+- The **"Load classified files in QGIS after processing"** option in the
+  dock now controls a dedicated row in the Output group.
+- The same option is exposed as a `LOAD_AS_LAYER` parameter in the
+  Processing algorithm so models and the `qgis_process` CLI can opt
+  in/out as well.
