@@ -562,13 +562,22 @@ def _is_network_error(output: str) -> bool:
 
 
 def _is_antivirus_error(stderr: str) -> bool:
-    """Detect antivirus/permission blocking in pip output.
+    """Detect antivirus / permission blocking in installer output.
+
+    Recognises both classic Windows blocking signatures (Defender's
+    "operation did not complete because the file contains a virus",
+    AppLocker / Group Policy strings) AND uv's own follow-on errors
+    when a python.exe inside the venv has been quarantined out from
+    under it ("Failed to inspect Python interpreter" / "Failed to
+    query Python interpreter"). In practice on consumer laptops the
+    second pattern is what surfaces - the AV deletes the file silently
+    and uv reports "missing python".
 
     Args:
-        stderr: The error output from pip.
+        stderr: The error output from pip / uv.
 
     Returns:
-        True if antivirus blocking detected.
+        True if AV / permission blocking is the most likely cause.
     """
     stderr_lower = stderr.lower()
     patterns = [
@@ -581,8 +590,106 @@ def _is_antivirus_error(stderr: str) -> bool:
         "blocked by group policy",
         "applocker",
         "blocked by your organization",
+        # uv signatures when python.exe was quarantined out from under it
+        "failed to inspect python interpreter",
+        "failed to query python interpreter",
     ]
     return any(p in stderr_lower for p in patterns)
+
+
+def _format_antivirus_help(package_name: str) -> str:
+    """Build an actionable AV-blocked error message for the install dialog.
+
+    Includes the exact cache directory the user has to add as a
+    Defender / third-party-AV exclusion. Single message, no extra
+    line breaks beyond what the dialog will wrap.
+    """
+    return (
+        "Failed to install {pkg}: the install was blocked by an "
+        "antivirus / endpoint-security product. Add this folder to "
+        "your AV's exclusion list and try again: {cache}".format(
+            pkg=package_name, cache=CACHE_DIR
+        )
+    )
+
+
+def _verify_venv_python_runs(venv_dir: str) -> Tuple[bool, str]:
+    """Confirm the venv's python.exe is launchable.
+
+    Runs ``python --version`` in a 10-second subprocess. The most
+    common reason this fails right after a successful ``uv venv`` is
+    that an antivirus product has quarantined the freshly extracted
+    python.exe between creation and use - the file either no longer
+    exists or denies execution.
+
+    Args:
+        venv_dir: Path to the venv root.
+
+    Returns:
+        ``(True, version_string)`` if the interpreter launches cleanly,
+        ``(False, diagnostic)`` otherwise. The diagnostic is suitable
+        to surface in a UI dialog.
+    """
+    python_path = get_venv_python_path(venv_dir)
+
+    if not os.path.exists(python_path):
+        return False, (
+            "Virtual environment was created but its Python interpreter "
+            "is missing at {path}. This almost always means an "
+            "antivirus / endpoint-security product deleted or quarantined "
+            "the file. Add {cache} to your AV's exclusion list, delete "
+            "the folder, and reinstall.".format(path=python_path, cache=CACHE_DIR)
+        )
+
+    try:
+        subprocess_kwargs = _get_subprocess_kwargs()
+        result = subprocess.run(
+            [python_path, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            **subprocess_kwargs,
+        )
+    except FileNotFoundError:
+        return False, (
+            "Virtual environment Python at {path} disappeared between "
+            "creation and verification (typical antivirus quarantine "
+            "pattern). Exclude {cache} from your AV and reinstall."
+            .format(path=python_path, cache=CACHE_DIR)
+        )
+    except subprocess.TimeoutExpired:
+        return False, (
+            "Virtual environment Python at {path} hung on a simple "
+            "--version call. This usually means a missing Visual C++ "
+            "runtime DLL or an AV agent intercepting the launch. "
+            "Reinstall the Microsoft Visual C++ 2015-2022 Redistributable "
+            "(x64) and try again.".format(path=python_path)
+        )
+    except OSError as exc:
+        # WinError 5 = access denied; OSError 0xC0000135 = missing DLL.
+        msg = str(exc).lower()
+        if "access" in msg or "denied" in msg:
+            return False, (
+                "Virtual environment Python at {path} cannot be "
+                "launched: access denied. Add {cache} to your AV's "
+                "exclusion list and reinstall.".format(
+                    path=python_path, cache=CACHE_DIR
+                )
+            )
+        return False, (
+            "Virtual environment Python at {path} could not be started: "
+            "{err}".format(path=python_path, err=str(exc))
+        )
+
+    if result.returncode != 0:
+        tail = (result.stderr or result.stdout or "").strip()[:500]
+        return False, (
+            "Virtual environment Python at {path} exited with code "
+            "{rc}: {tail}".format(path=python_path, rc=result.returncode, tail=tail)
+        )
+
+    version_line = (result.stdout or result.stderr or "").strip()
+    return True, version_line or "(no version string returned)"
 
 
 def _is_proxy_auth_error(output: str) -> bool:
@@ -1313,6 +1420,19 @@ def create_venv(
                             f"Failed to bootstrap pip: {str(e)[:200]}",
                         )
 
+            # Pre-flight: confirm the freshly-created Python is actually
+            # launchable. Catches the common AV-quarantine pattern where
+            # python.exe is extracted, scanned, and silently deleted -
+            # in which case the later "uv pip install" call fails with
+            # the confusing "Failed to inspect Python interpreter"
+            # message instead of telling the user it's their AV.
+            python_ok, python_diag = _verify_venv_python_runs(venv_dir)
+            if not python_ok:
+                _log(f"Venv Python pre-flight failed: {python_diag}", Qgis.Critical)
+                _cleanup_partial_venv(venv_dir)
+                return False, python_diag
+            _log(f"Venv Python pre-flight: {python_diag}", Qgis.Info)
+
             if progress_callback:
                 progress_callback(15, "Virtual environment created")
             return True, "Virtual environment created"
@@ -1322,7 +1442,7 @@ def create_venv(
             )
             _log(f"Failed to create venv: {error_msg}", Qgis.Critical)
             _cleanup_partial_venv(venv_dir)
-            return False, f"Failed to create venv: {error_msg[:200]}"
+            return False, f"Failed to create venv: {error_msg[:1500]}"
 
     except subprocess.TimeoutExpired:
         _log("Virtual environment creation timed out", Qgis.Critical)
@@ -2177,7 +2297,7 @@ def install_dependencies(
                         cpu_err = cpu_result.stderr or cpu_result.stdout or ""
                         install_error_msg = (
                             "CUDA and CPU install both failed for {}: {}".format(
-                                package_name, cpu_err[:200]
+                                package_name, cpu_err[:1500]
                             )
                         )
                 except subprocess.TimeoutExpired:
@@ -2189,13 +2309,13 @@ def install_dependencies(
                 except Exception as e:
                     install_error_msg = (
                         "CUDA and CPU install both failed for {}: {}".format(
-                            package_name, str(e)[:200]
+                            package_name, str(e)[:1500]
                         )
                     )
 
             if install_failed:
                 _log(
-                    "pip error output: {}".format(install_error_msg[:500]),
+                    "pip error output: {}".format(install_error_msg[:2000]),
                     Qgis.Critical,
                 )
                 if _is_ssl_error(install_error_msg):
@@ -2217,11 +2337,7 @@ def install_dependencies(
                         "Failed to install {}: network error".format(package_name),
                     )
                 if _is_antivirus_error(install_error_msg):
-                    return (
-                        False,
-                        "Failed to install {}: blocked by antivirus or "
-                        "security policy".format(package_name),
-                    )
+                    return False, _format_antivirus_help(package_name)
                 if last_returncode is not None and _is_windows_process_crash(
                     last_returncode
                 ):
@@ -2233,7 +2349,7 @@ def install_dependencies(
                 return (
                     False,
                     "Failed to install {}: {}".format(
-                        package_name, install_error_msg[:200]
+                        package_name, install_error_msg[:1500]
                     ),
                 )
 
@@ -2439,11 +2555,7 @@ def install_dependencies(
                         "Failed to install {}: network error".format(failed_pkg),
                     )
                 if _is_antivirus_error(error_output):
-                    return (
-                        False,
-                        "Failed to install {}: blocked by antivirus or "
-                        "security policy".format(failed_pkg),
-                    )
+                    return False, _format_antivirus_help(failed_pkg)
                 if result.returncode is not None and _is_windows_process_crash(
                     result.returncode
                 ):
