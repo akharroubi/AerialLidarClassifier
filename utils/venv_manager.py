@@ -412,11 +412,23 @@ def detect_nvidia_gpu() -> Tuple[bool, dict]:
 def _select_cuda_index(gpu_info: dict) -> Optional[str]:
     """Choose the correct PyTorch CUDA wheel index based on GPU info.
 
+    Picks the highest CUDA toolkit the user's driver actually supports,
+    cascading down through ``cu128 -> cu126 -> cu124 -> cu121`` if the
+    newest options require a more recent driver than what's installed.
+    Each PyTorch wheel index publishes a subset of torch versions, so
+    uv naturally resolves to the latest torch that has wheels for the
+    selected CUDA toolkit.
+
+    Returns ``None`` only when the driver is older than the requirement
+    of every known CUDA toolkit (i.e. CPU install is the only safe
+    option). Blackwell GPUs (sm_120+) need cu128 specifically and do
+    not cascade.
+
     Args:
         gpu_info: Dict with GPU information from detect_nvidia_gpu().
 
     Returns:
-        'cu128', 'cu126', 'cu124', or None if driver is too old.
+        A wheel-index suffix (e.g. ``"cu121"``) or ``None``.
     """
     compute_cap = gpu_info.get("compute_cap")
     gpu_name = gpu_info.get("name", "")
@@ -437,34 +449,48 @@ def _select_cuda_index(gpu_info: dict) -> Optional[str]:
                 Qgis.Warning,
             )
 
+    # Candidates ordered from newest (preferred) to oldest fallback.
+    # Blackwell architecture requires cu128 binaries; there is no
+    # fallback because older toolkits don't ship sm_120 kernels.
     if needs_cu128:
-        cuda_index = "cu128"
+        candidates = ["cu128"]
     else:
-        # On Windows, prefer cu126 when the driver is recent enough. This
-        # improves compatibility with newer packages that expect CUDA 12.6+.
-        if (
-            sys.platform == "win32"
-            and driver_major is not None
-            and driver_major >= _CUDA_DRIVER_REQUIREMENTS.get("cu126", 0)
-        ):
-            cuda_index = "cu126"
-        else:
-            cuda_index = "cu124"
+        candidates = ["cu128", "cu126", "cu124", "cu121"]
 
-    if driver_major is not None:
-        required = _CUDA_DRIVER_REQUIREMENTS.get(cuda_index, 0)
-        if driver_major < required:
-            _log(
-                "NVIDIA driver {} too old for {} (needs >= {}), "
-                "will use CPU instead".format(
-                    driver_str,
-                    cuda_index,
-                    required),
-                Qgis.Warning,
-            )
-            return None
+    # No driver-version info: trust the preferred candidate and let
+    # the install layer's CUDA->CPU fallback handle a bad guess.
+    if driver_major is None:
+        return candidates[0]
 
-    return cuda_index
+    preferred = candidates[0]
+    for candidate in candidates:
+        required = _CUDA_DRIVER_REQUIREMENTS.get(candidate, 0)
+        if driver_major >= required:
+            if candidate != preferred:
+                _log(
+                    "NVIDIA driver {} is below the requirement for "
+                    "{} (needs >= {}); cascading down to {} which "
+                    "the driver supports.".format(
+                        driver_str,
+                        preferred,
+                        _CUDA_DRIVER_REQUIREMENTS.get(preferred, 0),
+                        candidate,
+                    ),
+                    Qgis.Info,
+                )
+            return candidate
+
+    _log(
+        "NVIDIA driver {} is below the requirement for every known "
+        "CUDA toolkit ({}); falling back to CPU. Update the NVIDIA "
+        "driver to >= {} to use the latest CUDA wheels.".format(
+            driver_str,
+            ", ".join(candidates),
+            _CUDA_DRIVER_REQUIREMENTS.get(candidates[-1], 0),
+        ),
+        Qgis.Warning,
+    )
+    return None
 
 
 # ---------------------------------------------------------------------------
