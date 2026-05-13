@@ -57,11 +57,15 @@ _INSTALL_LOGIC_VERSION = "9"
 _CUDA_LOGIC_VERSION = "1"
 
 # Minimum NVIDIA driver versions for each CUDA toolkit version.
+# Windows-side thresholds; Linux thresholds are slightly lower but the
+# numbers used here also cover Linux safely. cu118 is the floor: it
+# works on driver 452+ which covers Pascal-era / pre-2021 systems.
 _CUDA_DRIVER_REQUIREMENTS = {
     "cu128": 570,
     "cu126": 560,
     "cu124": 550,
     "cu121": 530,
+    "cu118": 452,
 }
 
 # Blackwell (sm_120+) requires cu128.
@@ -452,10 +456,13 @@ def _select_cuda_index(gpu_info: dict) -> Optional[str]:
     # Candidates ordered from newest (preferred) to oldest fallback.
     # Blackwell architecture requires cu128 binaries; there is no
     # fallback because older toolkits don't ship sm_120 kernels.
+    # cu118 is the floor for the non-Blackwell path: PyTorch ships
+    # cu118 wheels through ~torch 2.4, which is fine for pre-2021
+    # NVIDIA drivers still in the wild on Pascal / Turing systems.
     if needs_cu128:
         candidates = ["cu128"]
     else:
-        candidates = ["cu128", "cu126", "cu124", "cu121"]
+        candidates = ["cu128", "cu126", "cu124", "cu121", "cu118"]
 
     # No driver-version info: trust the preferred candidate and let
     # the install layer's CUDA->CPU fallback handle a bad guess.
