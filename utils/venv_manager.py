@@ -68,6 +68,21 @@ _CUDA_DRIVER_REQUIREMENTS = {
     "cu118": 452,
 }
 
+# PyTorch periodically drops CUDA toolkit support in new torch versions
+# but keeps publishing +cpu wheels at the old URLs as a fallback. If we
+# install with --index-url https://download.pytorch.org/whl/cu121 and
+# torch>=2.0.0,<3.0.0, uv happily picks the latest version number it
+# can see (e.g. torch 2.12.0+cpu) instead of the latest +cu121 wheel
+# (e.g. torch 2.5.1+cu121). The cap below is the exclusive upper bound
+# we apply for each cuda_index so the resolver lands on a wheel that
+# actually has the +cu121 (etc.) local-version tag. cu126 and cu128 are
+# omitted because they're the current targets and don't need a cap.
+_TORCH_VERSION_CAP_BY_CUDA = {
+    "cu118": "2.6",
+    "cu121": "2.6",
+    "cu124": "2.8",
+}
+
 # Blackwell (sm_120+) requires cu128.
 # On Windows, prefer cu126 for broader compatibility with newer packages
 # (e.g., sam3) when the driver supports it; otherwise fall back to cu124.
@@ -2166,37 +2181,8 @@ def install_dependencies(
             else:
                 label = "{} (CUDA)".format(package_name)
 
-            if progress_callback:
-                progress_callback(
-                    pkg_start,
-                    "Installing GPU dependencies... ({}/{})".format(ci + 1, num_cuda),
-                )
-            _log("[CUDA {}/{}] Installing {}...".format(ci +
-                 1, num_cuda, package_spec), Qgis.Info, )
-
-            # Build install args
-            if use_uv:
-                pip_args = [
-                    "pip",
-                    "install",
-                    "--python",
-                    python_path,
-                    "--upgrade",
-                ]
-                pip_args.extend(_get_uv_ssl_flags())
-                pip_args.append(package_spec)
-            else:
-                pip_args = [
-                    "install",
-                    "--upgrade",
-                    "--no-warn-script-location",
-                    "--disable-pip-version-check",
-                    "--prefer-binary",
-                ]
-                pip_args.extend(_get_pip_ssl_flags())
-                pip_args.extend(_get_pip_proxy_args())
-                pip_args.append(package_spec)
-
+            # Decide CUDA index up-front so we can also apply the
+            # PyTorch-version cap that matches the selected toolkit.
             is_cuda_package = True
             _, gpu_info = detect_nvidia_gpu()
             cuda_index = _select_cuda_index(gpu_info)
@@ -2209,7 +2195,61 @@ def install_dependencies(
                 )
                 is_cuda_package = False
                 _driver_too_old = True
+
+            # When PyTorch has dropped this CUDA toolkit in newer torch
+            # releases, cap the spec so uv can't pick a newer +cpu wheel
+            # the index publishes as a fallback. The .post-release ".0"
+            # makes the upper bound exclusive of any 2.6.x prerelease.
+            effective_spec = package_spec
+            if (
+                is_cuda_package
+                and package_name in ("torch", "torchvision")
+            ):
+                cap = _TORCH_VERSION_CAP_BY_CUDA.get(cuda_index)
+                if cap is not None:
+                    lower = "0.15.0" if package_name == "torchvision" else "2.0.0"
+                    effective_spec = f"{package_name}>={lower},<{cap}"
+                    _log(
+                        "Capping {} to <{} for {} (PyTorch dropped this "
+                        "toolkit in newer torch releases; uv would otherwise "
+                        "resolve to a +cpu wheel).".format(
+                            package_name, cap, cuda_index
+                        ),
+                        Qgis.Info,
+                    )
+
+            if progress_callback:
+                progress_callback(
+                    pkg_start,
+                    "Installing GPU dependencies... ({}/{})".format(ci + 1, num_cuda),
+                )
+            _log("[CUDA {}/{}] Installing {}...".format(ci +
+                 1, num_cuda, effective_spec), Qgis.Info, )
+
+            # Build install args
+            if use_uv:
+                pip_args = [
+                    "pip",
+                    "install",
+                    "--python",
+                    python_path,
+                    "--upgrade",
+                ]
+                pip_args.extend(_get_uv_ssl_flags())
+                pip_args.append(effective_spec)
             else:
+                pip_args = [
+                    "install",
+                    "--upgrade",
+                    "--no-warn-script-location",
+                    "--disable-pip-version-check",
+                    "--prefer-binary",
+                ]
+                pip_args.extend(_get_pip_ssl_flags())
+                pip_args.extend(_get_pip_proxy_args())
+                pip_args.append(effective_spec)
+
+            if is_cuda_package:
                 pip_args.extend(["--index-url",
                                  "https://download.pytorch.org/whl/{}".format(cuda_index),
                                  "--no-cache" if use_uv else "--no-cache-dir",
