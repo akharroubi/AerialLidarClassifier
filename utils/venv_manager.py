@@ -2095,6 +2095,141 @@ def _reinstall_cpu_torch(
         progress_callback(98, "CPU torch installed, re-verifying...")
 
 
+def _get_cuda_cascade_candidates(gpu_info: dict) -> list:
+    """Return the ordered CUDA cascade (newest first) the driver supports.
+
+    Same logic as `_select_cuda_index` but returns the full list of
+    candidates instead of just the top match. Used by the post-install
+    smoke-test recovery: when uv lands on a +cpu wheel at the preferred
+    CUDA index (because PyTorch hasn't published a usable wheel there
+    for the latest torch + python combo), we walk this list and retry
+    torch install at each lower toolkit until one produces a working
+    CUDA torch.
+    """
+    compute_cap = gpu_info.get("compute_cap")
+    gpu_name = gpu_info.get("name", "")
+    if compute_cap is not None:
+        needs_cu128 = compute_cap >= _MIN_COMPUTE_CAP_FOR_CU128
+    else:
+        needs_cu128 = "RTX 50" in gpu_name.upper()
+
+    if needs_cu128:
+        all_candidates = ["cu128"]
+    else:
+        all_candidates = ["cu128", "cu126", "cu124", "cu121", "cu118"]
+
+    driver_str = gpu_info.get("driver_version", "")
+    driver_major = None
+    if driver_str:
+        try:
+            driver_major = int(driver_str.split(".")[0])
+        except (ValueError, IndexError):
+            pass
+
+    if driver_major is None:
+        return all_candidates
+
+    return [
+        c for c in all_candidates
+        if driver_major >= _CUDA_DRIVER_REQUIREMENTS.get(c, 0)
+    ]
+
+
+def _reinstall_torch_at_cuda_index(
+    venv_dir: str,
+    cuda_index: str,
+    progress_callback=None,
+) -> bool:
+    """Uninstall torch+torchvision, then reinstall via uv at the given
+    cuda_index with the appropriate version cap.
+
+    Used by the smoke-test recovery to try a lower CUDA toolkit when
+    the preferred one yielded a +cpu wheel. Returns True if both
+    installs succeed (does NOT run the smoke test - caller does that
+    so a single retry can cover both packages).
+    """
+    from .uv_manager import get_uv_path, uv_exists
+    if not uv_exists():
+        _log("Cannot retry: uv not available.", Qgis.Warning)
+        return False
+
+    uv_path = get_uv_path()
+    python_path = get_venv_python_path(venv_dir)
+    env = _get_clean_env_for_venv()
+    subprocess_kwargs = _get_subprocess_kwargs()
+
+    # Uninstall any existing torch/torchvision so the new install
+    # doesn't get short-circuited by 'already installed at requested
+    # version' resolver logic.
+    try:
+        subprocess.run(
+            [
+                uv_path, "pip", "uninstall",
+                "--python", python_path,
+                "torch", "torchvision",
+            ],
+            timeout=120, env=env,
+            capture_output=True, text=True,
+            **subprocess_kwargs,
+        )
+    except Exception as exc:
+        _log(f"Uninstall before retry warning: {exc}", Qgis.Warning)
+        # Continue: subsequent install will overwrite via --upgrade.
+
+    cap = _TORCH_VERSION_CAP_BY_CUDA.get(cuda_index)
+    for pkg_name, lower in (("torch", "2.0.0"), ("torchvision", "0.15.0")):
+        if cap is not None:
+            spec = f"{pkg_name}>={lower},<{cap}"
+        else:
+            spec = f"{pkg_name}>={lower},<3.0.0"
+
+        cmd = [
+            uv_path, "pip", "install",
+            "--python", python_path, "--upgrade",
+        ]
+        cmd.extend(_get_uv_ssl_flags())
+        cmd.append(spec)
+        cmd.extend([
+            "--index-url",
+            f"https://download.pytorch.org/whl/{cuda_index}",
+            "--no-cache",
+        ])
+
+        if progress_callback:
+            progress_callback(
+                97,
+                f"Reinstalling {pkg_name} via {cuda_index}...",
+            )
+        _log(
+            f"Cascade retry: {pkg_name} {spec} via {cuda_index}",
+            Qgis.Info,
+        )
+
+        try:
+            result = subprocess.run(
+                cmd, timeout=900, env=env,
+                capture_output=True, text=True,
+                **subprocess_kwargs,
+            )
+            if result.returncode != 0:
+                err_tail = (result.stderr or result.stdout)[:500]
+                _log(
+                    f"Cascade retry of {pkg_name} at {cuda_index} "
+                    f"failed: {err_tail}",
+                    Qgis.Warning,
+                )
+                return False
+        except Exception as exc:
+            _log(
+                f"Cascade retry of {pkg_name} at {cuda_index} "
+                f"raised: {exc}",
+                Qgis.Warning,
+            )
+            return False
+
+    return True
+
+
 def _verify_cuda_in_venv(venv_dir: str) -> bool:
     """Run a CUDA smoke test inside the venv.
 
@@ -3592,7 +3727,15 @@ def create_venv_and_install(
                 Qgis.Warning,
             )
 
-    # CUDA smoke test
+    # CUDA smoke test with auto-cascade recovery.
+    #
+    # When PyTorch hasn't published a usable +cuXXX wheel at the
+    # preferred CUDA index for the latest torch + python combo, uv
+    # may resolve to a +cpu wheel and the smoke test correctly flags
+    # "CUDA not available". In that case we walk DOWN the cascade
+    # (cu128 -> cu126 -> cu124 ...) and retry torch + torchvision
+    # install at each lower toolkit the driver still supports. The
+    # first one that produces a working +cuXXX wheel wins.
     _cuda_smoke_failed = False
     if is_valid and cuda_enabled:
         if progress_callback:
@@ -3602,11 +3745,45 @@ def create_venv_and_install(
             _cuda_fell_back = False
         elif not cuda_works and not _cuda_fell_back:
             _log(
-                "CUDA smoke test failed after install. Keeping CUDA torch installed "
-                "for debugging/manual verification instead of auto-reinstalling CPU torch.",
+                "CUDA smoke test failed at the preferred toolkit; "
+                "cascading down through supported CUDA indexes.",
                 Qgis.Warning,
             )
-            _cuda_smoke_failed = True
+            _, gpu_info_for_retry = detect_nvidia_gpu()
+            candidates = _get_cuda_cascade_candidates(gpu_info_for_retry)
+            # candidates[0] is the one we just tried; iterate the rest
+            recovered = False
+            for next_idx in candidates[1:]:
+                _log(
+                    f"Cascade retry at {next_idx}...",
+                    Qgis.Info,
+                )
+                if progress_callback:
+                    progress_callback(
+                        97,
+                        f"Retrying torch install at {next_idx}...",
+                    )
+                if not _reinstall_torch_at_cuda_index(
+                    VENV_DIR, next_idx, progress_callback
+                ):
+                    continue
+                if _verify_cuda_in_venv(VENV_DIR):
+                    _log(
+                        f"CUDA recovered by cascading down to "
+                        f"{next_idx}.",
+                        Qgis.Success,
+                    )
+                    cuda_works = True
+                    recovered = True
+                    break
+            if not recovered:
+                _log(
+                    "All CUDA cascade retries exhausted. Keeping the "
+                    "currently-installed torch (likely +cpu) so the "
+                    "user can still run on CPU.",
+                    Qgis.Warning,
+                )
+                _cuda_smoke_failed = True
 
     if not is_valid:
         return False, f"Verification failed: {verify_msg}"
