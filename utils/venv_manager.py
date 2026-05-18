@@ -1464,10 +1464,20 @@ def create_venv(
     # interpreter is reachable (rare - the standalone Python is
     # downloaded on first run).
     if system_python:
-        cmd = [system_python, "-m", "venv", "--copies", venv_dir]
+        # --without-pip: python-build-standalone Linux tarballs don't
+        # ship the bundled pip wheel under Lib/ensurepip/_bundled/, so
+        # the default ensurepip step that `python -m venv` runs at the
+        # end of creation exits 127 and torpedoes the whole command.
+        # We use uv for all package installs anyway (uv doesn't need
+        # pip inside the venv), so skipping ensurepip is the right call
+        # on every platform - not just Linux.
+        cmd = [
+            system_python, "-m", "venv",
+            "--copies", "--without-pip", venv_dir,
+        ]
         _log(
-            f"Creating venv with `python -m venv --copies` "
-            f"(AV-friendly): {system_python}",
+            f"Creating venv with `python -m venv --copies --without-pip` "
+            f"(AV-friendly, uv-managed packages): {system_python}",
             Qgis.Info,
         )
     elif use_uv:
@@ -1497,22 +1507,27 @@ def create_venv(
             **subprocess_kwargs,
         )
 
-        if result.returncode != 0 and use_uv and system_python:
-            # uv venv failed; fall back to stdlib venv with --copies
-            # (same AV-friendly rationale as the primary path).
+        # Recovery path: if the primary `python -m venv --copies
+        # --without-pip` failed for any reason (rare now that
+        # ensurepip is skipped) and uv is available, try uv-managed
+        # Python as a last resort. Retrying the exact same stdlib
+        # command would be pointless.
+        if result.returncode != 0 and use_uv:
+            stderr_tail = (
+                result.stderr.strip() if result.stderr else str(result.returncode)
+            )
             _log(
-                "uv venv failed ({}), falling back to "
-                "python -m venv --copies".format(
-                    result.stderr.strip() if result.stderr else result.returncode
-                ),
+                f"`python -m venv` failed ({stderr_tail}); retrying with "
+                f"uv-managed Python.",
                 Qgis.Warning,
             )
-            from .uv_manager import remove_uv
-
-            remove_uv()
-            use_uv = False
             _cleanup_partial_venv(venv_dir)
-            cmd = [system_python, "-m", "venv", "--copies", venv_dir]
+            uv_path = get_uv_path()
+            uv_python = f"{sys.version_info.major}.{sys.version_info.minor}"
+            cmd = [
+                uv_path, "venv", "--managed-python",
+                "--python", uv_python, venv_dir,
+            ]
             result = subprocess.run(
                 cmd,
                 capture_output=True,
