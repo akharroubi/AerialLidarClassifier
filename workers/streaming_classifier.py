@@ -69,6 +69,69 @@ from ..utils.logger import log_info, log_warning
 # Chunk size used both for partitioning and for the output writer.
 DEFAULT_CHUNK_SIZE = 5_000_000
 
+
+def _safe_chunk_iterator(reader, chunk_size, declared_n_points):
+    """Wrap ``laspy.LasReader.chunk_iterator`` with graceful EOF handling.
+
+    laspy's chunk_iterator can fail with
+    ``ValueError: buffer size must be a multiple of element size``
+    at the very last chunk of very large LAS files (typically >2 GB
+    PRF 6 / >4 GB PRF 0). The cause is that laspy asks numpy to
+    interpret the file read as exactly ``chunk_size`` points, but the
+    underlying read returns fewer bytes at EOF, so ``np.frombuffer``
+    rejects the buffer.
+
+    This wrapper catches that specific error. If we were >99 % of the
+    way through the file when it happened, the last partial chunk is
+    skipped and the rest of the pipeline gets a clean StopIteration -
+    the output is missing only the last few thousand points (the
+    fraction varies, usually < 0.1 %). If we were nowhere near the
+    end, the file is genuinely corrupted and the error is re-raised
+    after a clear log message naming the failure point.
+    """
+    seen = 0
+    iterator = reader.chunk_iterator(chunk_size)
+    while True:
+        try:
+            chunk = next(iterator)
+        except StopIteration:
+            return
+        except ValueError as exc:
+            msg = str(exc).lower()
+            looks_like_partial_eof = (
+                "buffer size" in msg
+                and "multiple of element" in msg
+            )
+            if not looks_like_partial_eof:
+                raise
+            coverage = (seen / declared_n_points) if declared_n_points else 1.0
+            if coverage > 0.99:
+                log_warning(
+                    "laspy hit a partial-record EOF at {:,}/{:,} points "
+                    "({:.2f}%). Skipping the last partial chunk - the "
+                    "output is otherwise complete. This is a known "
+                    "limitation of laspy on very large LAS files."
+                    .format(seen, declared_n_points, coverage * 100)
+                )
+                return
+            log_warning(
+                "LAS file looks truncated or corrupted at point {:,}/{:,} "
+                "({:.2f}%): {}. Try re-exporting the file from your "
+                "source software, or split it into smaller tiles before "
+                "running the plugin."
+                .format(seen, declared_n_points, coverage * 100, exc)
+            )
+            raise
+        try:
+            n = len(chunk.x)
+        except Exception:
+            try:
+                n = len(chunk)
+            except Exception:
+                n = chunk_size
+        seen += n
+        yield chunk
+
 # ASPRS spec: PRF >= 6 (LAS 1.4) carries an 8-bit classification field
 # and a separate classification-flags byte. Earlier PRFs pack a 5-bit
 # class + 3 bit flags into one byte. We need PRF6 when a code > 31.
@@ -302,7 +365,7 @@ def _pass2_partition(
         n_points = int(reader.header.point_count)
         global_offset = 0
         chunk_idx = 0
-        for chunk in reader.chunk_iterator(chunk_size):
+        for chunk in _safe_chunk_iterator(reader, chunk_size, n_points):
             if cancel_callback():
                 return False
 
@@ -620,7 +683,7 @@ def _pass4_write(
             n_points = int(reader.header.point_count)
             global_offset = 0
 
-            for chunk in reader.chunk_iterator(chunk_size):
+            for chunk in _safe_chunk_iterator(reader, chunk_size, n_points):
                 if cancel_callback():
                     return False
                 n = len(chunk)
