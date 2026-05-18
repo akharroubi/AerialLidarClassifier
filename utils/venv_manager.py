@@ -89,12 +89,22 @@ _CUDA_DRIVER_REQUIREMENTS = {
 # can see (e.g. torch 2.12.0+cpu) instead of the latest +cu121 wheel
 # (e.g. torch 2.5.1+cu121). The cap below is the exclusive upper bound
 # we apply for each cuda_index so the resolver lands on a wheel that
-# actually has the +cu121 (etc.) local-version tag. cu126 and cu128 are
-# omitted because they're the current targets and don't need a cap.
+# actually has the +cu121 (etc.) local-version tag.
+#
+# Even cu126 / cu128 (the current production targets) need a cap when
+# PyTorch lags publishing +cuXXX wheels for the very latest torch
+# release. Observed in May 2026: torch 2.12.0 has +cu126 wheels but
+# NOT +cu128 wheels, so cu128 callers would silently get 2.12.0+cpu.
+# Caps are bumped when PyTorch ships +cuXXX wheels for a newer torch.
 _TORCH_VERSION_CAP_BY_CUDA = {
     "cu118": "2.6",
     "cu121": "2.6",
     "cu124": "2.8",
+    # cu126 currently covers torch 2.12.x.
+    "cu126": "2.13",
+    # cu128: latest +cu128 wheel as of May 2026 is for torch 2.11.x.
+    # Bump when newer +cu128 wheels are published.
+    "cu128": "2.12",
 }
 
 # Blackwell (sm_120+) requires cu128.
