@@ -534,7 +534,12 @@ def _select_cuda_index(gpu_info: dict) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 _SSL_ERROR_PATTERNS = [
-    "ssl",
+    # Tight enough to avoid false positives. The bare string "ssl"
+    # was here historically but it matched "SSL_CERT_DIR" in uv's
+    # informational warning ("Ignoring invalid SSL_CERT_DIR. The
+    # directory does not exist...") which is not an error at all,
+    # and that misclassified the real downstream failure as an SSL
+    # certificate problem.
     "certificate verify failed",
     "CERTIFICATE_VERIFY_FAILED",
     "SSLError",
@@ -542,6 +547,10 @@ _SSL_ERROR_PATTERNS = [
     "tlsv1 alert",
     "unable to get local issuer certificate",
     "self signed certificate in certificate chain",
+    "self-signed certificate",
+    "unknown ca",
+    "untrusted root",
+    "invalid peer certificate",
 ]
 
 _NETWORK_ERROR_PATTERNS = [
@@ -665,6 +674,48 @@ def _is_network_error(output: str) -> bool:
     if _is_ssl_error(output):
         return False
     return any(p in output_lower for p in _NETWORK_ERROR_PATTERNS)
+
+
+def _is_corrupted_venv_error(stderr: str) -> bool:
+    """Detect uv errors that indicate the existing venv is broken.
+
+    Fires when a previous install was interrupted, OR when the
+    previous Reinstall click could not fully wipe the old venv
+    (typically Windows DLL locks - c10.dll and friends are held
+    open by the running QGIS process). uv reports something like:
+
+      Failed to read `<pkg>==<ver>`
+      Failed to read metadata from installed package
+      failed to open file `...dist-info\\METADATA`
+
+    The actionable fix is to restart QGIS so the DLLs unload, then
+    click Reinstall again.
+    """
+    s = stderr.lower()
+    return (
+        "failed to read metadata from installed package" in s
+        or ("failed to read `" in s and "dist-info" in s)
+    )
+
+
+def _format_corrupted_venv_help() -> str:
+    """Actionable message when the venv is partially broken.
+
+    The "restart QGIS" instruction is essential: on Windows, the OS
+    holds DLLs open until the loading process exits. As long as QGIS
+    has imported torch from the broken venv, the broken venv can't
+    be wiped, and any new install layers on top of it and produces
+    this same error again.
+    """
+    return (
+        "The virtual environment is in an inconsistent state "
+        "(typically because a previous Reinstall could not delete "
+        "files that QGIS had loaded into memory). To recover: close "
+        "QGIS completely, reopen it, then click Reinstall "
+        "Dependencies. After the restart no DLLs are loaded yet, so "
+        "the old venv can be rebuilt cleanly. Cache directory: "
+        + CACHE_DIR
+    )
 
 
 def _is_application_control_error(stderr: str) -> bool:
@@ -2570,6 +2621,8 @@ def install_dependencies(
                 if _is_network_error(install_error_msg):
                     return (
                         False, "Failed to install {}: network error".format(package_name), )
+                if _is_corrupted_venv_error(install_error_msg):
+                    return False, _format_corrupted_venv_help()
                 if _is_application_control_error(install_error_msg):
                     return False, _format_application_control_help()
                 if _is_antivirus_error(install_error_msg):
@@ -2791,6 +2844,8 @@ def install_dependencies(
                 if _is_network_error(error_output):
                     return (
                         False, "Failed to install {}: network error".format(failed_pkg), )
+                if _is_corrupted_venv_error(error_output):
+                    return False, _format_corrupted_venv_help()
                 if _is_application_control_error(error_output):
                     return False, _format_application_control_help()
                 if _is_antivirus_error(error_output):

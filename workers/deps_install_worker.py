@@ -56,6 +56,7 @@ class DepsInstallWorker(QThread):
         try:
             import shutil
             import os
+            import sys
 
             from ..utils.venv_manager import VENV_DIR, create_venv_and_install
 
@@ -66,10 +67,37 @@ class DepsInstallWorker(QThread):
                 )
                 try:
                     shutil.rmtree(VENV_DIR)
+                except PermissionError as exc:
+                    # Almost always Windows holding torch's c10.dll
+                    # (or similar) open because QGIS imported torch
+                    # from the old venv earlier this session. Layering
+                    # a new install on top of a half-wiped venv
+                    # produces cryptic "Failed to read metadata" errors
+                    # from uv. Fail fast with the right instruction
+                    # instead.
+                    if sys.platform == "win32":
+                        msg = (
+                            "Could not remove the previous virtual "
+                            "environment because QGIS has loaded its "
+                            "DLLs (Windows keeps loaded DLLs locked "
+                            "until the process exits). Please close "
+                            "QGIS completely, reopen it, then click "
+                            "Reinstall Dependencies again. After the "
+                            "restart no DLLs are pinned, so the old "
+                            "venv can be rebuilt cleanly. Underlying "
+                            "error: {}".format(exc)
+                        )
+                        self.finished.emit(False, msg)
+                        return
+                    # Non-Windows: continue and let the install layer
+                    # surface a clear error if anything goes wrong.
+                    self.progress.emit(
+                        1,
+                        f"Partial cleanup ({exc}); continuing...",
+                    )
                 except Exception as exc:
-                    # Non-fatal: create_venv_and_install will also try
-                    # to clean up partial state. Just log to the
-                    # progress signal so the user sees what happened.
+                    # Other failures: log and let create_venv_and_install
+                    # attempt its own cleanup.
                     self.progress.emit(
                         1,
                         f"Could not fully remove old venv: {exc}",
