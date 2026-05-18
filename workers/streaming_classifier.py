@@ -253,10 +253,28 @@ def streaming_tiled_classify(
         return output_path
 
     finally:
+        # Free the per-tile sidecar staging directory.
         try:
             shutil.rmtree(workdir, ignore_errors=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            log_warning(f"Streaming: failed to clean up {workdir}: {exc}")
+
+        # Release any CUDA memory the model held during inference.
+        # Important for streaming because tiles can be processed back
+        # to back across multiple files; without this, the CUDA
+        # caching allocator hangs on to the peak allocation and the
+        # next run starves. Wrapped in try/except because torch may
+        # not be importable at all on a CPU-only install or after a
+        # failed dep install.
+        if use_cuda:
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception as exc:
+                log_warning(
+                    f"Streaming: could not empty CUDA cache: {exc}"
+                )
 
 
 # ---------------------------------------------------------------------------

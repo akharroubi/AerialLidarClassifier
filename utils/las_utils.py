@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import List, Tuple
 
+from .logger import log_warning
+
 
 def strip_copc_vlrs(las_or_header) -> None:
     """Drop COPC-specific VLR / EVLR records in place.
@@ -47,15 +49,28 @@ def find_las_files(path):
 
 
 def get_las_info(filepath: Path) -> Tuple[int, float]:
-    """Get point count and file size from LAS/LAZ header without loading all points."""
+    """Get point count and file size from LAS/LAZ header without loading all points.
+
+    Returns ``(0, file_size_mb)`` if the file cannot be opened (corrupt
+    header, locked by another process, etc.) so the GUI keeps working
+    even on a bad file. The underlying error is logged so users can
+    diagnose why a file shows zero points.
+    """
     try:
         import laspy
         with laspy.open(str(filepath)) as f:
             point_count = f.header.point_count
         file_size = filepath.stat().st_size / (1024 * 1024)
         return point_count, file_size
-    except Exception:
-        return 0, filepath.stat().st_size / (1024 * 1024)
+    except Exception as exc:
+        try:
+            file_size = filepath.stat().st_size / (1024 * 1024)
+        except OSError:
+            file_size = 0.0
+        log_warning(
+            f"Could not read LAS/LAZ header from {filepath.name}: {exc}"
+        )
+        return 0, file_size
 
 
 def get_folder_info(folder_path: Path) -> Tuple[List[Path], int, float]:
