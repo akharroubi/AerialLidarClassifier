@@ -3754,6 +3754,15 @@ def create_venv_and_install(
             # candidates[0] is the one we just tried; iterate the rest
             recovered = False
             for next_idx in candidates[1:]:
+                # Honour cancel between cascade steps so users can bail
+                # out of a long retry loop without waiting for the
+                # subprocess timeout (up to 15 min per attempt).
+                if cancel_check and cancel_check():
+                    _log(
+                        "Cascade retry cancelled by user.",
+                        Qgis.Warning,
+                    )
+                    break
                 _log(
                     f"Cascade retry at {next_idx}...",
                     Qgis.Info,
