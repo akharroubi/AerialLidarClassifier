@@ -2783,6 +2783,13 @@ def install_dependencies(
     _log(f"Virtual environment: {venv_dir}", Qgis.Success)
     _log("=" * 50, Qgis.Success)
 
+    # Stamp the venv with the current plugin version so the next
+    # dependency check knows this install is fresh. If the user later
+    # upgrades to a plugin version with a different install pipeline,
+    # the missing / mismatched marker will force a clean reinstall
+    # instead of silently keeping a stale broken venv.
+    _write_install_marker(venv_dir)
+
     if _driver_too_old:
         return True, "All dependencies installed successfully [DRIVER_TOO_OLD]"
     if _cuda_fell_back:
@@ -3077,6 +3084,66 @@ def _quick_check_packages(venv_dir: str = None) -> Tuple[bool, str]:
     return True, "All packages found"
 
 
+_INSTALL_MARKER_FILENAME = ".plugin_install_marker.json"
+
+
+def _get_install_marker_path(venv_dir: str = None) -> str:
+    """Path to the JSON marker file written by the install pipeline.
+
+    The marker records which plugin version built this venv. We use it
+    on every dependency check to decide whether the venv is fresh
+    enough to trust, or whether the user just upgraded from a plugin
+    version with known bugs (in which case the venv on disk was built
+    by the buggy code and needs to be torn down and recreated).
+    """
+    if venv_dir is None:
+        venv_dir = VENV_DIR
+    return os.path.join(venv_dir, _INSTALL_MARKER_FILENAME)
+
+
+def _write_install_marker(venv_dir: str = None) -> None:
+    """Stamp the venv with the current plugin version and a timestamp.
+
+    Best-effort: failure to write the marker is logged but does not
+    fail the install. On the next dependency check the missing marker
+    will simply look like an old / pre-marker venv and trigger a
+    reinstall - which is the safe behavior.
+    """
+    import json
+
+    try:
+        from ..config import PLUGIN_VERSION
+    except Exception:
+        PLUGIN_VERSION = "unknown"
+
+    marker_path = _get_install_marker_path(venv_dir)
+    payload = {
+        "plugin_version": PLUGIN_VERSION,
+        "cuda_logic_version": _CUDA_LOGIC_VERSION,
+        "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    try:
+        with open(marker_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+        _log(f"Wrote install marker: {payload}", Qgis.Info)
+    except Exception as exc:
+        _log(f"Could not write install marker: {exc}", Qgis.Warning)
+
+
+def _read_install_marker(venv_dir: str = None) -> Optional[dict]:
+    """Return the parsed marker dict, or None if missing / unreadable."""
+    import json
+
+    marker_path = _get_install_marker_path(venv_dir)
+    if not os.path.exists(marker_path):
+        return None
+    try:
+        with open(marker_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
 def get_venv_status() -> Tuple[bool, str]:
     """Get the status of the complete installation.
 
@@ -3102,6 +3169,47 @@ def get_venv_status() -> Tuple[bool, str]:
     if not venv_exists():
         _log(f"get_venv_status: venv not found at {VENV_DIR}", Qgis.Info)
         return False, "Virtual environment not configured"
+
+    # Cross-version freshness check: if the marker is missing or was
+    # written by a different plugin version, the venv was built by
+    # older / buggier install code. Force the Setup dock to reopen so
+    # the user can click Reinstall and the broken venv gets rebuilt.
+    try:
+        from ..config import PLUGIN_VERSION as _CURRENT_PLUGIN_VERSION
+    except Exception:
+        _CURRENT_PLUGIN_VERSION = None
+
+    marker = _read_install_marker()
+    if marker is None:
+        _log(
+            "get_venv_status: no install marker - venv was built by a "
+            "plugin version that pre-dates the marker (likely v1.0.0). "
+            "Triggering reinstall so the latest install fixes apply.",
+            Qgis.Warning,
+        )
+        return False, (
+            "An older version of the plugin built this environment. "
+            "Please click Reinstall Dependencies to rebuild it with "
+            "the current install code."
+        )
+
+    marker_version = marker.get("plugin_version", "")
+    if (
+        _CURRENT_PLUGIN_VERSION is not None
+        and marker_version != _CURRENT_PLUGIN_VERSION
+    ):
+        _log(
+            f"get_venv_status: install marker says venv was built by "
+            f"plugin {marker_version}, but the running plugin is "
+            f"{_CURRENT_PLUGIN_VERSION}. Triggering reinstall.",
+            Qgis.Warning,
+        )
+        return False, (
+            f"This environment was built by plugin version "
+            f"{marker_version}. The running plugin is "
+            f"{_CURRENT_PLUGIN_VERSION}. Please click Reinstall "
+            f"Dependencies to rebuild it."
+        )
 
     is_present, msg = _quick_check_packages()
     if not is_present:

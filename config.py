@@ -12,7 +12,7 @@ from typing import Dict, List
 # =============================================================================
 
 PLUGIN_NAME = "Aerial LiDAR Classifier"
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.0.1"
 SETTINGS_PREFIX = "AerialLidarClassifier"
 
 

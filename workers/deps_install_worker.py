@@ -36,9 +36,34 @@ class DepsInstallWorker(QThread):
         self._cancelled = True
 
     def run(self):
-        """Run the installation pipeline."""
+        """Run the installation pipeline.
+
+        Wipes any pre-existing cache directory first so a "Reinstall
+        Dependencies" click always produces a clean install rather than
+        layering on top of a venv left behind by a buggy older plugin
+        version (the case that motivated the install-marker check).
+        """
         try:
-            from ..utils.venv_manager import create_venv_and_install
+            import shutil
+            import os
+
+            from ..utils.venv_manager import CACHE_DIR, create_venv_and_install
+
+            if os.path.exists(CACHE_DIR):
+                self.progress.emit(
+                    1,
+                    "Removing previous installation...",
+                )
+                try:
+                    shutil.rmtree(CACHE_DIR)
+                except Exception as exc:
+                    # Non-fatal: create_venv_and_install will also try
+                    # to clean up partial state. Just log to the
+                    # progress signal so the user sees what happened.
+                    self.progress.emit(
+                        1,
+                        f"Could not fully remove old cache: {exc}",
+                    )
 
             success, message = create_venv_and_install(
                 progress_callback=lambda p, m: self.progress.emit(p, m),

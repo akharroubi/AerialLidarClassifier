@@ -4,6 +4,45 @@ All notable changes to **Aerial LiDAR Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.1] - 2026-05-15
+
+### Fixed
+- **Linux first-install failed at `ensurepip`**. python-build-standalone
+  Linux tarballs do not ship the bundled pip wheel under
+  `Lib/ensurepip/_bundled/`, so the default `python -m venv` call
+  exited 127 while bootstrapping pip and the whole install aborted.
+  The venv is now created with `--without-pip` since we use `uv` for
+  every package install regardless of platform.
+- **CUDA wheel selection now cascades** through
+  `cu128 → cu126 → cu124 → cu121 → cu118` instead of returning `None`
+  the first time a candidate's driver requirement is unmet. NVIDIA
+  drivers older than 550 (very common on Ampere-era workstations)
+  recover GPU acceleration.
+- **Torch version cap per CUDA index**. PyTorch's
+  `download.pytorch.org/whl/cuXXX/` indexes also publish `+cpu`
+  wheels of newer torch releases as a fallback. With
+  `torch>=2.0.0,<3.0.0` and `--index-url cu121`, `uv` was picking the
+  latest version (e.g. `torch 2.12.0+cpu`) instead of the latest
+  cu121 wheel (e.g. `torch 2.5.1+cu121`). Caps applied: cu118 / cu121
+  → `<2.6`, cu124 → `<2.8`.
+
+### Added
+- **Install marker** recording the plugin version that built the
+  venv. On every dependency check the marker is compared against the
+  running plugin version; mismatch (or missing marker) reopens the
+  Setup dock with a one-click *Reinstall Dependencies* that wipes the
+  stale cache before rebuilding. Users on the broken v1.0.0 venv no
+  longer need to manually delete `~/.qgis_aerial_lidar_classifier/`
+  when upgrading.
+- **Reinstall now wipes first**: the dependency-install worker
+  removes the entire cache directory before recreating the venv, so
+  the recovery path is deterministic.
+- **Auto 3D rendering** on loaded point-cloud layers. The plugin
+  attaches a `QgsClassificationPointCloud3DSymbol` to the layer right
+  after `addMapLayer`, so opening a 3D Map View renders the points in
+  3D coloured by ASPRS class without any manual *Layer Properties*
+  setup.
+
 ## [1.0.0] - 2026-05-19
 
 ### Added
