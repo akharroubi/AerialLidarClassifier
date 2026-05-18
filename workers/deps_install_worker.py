@@ -38,31 +38,41 @@ class DepsInstallWorker(QThread):
     def run(self):
         """Run the installation pipeline.
 
-        Wipes any pre-existing cache directory first so a "Reinstall
-        Dependencies" click always produces a clean install rather than
-        layering on top of a venv left behind by a buggy older plugin
-        version (the case that motivated the install-marker check).
+        Wipes only the venv subdirectory before reinstalling, NOT the
+        entire cache directory. We deliberately preserve:
+
+          - ``python_standalone/`` (40 MB) - the portable interpreter
+            we already downloaded
+          - ``uv/`` (15 MB) - the uv binary we already downloaded
+          - ``models/`` and any other user-placed files - some users
+            drop the model `.pth` here manually as a proxy / offline
+            workaround documented in the README
+
+        Re-downloading those on every "Reinstall Dependencies" click
+        would waste bandwidth, time, and (in the models case) the
+        user's manual setup. The bug we're recovering from is a stale
+        venv, so only the venv needs to go.
         """
         try:
             import shutil
             import os
 
-            from ..utils.venv_manager import CACHE_DIR, create_venv_and_install
+            from ..utils.venv_manager import VENV_DIR, create_venv_and_install
 
-            if os.path.exists(CACHE_DIR):
+            if os.path.exists(VENV_DIR):
                 self.progress.emit(
                     1,
-                    "Removing previous installation...",
+                    "Removing previous virtual environment...",
                 )
                 try:
-                    shutil.rmtree(CACHE_DIR)
+                    shutil.rmtree(VENV_DIR)
                 except Exception as exc:
                     # Non-fatal: create_venv_and_install will also try
                     # to clean up partial state. Just log to the
                     # progress signal so the user sees what happened.
                     self.progress.emit(
                         1,
-                        f"Could not fully remove old cache: {exc}",
+                        f"Could not fully remove old venv: {exc}",
                     )
 
             success, message = create_venv_and_install(

@@ -56,6 +56,20 @@ _INSTALL_LOGIC_VERSION = "9"
 # Bump independently for CUDA-specific install logic changes.
 _CUDA_LOGIC_VERSION = "1"
 
+# Install-pipeline schema version. Bump this any time we change how
+# the venv is created or what's installed in it, so the install marker
+# check in `get_venv_status` triggers a clean reinstall for users
+# upgrading from a plugin version with an older pipeline. Plugin
+# version bumps WITHOUT install-pipeline changes should NOT bump this
+# (otherwise every minor update would force users to reinstall 1-3 GB
+# of dependencies for no benefit).
+#
+# Schema 2 (v1.0.1):
+#   - venv created with `--without-pip`
+#   - CUDA cascade cu128 -> cu118
+#   - torch version cap per cuda index
+_INSTALL_SCHEMA_VERSION = "2"
+
 # Minimum NVIDIA driver versions for each CUDA toolkit version.
 # Windows-side thresholds; Linux thresholds are slightly lower but the
 # numbers used here also cover Linux safely. cu118 is the floor: it
@@ -3102,12 +3116,19 @@ def _get_install_marker_path(venv_dir: str = None) -> str:
 
 
 def _write_install_marker(venv_dir: str = None) -> None:
-    """Stamp the venv with the current plugin version and a timestamp.
+    """Stamp the venv with the install-schema version and a timestamp.
+
+    The ``install_schema_version`` field is the value that
+    ``get_venv_status`` compares against ``_INSTALL_SCHEMA_VERSION`` to
+    decide whether the venv was built by a plugin release whose
+    install pipeline is still current. ``plugin_version`` is kept for
+    diagnostic purposes only - it is NOT used for the freshness
+    comparison, otherwise every minor plugin bump would force users to
+    re-download multi-GB of dependencies for no install-side benefit.
 
     Best-effort: failure to write the marker is logged but does not
-    fail the install. On the next dependency check the missing marker
-    will simply look like an old / pre-marker venv and trigger a
-    reinstall - which is the safe behavior.
+    fail the install. The next dependency check then sees a missing
+    marker and triggers a reinstall - which is the safe behavior.
     """
     import json
 
@@ -3118,6 +3139,7 @@ def _write_install_marker(venv_dir: str = None) -> None:
 
     marker_path = _get_install_marker_path(venv_dir)
     payload = {
+        "install_schema_version": _INSTALL_SCHEMA_VERSION,
         "plugin_version": PLUGIN_VERSION,
         "cuda_logic_version": _CUDA_LOGIC_VERSION,
         "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -3170,21 +3192,24 @@ def get_venv_status() -> Tuple[bool, str]:
         _log(f"get_venv_status: venv not found at {VENV_DIR}", Qgis.Info)
         return False, "Virtual environment not configured"
 
-    # Cross-version freshness check: if the marker is missing or was
-    # written by a different plugin version, the venv was built by
-    # older / buggier install code. Force the Setup dock to reopen so
-    # the user can click Reinstall and the broken venv gets rebuilt.
-    try:
-        from ..config import PLUGIN_VERSION as _CURRENT_PLUGIN_VERSION
-    except Exception:
-        _CURRENT_PLUGIN_VERSION = None
-
+    # Install-pipeline freshness check: if the marker is missing or
+    # was written by a plugin release whose install pipeline was
+    # different (different venv flags, different CUDA cascade, etc.),
+    # the venv on disk is potentially broken in ways that the running
+    # plugin code cannot diagnose at runtime. Force the Setup dock to
+    # reopen with a one-click Reinstall so the venv gets rebuilt.
+    #
+    # The comparison key is _INSTALL_SCHEMA_VERSION, NOT
+    # PLUGIN_VERSION. Bumping the plugin version without changing the
+    # install pipeline (e.g. a UI-only patch release) does NOT force
+    # users to redownload 1-3 GB of wheels.
     marker = _read_install_marker()
     if marker is None:
         _log(
             "get_venv_status: no install marker - venv was built by a "
-            "plugin version that pre-dates the marker (likely v1.0.0). "
-            "Triggering reinstall so the latest install fixes apply.",
+            "plugin release that pre-dates the marker (typically "
+            "v1.0.0). Triggering reinstall so the install-pipeline "
+            "fixes in newer releases apply.",
             Qgis.Warning,
         )
         return False, (
@@ -3193,22 +3218,20 @@ def get_venv_status() -> Tuple[bool, str]:
             "the current install code."
         )
 
-    marker_version = marker.get("plugin_version", "")
-    if (
-        _CURRENT_PLUGIN_VERSION is not None
-        and marker_version != _CURRENT_PLUGIN_VERSION
-    ):
+    marker_schema = marker.get("install_schema_version")
+    if marker_schema != _INSTALL_SCHEMA_VERSION:
+        marker_plugin = marker.get("plugin_version", "unknown")
         _log(
-            f"get_venv_status: install marker says venv was built by "
-            f"plugin {marker_version}, but the running plugin is "
-            f"{_CURRENT_PLUGIN_VERSION}. Triggering reinstall.",
+            f"get_venv_status: install marker says venv was built with "
+            f"install-schema {marker_schema!r} (plugin {marker_plugin}), "
+            f"but the running plugin uses install-schema "
+            f"{_INSTALL_SCHEMA_VERSION!r}. Triggering reinstall.",
             Qgis.Warning,
         )
         return False, (
-            f"This environment was built by plugin version "
-            f"{marker_version}. The running plugin is "
-            f"{_CURRENT_PLUGIN_VERSION}. Please click Reinstall "
-            f"Dependencies to rebuild it."
+            f"This environment was built by an older install pipeline "
+            f"(plugin {marker_plugin}). Please click Reinstall "
+            f"Dependencies so the current pipeline rebuilds it."
         )
 
     is_present, msg = _quick_check_packages()
