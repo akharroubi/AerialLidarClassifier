@@ -78,6 +78,12 @@ server=False
 
 changelog=
     1.0.1
+        - Fix: corporate SSL inspection blocking the install. uv now
+          uses the OS native TLS (--native-tls) so Windows-installed
+          corporate CAs are trusted, and download.pytorch.org is in
+          the allow-insecure-host list alongside pypi.org and
+          files.pythonhosted.org. Same flag added to the pip code path
+          via --trusted-host.
         - Fix: Linux first-install failed at ensurepip step because
           python-build-standalone Linux tarballs do not ship the
           bundled pip wheel. The venv is now created with --without-pip

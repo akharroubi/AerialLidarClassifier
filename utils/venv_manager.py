@@ -598,7 +598,7 @@ def _is_hash_mismatch(output: str) -> bool:
 
 
 def _get_pip_ssl_flags() -> List[str]:
-    """Get pip flags to bypass SSL verification for corporate proxies.
+    """Get pip flags for TLS on corporate networks.
 
     Returns:
         List of pip command-line flags.
@@ -610,20 +610,45 @@ def _get_pip_ssl_flags() -> List[str]:
         "pypi.python.org",
         "--trusted-host",
         "files.pythonhosted.org",
+        # PyTorch wheels live here; without this, corporate SSL
+        # inspection on the cu128/cu126/cu121/cu118 index URLs causes
+        # pip to abort with "SSL certificate error".
+        "--trusted-host",
+        "download.pytorch.org",
     ]
 
 
 def _get_uv_ssl_flags() -> List[str]:
-    """Get uv flags to bypass SSL verification for corporate proxies.
+    """Get uv flags for TLS handling on corporate networks.
+
+    ``--native-tls`` tells uv to use the operating system's native TLS
+    implementation (Schannel on Windows, Secure Transport on macOS,
+    OpenSSL on Linux) instead of uv's bundled webpki roots. The OS
+    store trusts whatever CAs have been installed by IT / Group
+    Policy, which is what's needed when a corporate proxy injects its
+    own certificate for SSL inspection. uv's bundled roots never
+    include corporate CAs, so without this flag the install fails
+    with 'Failed to install torch: SSL certificate error' as soon as
+    uv tries to fetch from download.pytorch.org.
+
+    ``--allow-insecure-host`` is the last-resort fallback for the
+    three hosts the plugin actually fetches wheels from. Some
+    corporate proxies present such a broken chain that even native
+    TLS rejects it; for those users, allowing insecure TLS for these
+    specific hosts unblocks the install without weakening security
+    for anything else.
 
     Returns:
         List of uv command-line flags.
     """
     return [
+        "--native-tls",
         "--allow-insecure-host",
         "pypi.org",
         "--allow-insecure-host",
         "files.pythonhosted.org",
+        "--allow-insecure-host",
+        "download.pytorch.org",
     ]
 
 

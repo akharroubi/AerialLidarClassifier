@@ -7,6 +7,16 @@ and the project follows [Semantic Versioning](https://semver.org/).
 ## [1.0.1] - 2026-05-15
 
 ### Fixed
+- **SSL certificate errors when fetching from
+  `download.pytorch.org`**. uv was using its bundled webpki roots,
+  which do not include CAs that corporate IT installs via Group
+  Policy for SSL inspection. The install pipeline now passes
+  `--native-tls` so uv uses the OS certificate store (Schannel on
+  Windows, Secure Transport on macOS, OpenSSL on Linux). The
+  download.pytorch.org host is also added to the
+  `--allow-insecure-host` list (uv) and `--trusted-host` list (pip
+  fallback path), alongside the existing `pypi.org` and
+  `files.pythonhosted.org` entries.
 - **Linux first-install failed at `ensurepip`**. python-build-standalone
   Linux tarballs do not ship the bundled pip wheel under
   `Lib/ensurepip/_bundled/`, so the default `python -m venv` call
