@@ -4,6 +4,32 @@ All notable changes to **Aerial LiDAR Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] - 2026-05-19
+
+### Fixed
+- **Linux first-install crashed at the venv pre-flight check** with
+  `error while loading shared libraries: libpython3.12.so.1.0:
+  cannot open shared object file` on every distro using
+  python-build-standalone (i.e. all of them). Reported by
+  @giswqs / qiusheng on Manjaro / QGIS 3.42 / RTX 6000 Ada.
+  Reproduced cleanly in WSL Ubuntu by re-running the exact install
+  steps.
+  - **Root cause**: ``python -m venv --copies`` copies the
+    python-build-standalone ``python3`` binary into ``venv/bin/`` but
+    does NOT copy the ``libpython3.12.so.1.0`` next to it (venv has
+    no notion that python-build-standalone ships libpython as a
+    separate file rather than a static linker symbol). After the
+    copy, the binary's ``RPATH=$ORIGIN/../lib`` resolves to the
+    empty ``venv/lib/`` and every invocation dies at load time.
+  - **Fix**: ``--copies`` was originally added to dodge Windows AV
+    quarantine of the small "redirector launcher" the default
+    symlink mode produces. It is now applied **only on Windows**.
+    Linux and macOS use the symlink default, which points
+    ``venv/bin/python3`` back at the standalone tree so the RPATH
+    lookup still finds libpython. End-to-end verified in WSL
+    Ubuntu: standalone Python downloads, symlink venv passes
+    pre-flight, ``uv pip install numpy`` succeeds inside the venv.
+
 ## [1.0.2] - 2026-05-19
 
 ### Fixed

@@ -1548,21 +1548,37 @@ def create_venv(
 
     # Venv creation strategy
     # ----------------------
-    # We prefer ``python -m venv --copies`` over ``uv venv`` whenever a
-    # base interpreter is available. The ``--copies`` flag makes the
-    # venv's python.exe a byte-for-byte copy of the base interpreter
-    # instead of the small "redirector launcher" that the default mode
-    # (and uv) produces. The redirector is a tiny custom executable
-    # that Windows antivirus heuristics frequently quarantine on
-    # consumer / corporate laptops because it has no cloud-reputation
-    # entry. A copy of the well-known python-build-standalone binary
-    # passes AV cleanly.
+    # We prefer ``python -m venv`` over ``uv venv`` whenever a base
+    # interpreter is available.
     #
-    # Cost: an extra ~30 MB of disk and ~1-2 seconds of venv creation
-    # time, which is invisible next to the 1-3 GB of wheel downloads
-    # that follow. uv is only used as a fallback when no base
-    # interpreter is reachable (rare - the standalone Python is
-    # downloaded on first run).
+    # On WINDOWS we pass ``--copies`` so the venv's ``python.exe`` is a
+    # byte-for-byte copy of the base interpreter instead of the small
+    # "redirector launcher" that the default symlink mode (and uv)
+    # produces. The redirector is a tiny custom executable that Windows
+    # antivirus heuristics frequently quarantine on consumer / corporate
+    # laptops because it has no cloud-reputation entry. A copy of the
+    # well-known python-build-standalone binary passes AV cleanly.
+    #
+    # On LINUX (and macOS) we MUST NOT pass ``--copies`` with the
+    # python-build-standalone tarball. The standalone python3 binary
+    # is built with ``RPATH=$ORIGIN/../lib`` so it finds
+    # ``libpython3.12.so.1.0`` next to itself. ``venv --copies``
+    # copies the binary into ``venv/bin/`` but does NOT copy the
+    # libpython next to it (venv has no notion that python-build-
+    # standalone ships libpython as a separate file). After the copy,
+    # the binary's RPATH resolves to the empty ``venv/lib/`` and
+    # every invocation dies with
+    #     error while loading shared libraries:
+    #         .../venv/bin/../lib/libpython3.12.so.1.0:
+    #         cannot open shared object file
+    # The default symlink mode points ``venv/bin/python3`` back at the
+    # standalone install, so RPATH still resolves to the real lib
+    # directory and the venv works. AV quarantine is not a concern on
+    # Linux / macOS, so the symlink default is the right pick there.
+    #
+    # uv is only used as a fallback when no base interpreter is
+    # reachable (rare - the standalone Python is downloaded on first
+    # run).
     if system_python:
         # --without-pip: python-build-standalone Linux tarballs don't
         # ship the bundled pip wheel under Lib/ensurepip/_bundled/, so
@@ -1571,13 +1587,18 @@ def create_venv(
         # We use uv for all package installs anyway (uv doesn't need
         # pip inside the venv), so skipping ensurepip is the right call
         # on every platform - not just Linux.
-        cmd = [
-            system_python, "-m", "venv",
-            "--copies", "--without-pip", venv_dir,
-        ]
+        venv_argv = [system_python, "-m", "venv"]
+        on_windows = sys.platform == "win32"
+        if on_windows:
+            venv_argv.append("--copies")
+        venv_argv += ["--without-pip", venv_dir]
+        cmd = venv_argv
         _log(
-            f"Creating venv with `python -m venv --copies --without-pip` "
-            f"(AV-friendly, uv-managed packages): {system_python}",
+            "Creating venv with `python -m venv {}--without-pip` "
+            "(uv-managed packages): {}".format(
+                "--copies " if on_windows else "",
+                system_python,
+            ),
             Qgis.Info,
         )
     elif use_uv:

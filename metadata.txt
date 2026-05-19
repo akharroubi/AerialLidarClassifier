@@ -3,7 +3,7 @@ name=Aerial LiDAR Classifier
 qgisMinimumVersion=3.34
 qgisMaximumVersion=3.99
 description=Deep-learning semantic segmentation of aerial LiDAR point clouds with a 3D SegFormer model (TreeAIBox / NRCan).
-version=1.0.2
+version=1.0.3
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
 email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
@@ -34,6 +34,21 @@ hasProcessingProvider=yes
 server=False
 
 changelog=
+    1.0.3
+        - Fix: Linux install failed at the venv pre-flight check with
+          "error while loading shared libraries: libpython3.12.so.1.0:
+          cannot open shared object file" on every distro that uses
+          python-build-standalone (i.e. all of them). The
+          `python -m venv --copies` flag copies the standalone python3
+          binary into venv/bin/ but does NOT copy the libpython next
+          to it (venv has no notion that python-build-standalone
+          ships libpython as a separate file). After the copy, the
+          binary's RPATH=$ORIGIN/../lib resolves to an empty
+          venv/lib/ and every invocation dies. `--copies` was added
+          to dodge Windows AV quarantine of the redirector launcher.
+          It is now applied only on Windows; Linux and macOS use
+          symlinks (the default), which point back at the standalone
+          tree so the RPATH lookup still finds libpython.
     1.0.2
         - Fix: "Use GPU" checkbox stayed unchecked across QGIS sessions
           after a fresh install. The dock's closeEvent persisted the
