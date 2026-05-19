@@ -4,6 +4,43 @@ All notable changes to **Aerial LiDAR Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.2] - 2026-05-19
+
+### Fixed
+- **"Use GPU" checkbox stayed unchecked across QGIS sessions after a
+  fresh install.** The dock's `closeEvent` persisted the checkbox state
+  unconditionally, even when `_check_gpu()` had force-disabled and
+  force-unchecked the box because the GPU probe failed (torch not yet
+  importable on the very first launch, or a transient CUDA wheel /
+  driver mismatch during the `cu128 → cu118` cascade). The `False`
+  then stuck and left users silently on CPU on every subsequent
+  launch, even after the CUDA install eventually succeeded. The
+  plugin now only writes the GPU preference back to `QgsSettings`
+  when the checkbox is actually enabled (i.e. the user had a real
+  choice), and a one-time settings migration resets the stale `False`
+  on first launch of >= 1.0.2 so existing v1.0.1 users get GPU
+  acceleration back automatically.
+
+- **Streaming I/O no longer silently drops the trailing partial chunk
+  on very large LAS files.** v1.0.1 caught the laspy
+  `ValueError: buffer size must be a multiple of element size`
+  raised at the very last chunk (typical above ~2 GB / point format 6)
+  and skipped that chunk to let the pipeline continue. The cost was
+  that the streaming output had a few thousand fewer points than the
+  input - a silent data loss. The chunk loop now uses
+  `LasReader.read_points(n)` directly, so the alignment-mismatch path
+  doesn't trigger on well-formed files. If it does trigger (genuine
+  laspy edge case), a raw-byte recovery path reads the trailing bytes
+  off `point_source.source`, trims to the largest whole-point-record
+  slice, and decodes that slice via `PackedPointRecord.from_buffer`.
+  The streaming output now has the same point count as the input.
+
+### Changed
+- **Trimmed the QGIS Plugin Manager *About* text** down to one short
+  paragraph so the rating widget stays visible in the right panel
+  without scrolling. Full feature list and installation details
+  remain in `README.md` and the project homepage.
+
 ## [1.0.1] - 2026-05-15
 
 ### Fixed

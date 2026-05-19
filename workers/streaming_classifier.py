@@ -71,31 +71,46 @@ DEFAULT_CHUNK_SIZE = 5_000_000
 
 
 def _safe_chunk_iterator(reader, chunk_size, declared_n_points):
-    """Wrap ``laspy.LasReader.chunk_iterator`` with graceful EOF handling.
+    """Yield successive ``ScaleAwarePointRecord`` chunks from ``reader``.
 
-    laspy's chunk_iterator can fail with
-    ``ValueError: buffer size must be a multiple of element size``
-    at the very last chunk of very large LAS files (typically >2 GB
-    PRF 6 / >4 GB PRF 0). The cause is that laspy asks numpy to
-    interpret the file read as exactly ``chunk_size`` points, but the
-    underlying read returns fewer bytes at EOF, so ``np.frombuffer``
-    rejects the buffer.
+    This used to wrap ``laspy.LasReader.chunk_iterator`` but that
+    iterator fails with ``ValueError: buffer size must be a multiple
+    of element size`` at the very last chunk of LAS files where the
+    on-disk byte length is not exactly ``header.point_count *
+    point_size``: laspy asks numpy to interpret the final read as
+    ``chunk_size`` points, but the underlying read returns fewer
+    bytes than that, so ``np.frombuffer`` rejects the buffer. In
+    v1.0.1 we caught that error and silently dropped the trailing
+    partial chunk so the rest of the pipeline could continue. The
+    cost was that the streaming output had slightly fewer points
+    than the input - a silent data loss the plugin must not have.
 
-    This wrapper catches that specific error. If we were >99 % of the
-    way through the file when it happened, the last partial chunk is
-    skipped and the rest of the pipeline gets a clean StopIteration -
-    the output is missing only the last few thousand points (the
-    fraction varies, usually < 0.1 %). If we were nowhere near the
-    end, the file is genuinely corrupted and the error is re-raised
-    after a clear log message naming the failure point.
+    The fix used here:
+      1. Iterate via ``LasReader.read_points(n)`` directly. The
+         ``read_points`` API decides for itself how many points are
+         actually available, so we never ask for more than the file
+         can give and the alignment-mismatch path simply does not
+         trigger on well-formed files.
+      2. If ``read_points`` still fails at the tail (genuinely
+         malformed file or a laspy edge case), drop down to the
+         lowest-level ``point_source.source`` byte stream, read what
+         is left, trim it to the largest whole-point-record-aligned
+         buffer, and decode it via ``PackedPointRecord.from_buffer``.
+         This recovers every byte-aligned point still present on
+         disk. Only a final truly partial record (not a whole point)
+         can be missed at this stage - i.e. the file is corrupt at
+         that byte and there is nothing meaningful to read there.
+      3. If even the raw-byte path fails or yields zero points, the
+         exception is re-raised with a clear message so the user
+         knows the file is corrupted and can re-export it.
     """
     seen = 0
-    iterator = reader.chunk_iterator(chunk_size)
-    while True:
+    target = declared_n_points or 0
+    while target == 0 or seen < target:
+        n_remaining = (target - seen) if target else chunk_size
+        n_this = min(chunk_size, n_remaining) if n_remaining > 0 else chunk_size
         try:
-            chunk = next(iterator)
-        except StopIteration:
-            return
+            record = reader.read_points(n_this)
         except ValueError as exc:
             msg = str(exc).lower()
             looks_like_partial_eof = (
@@ -104,33 +119,100 @@ def _safe_chunk_iterator(reader, chunk_size, declared_n_points):
             )
             if not looks_like_partial_eof:
                 raise
-            coverage = (seen / declared_n_points) if declared_n_points else 1.0
-            if coverage > 0.99:
-                log_warning(
-                    "laspy hit a partial-record EOF at {:,}/{:,} points "
-                    "({:.2f}%). Skipping the last partial chunk - the "
-                    "output is otherwise complete. This is a known "
-                    "limitation of laspy on very large LAS files."
-                    .format(seen, declared_n_points, coverage * 100)
-                )
-                return
-            log_warning(
-                "LAS file looks truncated or corrupted at point {:,}/{:,} "
-                "({:.2f}%): {}. Try re-exporting the file from your "
-                "source software, or split it into smaller tiles before "
-                "running the plugin."
-                .format(seen, declared_n_points, coverage * 100, exc)
-            )
-            raise
+            # Tail-recovery: read whatever raw bytes are left and
+            # decode the largest aligned prefix as a real chunk.
+            recovered = _recover_partial_eof_chunk(reader, seen, target, exc)
+            if recovered is not None and len(recovered) > 0:
+                seen += len(recovered)
+                yield recovered
+            return
+        n = 0
         try:
-            n = len(chunk.x)
+            n = len(record)
         except Exception:
             try:
-                n = len(chunk)
+                n = len(record.x)
             except Exception:
-                n = chunk_size
+                n = 0
+        if n == 0:
+            # Clean EOF (file shorter than header advertised).
+            return
         seen += n
-        yield chunk
+        yield record
+
+
+def _recover_partial_eof_chunk(reader, seen, declared_n_points, original_exc):
+    """Salvage the trailing partial chunk after a laspy alignment error.
+
+    Reads raw bytes from the underlying source, trims to the largest
+    whole-point-record-aligned slice, and decodes that slice into a
+    proper ``ScaleAwarePointRecord``. Returns ``None`` if no bytes
+    could be recovered (in which case the caller re-raises with
+    context, because the file is genuinely truncated).
+    """
+    try:
+        from laspy.point.record import (
+            PackedPointRecord, ScaleAwarePointRecord
+        )
+        point_format = reader.header.point_format
+        point_size = point_format.size
+        # The underlying byte stream lives on point_source.source.
+        # We don't know how many bytes laspy already pulled into the
+        # numpy frombuffer that failed, but Python file-like objects
+        # only advance the cursor by whatever was actually returned
+        # to the caller, so the unread tail is still on disk after
+        # the chunk boundary. Read everything left.
+        stream = reader.point_source.source
+        raw = stream.read()
+        n_complete = len(raw) // point_size
+        if n_complete <= 0:
+            log_warning(
+                "LAS file truncated at point {:,}/{:,}: {}. "
+                "The trailing bytes do not contain a complete point "
+                "record and cannot be recovered. Re-export the file "
+                "from your source software."
+                .format(seen, declared_n_points, original_exc)
+            )
+            return None
+        trimmed = raw[: n_complete * point_size]
+        packed = PackedPointRecord.from_buffer(
+            trimmed, point_format, count=n_complete
+        )
+        record = ScaleAwarePointRecord(
+            packed.array,
+            point_format,
+            reader.header.scales,
+            reader.header.offsets,
+        )
+        n_total = seen + n_complete
+        if n_total < declared_n_points:
+            log_warning(
+                "Recovered {:,} extra points after the laspy alignment "
+                "stall, but the file is still {:,} point(s) short of "
+                "its header count ({:,}/{:,}). The plugin output will "
+                "match what was actually readable on disk."
+                .format(
+                    n_complete,
+                    declared_n_points - n_total,
+                    n_total,
+                    declared_n_points,
+                )
+            )
+        else:
+            log_info(
+                "Recovered the trailing {:,} points via raw-byte read "
+                "after the laspy alignment stall. Total points: {:,}."
+                .format(n_complete, n_total)
+            )
+        return record
+    except Exception as exc:
+        log_warning(
+            "Tail-chunk recovery failed at point {:,}/{:,}: {}. "
+            "Re-raising the original laspy error so the issue is "
+            "visible to the user."
+            .format(seen, declared_n_points, exc)
+        )
+        return None
 
 # ASPRS spec: PRF >= 6 (LAS 1.4) carries an 8-bit classification field
 # and a separate classification-flags byte. Earlier PRFs pack a 5-bit

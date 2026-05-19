@@ -3,64 +3,21 @@ name=Aerial LiDAR Classifier
 qgisMinimumVersion=3.34
 qgisMaximumVersion=3.99
 description=Deep-learning semantic segmentation of aerial LiDAR point clouds with a 3D SegFormer model (TreeAIBox / NRCan).
-version=1.0.1
+version=1.0.2
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
 email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
 
-about=Semantic segmentation of aerial LiDAR point clouds (LAS / LAZ / COPC)
-    using the 3D SegFormer architecture, written to the standard ASPRS
-    'classification' dimension.
-
-    Primary classes (default ASPRS codes):
-      - Ground            (ASPRS 2)
-      - Vegetation        (ASPRS 5)
-      - Building          (ASPRS 6)
-      - Wires / Powerlines (ASPRS 14)
-      - Poles             (ASPRS 15)
-
-    Auxiliary classes (mapped to ASPRS 1 = Unclassified, the LAS spec
-    has no dedicated code for them):
-      - Vehicles
-      - Fences
-
-    Features:
-      - Native dock-based UI: drag-and-drop LAS / LAZ / COPC, layer picker, batch processing
-      - QGIS Processing algorithm for use in the Toolbox, Graphical Modeler and qgis_process CLI
-      - Background QgsTask execution with full progress and cancellation
-      - One-click dependency installer (downloads a portable Python +
-        uv into an isolated venv; does NOT touch QGIS's own Python)
-      - Automatic NVIDIA GPU detection (compute capability + driver
-        version) with the right CUDA wheel (cu121 / cu124 / cu126 /
-        cu128) selected per system; CPU fallback; Apple Silicon MPS
-      - On-demand model download with SHA-256 verification (uses
-        QgsBlockingNetworkRequest so the QGIS proxy is respected)
-      - Spatial tiling and streaming I/O for files larger than RAM
-      - Direct loading of classified outputs as QGIS point-cloud layers (PDAL)
-
-    Requirements / external dependencies:
-      - QGIS >= 3.34
-      - PyTorch + torchvision (2.x), laspy, lazrs, timm, numpy_indexed,
-        numpy (<2.0). These are NOT bundled - they are downloaded into
-        a per-user isolated virtual environment on first run (no admin
-        rights, no impact on QGIS's own Python). About 1-3 GB on disk
-        depending on whether a CUDA build is installed.
-      - Optional: an NVIDIA GPU with a driver new enough for the
-        chosen CUDA toolkit (see plugin documentation for the table).
-      - The bundled deep-learning model is downloaded on first use
-        (~18 MB) from the official TreeAIBox release.
-
-    Restrictions / licensing:
-      - The plugin source code is licensed under GPL-3.0-or-later.
-      - The downloaded model is licensed under CC BY-NC 4.0
-        (Creative Commons Attribution-NonCommercial 4.0). Commercial
-        users must obtain a separate licence from the model author.
-      - No spatial / regional restriction.
-
-    The model is the UrbanFiltering 3D SegFormer from the TreeAIBox project
-    (Zhouxin Xi, tested by Charumitha Selvaraj - Natural Resources Canada, NRCan),
-    Crown Copyright, Government of Canada, distributed under CC BY-NC 4.0:
-    https://github.com/NRCan/TreeAIBox
+about=Classifies aerial LiDAR point clouds (LAS / LAZ / COPC) into
+    Ground, Vegetation, Building, Wires / Powerlines and Poles
+    (standard ASPRS codes) using the UrbanFiltering 3D SegFormer
+    model from NRCan's TreeAIBox project. Runs on NVIDIA GPU (CUDA),
+    Apple Silicon (MPS) or CPU; spatial tiling handles files larger
+    than RAM. A one-click installer sets up an isolated Python venv
+    on first use, with no impact on QGIS's own Python. The model is
+    distributed under CC BY-NC 4.0; full documentation, the GPU
+    driver table and the CLI / Processing usage are on the project
+    homepage: https://github.com/akharroubi/AerialLidarClassifier
 
 tracker=https://github.com/akharroubi/AerialLidarClassifier/issues
 repository=https://github.com/akharroubi/AerialLidarClassifier
@@ -77,6 +34,27 @@ hasProcessingProvider=yes
 server=False
 
 changelog=
+    1.0.2
+        - Fix: "Use GPU" checkbox stayed unchecked across QGIS sessions
+          after a fresh install. The dock's closeEvent persisted the
+          checkbox state even when the GPU probe had forced it off
+          (torch not yet importable, or CUDA wheel/driver mismatch
+          during the cu128 -> cu118 cascade). The False stuck and left
+          users silently on CPU on the next launch. The plugin now
+          only persists the GPU preference when the user could
+          actually choose it (i.e. the checkbox is enabled), and a
+          one-time settings migration resets the stale False on first
+          launch so existing v1.0.1 users get GPU back automatically.
+        - Fix: streaming I/O no longer silently drops the trailing
+          partial chunk on very large LAS files. v1.0.1 skipped the
+          last few thousand points whenever laspy hit
+          "buffer size must be a multiple of element size" at EOF.
+          The chunk loop now uses read_points(n) directly and falls
+          back to a raw-byte recovery path that decodes every
+          whole-point-record left on disk, so the streaming output
+          has the same point count as the input.
+        - Polish: trimmed the long About text in the QGIS Plugin
+          Manager so the rating widget is visible without scrolling.
     1.0.1
         - Fix: corporate SSL inspection blocking the install. uv now
           uses the OS native TLS (--native-tls) so Windows-installed

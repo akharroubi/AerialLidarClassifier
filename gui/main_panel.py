@@ -192,6 +192,23 @@ class ClassifierDockWidget(QDockWidget):
 
     def _load_settings(self):
         s = QgsSettings()
+
+        # One-time migration: v1.0.1 and earlier saved `use_gpu=False`
+        # whenever the GPU probe failed (e.g. fresh install before the
+        # venv had torch, or a CUDA wheel that didn't match the driver).
+        # That False then stuck across sessions and left users silently
+        # on CPU even after a successful CUDA install or reinstall.
+        # On first launch of >=1.0.2, clear that stale False back to
+        # True so the next _check_gpu() default is "use GPU if present".
+        # The user can still uncheck it; the new _save_settings() only
+        # writes the choice when the checkbox is actually enabled.
+        settings_version = s.value(
+            f"{SETTINGS_PREFIX}/settings_version", 0, type=int
+        )
+        if settings_version < 2:
+            s.setValue(f"{SETTINGS_PREFIX}/use_gpu", True)
+            s.setValue(f"{SETTINGS_PREFIX}/settings_version", 2)
+
         self._saved_suffix = s.value(
             f"{SETTINGS_PREFIX}/suffix", "_classified")
         self._saved_field = s.value(
@@ -231,7 +248,15 @@ class ClassifierDockWidget(QDockWidget):
         s.setValue(
             f"{SETTINGS_PREFIX}/load_result",
             self.load_result_check.isChecked())
-        s.setValue(f"{SETTINGS_PREFIX}/use_gpu", self.gpu_check.isChecked())
+        # Only persist `use_gpu` when the checkbox was a real user choice.
+        # When the GPU probe fails (e.g. during a fresh install before
+        # torch is importable, or with a CUDA wheel that doesn't match
+        # the driver), _check_gpu() force-disables and unchecks the box.
+        # Saving that False here would stick across sessions and leave
+        # the next launch with GPU silently off even after a successful
+        # CUDA install. Preserve the previously stored preference instead.
+        if self.gpu_check.isEnabled():
+            s.setValue(f"{SETTINGS_PREFIX}/use_gpu", self.gpu_check.isChecked())
         if self.output_widget.filePath():
             s.setValue(
                 f"{SETTINGS_PREFIX}/output_dir", self.output_widget.filePath()
