@@ -4,7 +4,7 @@ All notable changes to **Aerial LiDAR Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
-## [1.0.3] - 2026-05-19
+## [1.0.2] - 2026-05-19
 
 ### Fixed
 - **Linux first-install crashed at the venv pre-flight check** with
@@ -30,9 +30,6 @@ and the project follows [Semantic Versioning](https://semver.org/).
     Ubuntu: standalone Python downloads, symlink venv passes
     pre-flight, ``uv pip install numpy`` succeeds inside the venv.
 
-## [1.0.2] - 2026-05-19
-
-### Fixed
 - **"Use GPU" checkbox stayed unchecked across QGIS sessions after a
   fresh install.** The dock's `closeEvent` persisted the checkbox state
   unconditionally, even when `_check_gpu()` had force-disabled and
