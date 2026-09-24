@@ -1,0 +1,152 @@
+{
+  "id": "litept_l_dales_10cm",
+  "display_name": "LitePT-L (DALES, 10 cm)",
+  "family": "litept",
+  "weights_file": "litept_l_dales_10cm_ema_fp16.pth",
+  "weights_dtype": "float16 (EMA weights of the validation-selected checkpoint)",
+  "source_checkpoint": {
+    "epoch": 110,
+    "global_step": 27492,
+    "best_val_mIoU8": 0.7965650248526399,
+    "timestamp": "2026-09-21T12:11:10.129375+00:00"
+  },
+  "architecture": {
+    "in_channels": 2,
+    "order": [
+      "z",
+      "z-trans",
+      "hilbert",
+      "hilbert-trans"
+    ],
+    "stride": [
+      2,
+      2,
+      2,
+      2
+    ],
+    "enc_depths": [
+      3,
+      3,
+      3,
+      12,
+      3
+    ],
+    "enc_channels": [
+      72,
+      144,
+      288,
+      576,
+      864
+    ],
+    "enc_num_head": [
+      4,
+      8,
+      16,
+      32,
+      48
+    ],
+    "enc_patch_size": [
+      1024,
+      1024,
+      1024,
+      1024,
+      1024
+    ],
+    "enc_conv": [
+      true,
+      true,
+      true,
+      false,
+      false
+    ],
+    "enc_attn": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ],
+    "enc_rope_freq": [
+      100.0,
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    "dec_depths": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "dec_channels": [
+      72,
+      144,
+      288,
+      576
+    ],
+    "dec_num_head": [
+      4,
+      8,
+      16,
+      32
+    ],
+    "dec_patch_size": [
+      1024,
+      1024,
+      1024,
+      1024
+    ],
+    "dec_conv": [
+      false,
+      false,
+      false,
+      false
+    ],
+    "dec_attn": [
+      false,
+      false,
+      false,
+      false
+    ],
+    "dec_rope_freq": [
+      100.0,
+      100.0,
+      100.0,
+      100.0
+    ],
+    "mlp_ratio": 4,
+    "qkv_bias": true,
+    "qk_scale": null,
+    "attn_drop": 0.0,
+    "proj_drop": 0.0,
+    "drop_path": 0.3,
+    "shuffle_orders": true,
+    "pre_norm": true,
+    "enc_mode": false
+  },
+  "num_classes": 8,
+  "in_channels": 2,
+  "grid_size": 0.1,
+  "eval": {
+    "points_per_crop": 70000,
+    "max_radius": 30.0,
+    "grid_size": 0.1,
+    "amp": false
+  },
+  "class_names": [
+    "ground",
+    "vegetation",
+    "cars",
+    "trucks",
+    "power_lines",
+    "fences",
+    "poles",
+    "buildings"
+  ],
+  "training": {
+    "dataset": "DALES (Dayton Annotated LiDAR Earth Scan), 32 train / 4 val / 4 test tiles, custom deployment split",
+    "epochs": 200,
+    "seed": 42
+  }
+}

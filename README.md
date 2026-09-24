@@ -1,8 +1,15 @@
 # Aerial LiDAR Classifier
 
 Deep-learning semantic segmentation of aerial LiDAR point clouds (LAS / LAZ / COPC)
-inside QGIS, using the 3D SegFormer architecture from the
-[TreeAIBox](https://github.com/NRCan/TreeAIBox) project (Natural Resources Canada).
+inside QGIS, with two models:
+
+- **LitePT-L** (default on NVIDIA GPUs): a point transformer from
+  [prs-eth/LitePT](https://github.com/prs-eth/LitePT) trained on the
+  [DALES](https://arxiv.org/abs/2004.11985) aerial LiDAR dataset at 10 cm.
+  Eight classes, custom four-tile DALES test mIoU 0.824.
+- **3D SegFormer** (UrbanFiltering, [TreeAIBox](https://github.com/NRCan/TreeAIBox),
+  Natural Resources Canada): a voxel transformer at 30 cm that also runs on CPU and
+  Apple Silicon.
 
 [![QGIS](https://img.shields.io/badge/QGIS-3.34%2B-1f9b4e)](https://qgis.org)
 [![Python](https://img.shields.io/badge/python-3.9%E2%80%933.13-3776AB)](https://www.python.org)
@@ -39,6 +46,9 @@ PDAL provider) read the result with no special handling.
 
 ## Features
 
+- **Two models, one interface.** Pick LitePT-L or SegFormer 3D in the dock or
+  with the `MODEL` parameter in Processing; each model says which devices it
+  runs on, and its weights are downloaded (or imported from a file) once.
 - **Native dock-based UI** with drag-and-drop, layer picker, and live log.
 - **Processing algorithm and provider** &mdash; usable from the Toolbox, the
   Graphical Modeler, and the `qgis_process` command-line interface.
@@ -48,8 +58,11 @@ PDAL provider) read the result with no special handling.
   bundled Python are never touched. No admin rights required.
 - **Automatic CUDA wheel selection.** NVIDIA driver and compute-capability are
   detected via `nvidia-smi`; the matching PyTorch wheel
-  (`cu121` / `cu124` / `cu126` / `cu128`) is installed. CPU fallback on
-  unsupported hardware. Apple Silicon uses MPS.
+  (`cu118` / `cu121` / `cu124` / `cu126` / `cu128`, cu126 preferred) is
+  installed, plus `spconv` for LitePT-L. CPU fallback on unsupported hardware.
+  Apple Silicon uses MPS (SegFormer 3D only).
+- **Units handled.** Feet are converted from the file's CRS before inference;
+  see [Coordinate units](#coordinate-units).
 - **Spatial tiling with halo** for files larger than GPU memory.
 - **Streaming I/O** (4-pass: header &rarr; per-tile partition &rarr; per-tile
   inference &rarr; streaming output write) so files larger than RAM can still
@@ -92,8 +105,11 @@ opens a **Setup** panel that downloads:
 
 - a standalone Python interpreter (~30&nbsp;MB),
 - [`uv`](https://github.com/astral-sh/uv) (single static binary),
-- PyTorch + supporting wheels (~1&ndash;3&nbsp;GB depending on CUDA),
-- the SegFormer model weights (~18&nbsp;MB, SHA-256 verified).
+- PyTorch + supporting wheels (~1&ndash;3&nbsp;GB depending on CUDA), and on
+  CUDA installs `spconv` (sparse convolutions for LitePT-L, ~100&nbsp;MB),
+- the model weights when you first select a model: LitePT-L ~172&nbsp;MB,
+  SegFormer 3D ~18&nbsp;MB (both SHA-256 verified; a weights file you already
+  have can be imported from the dock instead).
 
 Total install time on a residential connection is typically 3&ndash;10&nbsp;minutes.
 Everything is stored under a per-user folder and can be removed at any time
@@ -170,10 +186,16 @@ dialog's *Advanced parameters* group.
 | Apple Silicon MPS  | macOS 13+                   | code path present, not tested by the author; reports welcome |
 | CPU only           | Windows / Linux / macOS     | yes    |
 
-Recommended for production-sized tiles: an NVIDIA GPU with **&ge; 3&nbsp;GB**
-VRAM. The default tile target of 10&nbsp;M points is sized for 3&nbsp;GB cards
-at 30&nbsp;cm voxel resolution. CPU inference works but is roughly 50&ndash;100&times;
-slower than a mid-range GPU.
+**LitePT-L runs on NVIDIA CUDA GPUs only**: its sparse convolutions come from
+`spconv`, which has no CPU or macOS build, and no cu128 wheel yet (RTX 50
+cards therefore keep SegFormer 3D until spconv ships one). Peak GPU memory is
+about 4.5&nbsp;GB with the validated 70&nbsp;000-point crops; cards under 8&nbsp;GB
+automatically use 35&nbsp;000-point crops, and an out-of-memory crop halves the
+crop size and retries. On an RTX 3090 it processes about 60&nbsp;000 points/s.
+
+**SegFormer 3D** runs everywhere: an NVIDIA GPU with **&ge; 3&nbsp;GB** VRAM is
+recommended (about 110&nbsp;000 points/s on an RTX 3090); CPU inference works
+but is roughly 50&ndash;100&times; slower than a mid-range GPU.
 
 The right CUDA wheel is selected automatically from `nvidia-smi`'s reported
 compute capability *and* driver version; you do not need to install CUDA
@@ -183,7 +205,22 @@ yourself.
 
 ## Classification output
 
-Output points use the ASPRS LAS 1.4 classification codes:
+Output points use the ASPRS LAS 1.4 classification codes.
+
+**LitePT-L** (DALES classes):
+
+| Model class | Name        | ASPRS code | Meaning                  |
+|------------:|-------------|-----------:|--------------------------|
+| 1           | Ground      | 2          | Ground                   |
+| 2           | Vegetation  | 5          | High Vegetation          |
+| 3           | Cars        | 1          | Unclassified&nbsp;\*     |
+| 4           | Trucks      | 1          | Unclassified&nbsp;\*     |
+| 5           | Power lines | 14         | Wire &mdash; Conductor   |
+| 6           | Fences      | 1          | Unclassified&nbsp;\*     |
+| 7           | Poles       | 15         | Transmission Tower       |
+| 8           | Buildings   | 6          | Building                 |
+
+**SegFormer 3D** (UrbanFiltering classes):
 
 | Model class | Name        | ASPRS code | Meaning                  |
 |------------:|-------------|-----------:|--------------------------|
@@ -195,10 +232,10 @@ Output points use the ASPRS LAS 1.4 classification codes:
 | 6           | Pole        | 15         | Transmission Tower       |
 | 7           | Building    | 6          | Building                 |
 
-\* ASPRS LAS 1.4 has no dedicated codes for Vehicles or Fences, so these are
-mapped to **1 = Unclassified** by default. If you need them as a separate
-class, override `FIELD_NAME` in the Processing algorithm to write to an extra
-LAS dimension instead.
+\* ASPRS LAS 1.4 has no dedicated codes for vehicles or fences, so these are
+mapped to **1 = Unclassified**. If you need them as separate classes, set
+`FIELD_NAME` to another name to write the raw model ids into an extra LAS
+dimension instead.
 
 When the input file already uses Point Record Format &lt; 6, the writer
 upgrades it to PRF 6 / LAS 1.4 (required for ASPRS codes &gt; 31). All other
@@ -264,7 +301,19 @@ automatically.
 
 ## How it works
 
-The model is the **UrbanFiltering 3D SegFormer**
+**LitePT-L** works on points, not voxels. Per tile the plugin removes an
+integer origin, keeps one representative per occupied 10&nbsp;cm voxel (with an
+exact membership map back to every raw point), and covers the representatives
+with crops of at most 70&nbsp;000 points within 30&nbsp;m (regular centres, then one
+crop per still-uncovered point). Each crop is centred, floor-referenced and
+voxelised exactly like a validation crop, the network's softmax is averaged
+over every visit of a point, and the argmax is projected back to the raw
+points. The upstream code (MIT) is vendored in `core/litept/` with pure-PyTorch
+replacements for FlashAttention, `torch_scatter` and the RoPE kernel, so only
+`spconv` remains compiled. This port was checked against the reference
+implementation: 99.998&nbsp;% of 2.7&nbsp;M points identical.
+
+**SegFormer 3D** is the **UrbanFiltering 3D SegFormer**
 ([Xi *et&nbsp;al.*, TreeAIBox](https://github.com/NRCan/TreeAIBox)), a hierarchical
 transformer adapted to volumetric point-cloud features. The plugin's inference
 pipeline:
@@ -444,7 +493,21 @@ you see new lines, the install is still working.
 
 ## Model weights
 
-The bundled model is downloaded on first use:
+Weights are downloaded when a model is first selected (or imported from a file
+with the folder icon next to the model selector).
+
+**LitePT-L (DALES, 10 cm)**
+
+| Field         | Value |
+|---------------|-------|
+| File          | `litept_l_dales_10cm_ema_fp16.pth` (EMA weights of the validation-selected checkpoint, stored as float16) |
+| Size          | ~172&nbsp;MB |
+| SHA-256       | `849ba5089e629785fd64f5166cc35f999b758c68754573bf18122a277b09592b` |
+| URL           | [this repo, release v1.1.0](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.1.0) |
+| Training data | DALES (Dayton Annotated LiDAR Earth Scan), 32 tiles; validated on 4, tested on 4 held-out tiles |
+| License       | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) (the training data is licensed for non-commercial use) |
+
+**SegFormer 3D (UrbanFiltering, 30 cm)**
 
 | Field         | Value |
 |---------------|-------|
@@ -466,7 +529,22 @@ GPL-3.0-or-later and is free to use commercially.
 
 ## Citation
 
-If you use this plugin in academic work, please cite the underlying model:
+If you use this plugin in academic work, please cite the model you used.
+For LitePT-L, cite the LitePT architecture (see the
+[LitePT repository](https://github.com/prs-eth/LitePT) for the paper) and the
+DALES dataset it was trained on:
+
+```bibtex
+@inproceedings{varney2020dales,
+  author    = {Varney, Nina and Asari, Vijayan K. and Graehling, Quinn},
+  title     = {{DALES}: A Large-scale Aerial LiDAR Data Set for Semantic Segmentation},
+  booktitle = {IEEE/CVF Conference on Computer Vision and Pattern Recognition Workshops (CVPRW)},
+  year      = {2020},
+  url       = {https://arxiv.org/abs/2004.11985}
+}
+```
+
+For SegFormer 3D:
 
 ```bibtex
 @misc{xi_treeaibox,
@@ -487,7 +565,7 @@ And, optionally, the plugin itself:
                   semantic segmentation of aerial LiDAR point clouds},
   year         = {2026},
   url          = {https://github.com/akharroubi/AerialLidarClassifier},
-  version      = {1.0.0},
+  version      = {1.1.0},
   note         = {GPL-3.0-or-later}
 }
 ```
@@ -496,17 +574,24 @@ And, optionally, the plugin itself:
 
 ## License
 
-- **Plugin source code** &mdash; [GPL-3.0-or-later](LICENSE).
-- **Model weights** &mdash; [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/),
-  &copy; the model authors. Distributed unchanged from the upstream
-  TreeAIBox release. Commercial users must obtain a separate licence from
-  the model author.
+- **Plugin source code** &mdash; [GPL-3.0-or-later](LICENSE). The vendored
+  LitePT model code (`core/litept/`) is MIT, &copy; Photogrammetry and Remote
+  Sensing Lab, ETH Zurich (see `core/litept/LICENSE.upstream`).
+- **Model weights** &mdash; [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
+  LitePT-L was trained on DALES, whose licence is non-commercial; the SegFormer
+  weights are distributed unchanged from the upstream TreeAIBox release.
+  Commercial users must obtain a separate licence from the model authors.
 
 ---
 
 ## Credits
 
-**Model.** The UrbanFiltering 3D SegFormer was developed by
+**LitePT-L.** Architecture and reference implementation by the Photogrammetry
+and Remote Sensing Lab, ETH Zurich ([prs-eth/LitePT](https://github.com/prs-eth/LitePT)).
+Trained on DALES (University of Dayton) by the GeoScITY Lab, University of
+Liege.
+
+**SegFormer 3D.** The UrbanFiltering 3D SegFormer was developed by
 **Zhouxin Xi** (tested by **Charumitha Selvaraj**) at the Canadian Forest
 Service, Natural Resources Canada, as part of the
 [TreeAIBox](https://github.com/NRCan/TreeAIBox) project. Crown Copyright,

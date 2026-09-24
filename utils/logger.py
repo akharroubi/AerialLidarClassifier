@@ -11,16 +11,16 @@ LOG_TAG = "Aerial LiDAR Classifier"
 
 
 def log_info(message: str) -> None:
-    QgsMessageLog.logMessage(str(message), LOG_TAG, Qgis.Info)
+    QgsMessageLog.logMessage(str(message), LOG_TAG, Qgis.MessageLevel.Info)
 
 
 def log_warning(message: str) -> None:
-    QgsMessageLog.logMessage(str(message), LOG_TAG, Qgis.Warning)
+    QgsMessageLog.logMessage(str(message), LOG_TAG, Qgis.MessageLevel.Warning)
 
 
 def log_error(message: str) -> None:
-    QgsMessageLog.logMessage(str(message), LOG_TAG, Qgis.Critical)
+    QgsMessageLog.logMessage(str(message), LOG_TAG, Qgis.MessageLevel.Critical)
 
 
 def log_success(message: str) -> None:
-    QgsMessageLog.logMessage(str(message), LOG_TAG, Qgis.Success)
+    QgsMessageLog.logMessage(str(message), LOG_TAG, Qgis.MessageLevel.Success)

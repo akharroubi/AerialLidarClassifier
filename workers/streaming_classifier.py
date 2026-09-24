@@ -247,9 +247,7 @@ def _grid_from_bounds(
 def streaming_tiled_classify(
     input_path: Path,
     output_path: Path,
-    classifier_fn: Callable,
-    config_path: str,
-    model_path: str,
+    predict_fn: Callable,
     device: str,
     class_mapping: dict,
     laspy_module,
@@ -263,9 +261,12 @@ def streaming_tiled_classify(
     info_callback: Callable[[str], None] | None = None,
     warning_callback: Callable[[str], None] | None = None,
     units_override: str | None = None,
+    field_description: str = "AI classification",
 ) -> Path | None:
     """Run a streaming tiled classification of ``input_path`` to ``output_path``.
 
+    ``predict_fn(xyz_m, progress_cb)`` is a loaded backend's ``predict``:
+    it returns one model class id per point of a tile given in metres.
     Returns the output path on success, or ``None`` if cancelled.
 
     Supports the standard ASPRS ``classification`` field, a custom
@@ -356,8 +357,7 @@ def streaming_tiled_classify(
 
         if not _pass3_inference(
             tiles, tile_dirs, predictions, class_mapping,
-            classifier_fn, config_path, model_path, device,
-            progress_callback, cancel_callback,
+            predict_fn, progress_callback, cancel_callback,
             emit_warning=emit_warning,
         ):
             return None
@@ -378,6 +378,7 @@ def streaming_tiled_classify(
             input_pf_id=input_pf_id,
             emit_info=emit_info,
             emit_warning=emit_warning,
+            field_description=field_description,
         ):
             return None
 
@@ -481,8 +482,7 @@ def _pass2_partition(
 
 def _pass3_inference(
     tiles, tile_dirs, predictions, class_mapping,
-    classifier_fn, config_path, model_path, device,
-    progress_callback, cancel_callback,
+    predict_fn, progress_callback, cancel_callback,
     emit_warning=log_warning,
 ) -> bool:
     log_info("Streaming pass 3/4: running per-tile inference")
@@ -533,11 +533,7 @@ def _pass3_inference(
             progress_callback(min(90.0, overall))
 
         try:
-            tile_preds = classifier_fn(
-                config_path, tile_pcd, model_path,
-                if_bottom_only=False, use_efficient=True,
-                device=device, progress_callback=tile_progress,
-            )
+            tile_preds = predict_fn(tile_pcd, tile_progress)
         except InterruptedError:
             return False
 
@@ -590,6 +586,7 @@ def _build_output_header(
     is_asprs_field: bool,
     field_name: str,
     needs_pf_upgrade: bool,
+    field_description: str = "AI classification",
 ):
     """Build the output LAS header, applying every requested transformation.
 
@@ -632,7 +629,7 @@ def _build_output_header(
             try:
                 header.add_extra_dim(laspy_module.ExtraBytesParams(
                     name=field_name, type="int32",
-                    description="AI Classification (3D SegFormer / TreeAIBox)",
+                    description=str(field_description)[:32],
                 ))
                 log_info(
                     f"Streaming: added extra-byte dimension '{field_name}' "
@@ -691,6 +688,7 @@ def _pass4_write(
     input_pf_id: int,
     emit_info=log_info,
     emit_warning=log_warning,
+    field_description: str = "AI classification",
 ) -> bool:
     emit_info(f"Streaming pass 4/4: writing {output_path.name}")
 
@@ -710,6 +708,7 @@ def _pass4_write(
             is_asprs_field=is_asprs_field,
             field_name=field_name,
             needs_pf_upgrade=needs_pf_upgrade,
+            field_description=field_description,
         )
         out_pf = out_header.point_format
         out_scales = out_header.scales

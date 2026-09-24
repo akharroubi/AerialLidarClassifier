@@ -1,42 +1,39 @@
-"""
-Model download dialog for Aerial LiDAR Classifier.
+"""Model download dialog: fetches one model's weights with progress."""
 
-Downloads the pre-trained model weights from a configurable URL
-with progress tracking.
-"""
-
-from qgis.PyQt.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QLineEdit, QProgressBar
-)
 from qgis.PyQt.QtCore import QThread, pyqtSignal
+from qgis.PyQt.QtWidgets import (
+    QDialog, QHBoxLayout, QLabel, QLineEdit, QProgressBar, QPushButton,
+    QVBoxLayout,
+)
 
 
 class DownloadWorker(QThread):
-    """Background thread for model download."""
+    """Background thread for one model download."""
     progress = pyqtSignal(int, int)  # bytes_downloaded, total_bytes
     finished = pyqtSignal(bool, str)
 
-    def __init__(self, url):
-        super().__init__()
+    def __init__(self, spec, url, parent=None):
+        super().__init__(parent)
+        self.spec = spec
         self.url = url
 
     def run(self):
         from ..utils.model_manager import ModelManager
-        success, error = ModelManager.download_model(
+        success, error = ModelManager(self.spec).download_model(
             self.url,
-            progress_callback=lambda dl, total: self.progress.emit(dl, total)
+            progress_callback=lambda dl, total: self.progress.emit(dl, total),
         )
         self.finished.emit(success, error)
 
 
 class ModelDownloadDialog(QDialog):
-    """Dialog for downloading model weights."""
+    """Dialog for downloading the weights of ``spec``."""
 
-    def __init__(self, parent=None):
+    def __init__(self, spec, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Download Model")
-        self.setMinimumWidth(500)
+        self.spec = spec
+        self.setWindowTitle(f"Download {spec.display_name}")
+        self.setMinimumWidth(520)
         self.worker = None
         self._setup_ui()
 
@@ -45,7 +42,7 @@ class ModelDownloadDialog(QDialog):
         layout.setSpacing(12)
         layout.setContentsMargins(16, 16, 16, 16)
 
-        header = QLabel("Download Model Weights")
+        header = QLabel(f"Download {self.spec.display_name}")
         font = header.font()
         font.setPointSize(14)
         font.setBold(True)
@@ -53,29 +50,30 @@ class ModelDownloadDialog(QDialog):
         layout.addWidget(header)
 
         info = QLabel(
-            "The deep learning model weights need to be downloaded on first use. "
-            "The file is approximately 18 MB.")
+            f"{self.spec.description}\n\n"
+            f"File: {self.spec.weights_filename} "
+            f"(about {self.spec.weights_size_mb:.0f} MB), verified by SHA-256 "
+            f"after download. Licence: {self.spec.licence}."
+        )
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        # URL field
         url_layout = QHBoxLayout()
         url_layout.addWidget(QLabel("URL:"))
         self.url_edit = QLineEdit()
         from ..utils.model_manager import ModelManager
-        self.url_edit.setText(ModelManager.get_model_url())
+        self.url_edit.setText(ModelManager(self.spec).get_model_url())
         url_layout.addWidget(self.url_edit)
         layout.addLayout(url_layout)
 
-        # Progress
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         layout.addWidget(self.progress_bar)
 
         self.status_label = QLabel("")
+        self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
 
-        # Buttons
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
@@ -95,36 +93,41 @@ class ModelDownloadDialog(QDialog):
             self.status_label.setText("Please enter a URL")
             return
 
-        # Save URL to settings
         from ..utils.model_manager import ModelManager
-        ModelManager.set_model_url(url)
+        ModelManager(self.spec).set_model_url(url)
 
         self.download_btn.setEnabled(False)
         self.url_edit.setEnabled(False)
+        # The blocking QGIS request cannot be interrupted midway; a
+        # dialog closed during the download would otherwise destroy a
+        # running thread (a Qt fatal error in v1.0.2).
+        self.cancel_btn.setEnabled(False)
         self.status_label.setText("Downloading...")
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
+        self.progress_bar.setRange(0, 0)
 
-        self.worker = DownloadWorker(url)
+        self.worker = DownloadWorker(self.spec, url, parent=self)
         self.worker.progress.connect(self._on_progress)
         self.worker.finished.connect(self._on_finished)
         self.worker.start()
 
     def _on_progress(self, downloaded, total):
+        self.progress_bar.setRange(0, 100)
         if total > 0:
-            pct = int(downloaded * 100 / total)
-            self.progress_bar.setValue(pct)
-            mb_dl = downloaded / (1024 * 1024)
-            mb_total = total / (1024 * 1024)
+            self.progress_bar.setValue(int(downloaded * 100 / total))
             self.status_label.setText(
-                f"Downloading... {mb_dl:.1f} / {mb_total:.1f} MB")
+                f"Downloaded {downloaded / (1024 * 1024):.1f} / "
+                f"{total / (1024 * 1024):.1f} MB, verifying..."
+            )
         else:
-            mb_dl = downloaded / (1024 * 1024)
-            self.status_label.setText(f"Downloading... {mb_dl:.1f} MB")
+            self.status_label.setText(
+                f"Downloaded {downloaded / (1024 * 1024):.1f} MB, verifying..."
+            )
 
     def _on_finished(self, success, error):
+        self.cancel_btn.setEnabled(True)
+        self.progress_bar.setRange(0, 100)
         if success:
-            self.status_label.setText("Download complete!")
+            self.status_label.setText("Download complete, SHA-256 verified.")
             self.progress_bar.setValue(100)
             self.download_btn.setText("Done")
             self.download_btn.setEnabled(True)
@@ -132,6 +135,17 @@ class ModelDownloadDialog(QDialog):
             self.download_btn.clicked.connect(self.accept)
         else:
             self.status_label.setText(f"Failed: {error}")
+            self.progress_bar.setValue(0)
             self.download_btn.setText("Retry")
             self.download_btn.setEnabled(True)
             self.url_edit.setEnabled(True)
+
+    def closeEvent(self, event):  # noqa: N802 - Qt API
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.wait()
+        super().closeEvent(event)
+
+    def reject(self):
+        if self.worker is not None and self.worker.isRunning():
+            return
+        super().reject()

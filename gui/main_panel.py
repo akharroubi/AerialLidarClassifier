@@ -6,7 +6,6 @@ native QGIS widgets where possible (QgsFileWidget, QgsCollapsibleGroupBox,
 QgsMessageBar) and stays out of the way when unused.
 """
 
-from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -57,12 +56,11 @@ from qgis.gui import (
 )
 
 from ..config import (
-    DEFAULT_CLASS_MAPPING,
-    MODEL_INFO,
     PLUGIN_NAME,
     SETTINGS_PREFIX,
     TILE_DEFAULT_BUFFER_M,
 )
+from ..core.registry import MODELS, default_model_for_device, get_model
 from ..utils.helpers import get_gpu_info, truncate_name
 from ..utils.las_units import UNIT_OVERRIDES
 from ..utils.las_utils import find_las_files
@@ -110,18 +108,14 @@ class ClassifierDockWidget(QDockWidget):
         # Runtime state
         self.files: list[Path] = []
         self.gpu_info: dict = {"available": False}
-        # The class mapping is internal-only: it tells the inference
-        # post-processor how to translate the model's 1-7 IDs into the
-        # standard ASPRS codes (Ground=2, Vegetation=5, Building=6,
-        # Wires=14, Pole=15, Vehicles/Fence -> Unclassified=1). It is
-        # not user-editable to keep the panel focused.
-        self.class_mapping = deepcopy(DEFAULT_CLASS_MAPPING)
         self.task = None
         self._loaders: list[FileInfoLoader] = []
         self._auto_output_set = False
+        # Weights of the selected model present on disk, and the model
+        # able to run on the current compute device.
         self.model_ready = False
-        self.model_path: Optional[str] = None
-        self.config_path: Optional[str] = None
+        self.model_gate_ok = True
+        self.model_gate_message = ""
 
         # Settings (load BEFORE building UI so defaults populate widgets)
         self._load_settings()
@@ -129,7 +123,10 @@ class ClassifierDockWidget(QDockWidget):
         # UI
         self._build_ui()
         self._check_gpu()
+        self._select_initial_model()
         self._check_model()
+        self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        self.gpu_check.toggled.connect(self._on_gpu_toggled)
 
         # Listen for plugin log messages
         QgsApplication.messageLog().messageReceived.connect(self._on_log_message)
@@ -242,6 +239,7 @@ class ClassifierDockWidget(QDockWidget):
         self._saved_units = str(
             s.value(f"{SETTINGS_PREFIX}/input_units", "auto") or "auto"
         )
+        self._saved_model_id = str(s.value(f"{SETTINGS_PREFIX}/model_id", "") or "")
 
     def _save_settings(self):
         s = QgsSettings()
@@ -285,6 +283,9 @@ class ClassifierDockWidget(QDockWidget):
         s.setValue(
             f"{SETTINGS_PREFIX}/input_units",
             self.units_combo.currentData() or "auto",
+        )
+        s.setValue(
+            f"{SETTINGS_PREFIX}/model_id", self.model_combo.currentData() or "",
         )
 
     # ------------------------------------------------------------------
@@ -365,25 +366,45 @@ class ClassifierDockWidget(QDockWidget):
         lay.setSpacing(12)
 
         self.device_label = QLabel("Device: detecting...")
-        self.model_label = QLabel(
-            f"Model: {MODEL_INFO['name']} ({MODEL_INFO['resolution']})"
-        )
+
+        # Model selector: short names in the combo (the strip is narrow),
+        # the full name and description in its tooltip.
+        self.model_combo = QComboBox()
+        for spec in MODELS:
+            self.model_combo.addItem(spec.short_name, spec.id)
+        self.model_label = QLabel("")
+        self.model_label.setStyleSheet("color: palette(mid);")
 
         lay.addWidget(self.device_label)
         lay.addWidget(self._vline())
+        lay.addWidget(QLabel("Model:"))
+        lay.addWidget(self.model_combo)
         lay.addWidget(self.model_label)
         lay.addStretch()
 
-        # Right-side icon buttons (download model / clear gpu)
+        # Right-side icon buttons (download / import model weights)
         self.download_btn = QToolButton()
         self.download_btn.setIcon(
             _qgis_icon(
                 "mActionFileSaveAs.svg",
                 QStyle.StandardPixmap.SP_ArrowDown))
-        self.download_btn.setToolTip("Download model weights")
+        self.download_btn.setToolTip("Download the selected model's weights")
         self.download_btn.setAutoRaise(True)
         self.download_btn.clicked.connect(self._download_model)
         lay.addWidget(self.download_btn)
+
+        self.import_btn = QToolButton()
+        self.import_btn.setIcon(
+            _qgis_icon(
+                "mActionFileOpen.svg",
+                QStyle.StandardPixmap.SP_DialogOpenButton))
+        self.import_btn.setToolTip(
+            "Import a weights file you already have for the selected model "
+            "(offline machines). The file is copied and its SHA-256 verified."
+        )
+        self.import_btn.setAutoRaise(True)
+        self.import_btn.clicked.connect(self._import_model_file)
+        lay.addWidget(self.import_btn)
 
         return strip
 
@@ -412,20 +433,18 @@ class ClassifierDockWidget(QDockWidget):
         layer_row.addWidget(QLabel("From loaded layer:"))
 
         self.layer_combo = QgsMapLayerComboBox()
-        # PointCloudLayer filter exists on QGIS 3.18+; we set it
-        # defensively so the plugin still loads on slightly older QGIS.
-        try:
-            self.layer_combo.setFilters(
-                QgsMapLayerProxyModel.Filter.PointCloudLayer
-            )
-        except AttributeError:
-            # Fallback: enum may live elsewhere on very old releases
+        # The point-cloud filter moved to Qgis.LayerFilter (3.34+, the
+        # only spelling QGIS 4 keeps); older spellings as fallbacks.
+        for candidate in (
+            lambda: Qgis.LayerFilter.PointCloudLayer,
+            lambda: QgsMapLayerProxyModel.Filter.PointCloudLayer,
+            lambda: QgsMapLayerProxyModel.PointCloudLayer,  # type: ignore
+        ):
             try:
-                self.layer_combo.setFilters(
-                    QgsMapLayerProxyModel.PointCloudLayer  # type: ignore
-                )
+                self.layer_combo.setFilters(candidate())
+                break
             except Exception:
-                pass
+                continue
         self.layer_combo.setAllowEmptyLayer(
             True, "(select a point-cloud layer)")
         self.layer_combo.setShowCrs(False)
@@ -854,33 +873,107 @@ class ClassifierDockWidget(QDockWidget):
             )
             self.device_label.setText("Device: CPU")
 
+    def _current_device(self) -> str:
+        """"cuda", "mps" or "cpu" as the run would use it right now."""
+        if (
+            self.gpu_check.isEnabled() and self.gpu_check.isChecked()
+            and self.gpu_info.get("available")
+        ):
+            return str(self.gpu_info.get("backend", "cuda"))
+        return "cpu"
+
+    def _current_spec(self):
+        try:
+            return get_model(self.model_combo.currentData())
+        except KeyError:
+            return MODELS[-1]
+
+    def _select_initial_model(self):
+        """Saved choice when it still fits the device, else the default."""
+        device = self._current_device()
+        chosen = None
+        if self._saved_model_id:
+            try:
+                chosen = get_model(self._saved_model_id)
+            except KeyError:
+                chosen = None
+        if chosen is None or not chosen.supports_device(device):
+            chosen = default_model_for_device(device)
+        index = self.model_combo.findData(chosen.id)
+        self.model_combo.blockSignals(True)
+        self.model_combo.setCurrentIndex(max(index, 0))
+        self.model_combo.blockSignals(False)
+
+    def _on_model_changed(self, _index=None):
+        self._check_model()
+
+    def _on_gpu_toggled(self, _checked=None):
+        # The device gate of the selected model depends on the checkbox.
+        self._check_model()
+
     def _check_model(self):
-        if ModelManager.is_model_available():
-            size_mb = ModelManager.get_model_size_mb()
+        spec = self._current_spec()
+        manager = ModelManager(spec)
+        device = self._current_device()
+        self.model_combo.setToolTip(
+            f"{spec.display_name}\n{spec.description}\n"
+            f"{spec.device_requirement_text()}."
+        )
+
+        if manager.is_model_available():
+            size_mb = manager.get_model_size_mb()
             self.model_ready = True
-            self.config_path = str(ModelManager.get_config_path())
-            self.model_path = str(ModelManager.get_model_path())
-            self.model_label.setText(
-                f"Model: {MODEL_INFO['name']} - ready ({size_mb:.0f} MB)"
-            )
+            status = f"ready ({size_mb:.0f} MB)"
             self.download_btn.setEnabled(False)
-            self.download_btn.setToolTip("Model already downloaded")
+            self.download_btn.setToolTip("Weights already downloaded")
         else:
             self.model_ready = False
-            self.model_label.setText(
-                f"Model: {MODEL_INFO['name']} - not downloaded"
-            )
+            status = "not downloaded"
             self.download_btn.setEnabled(True)
             self.download_btn.setToolTip(
-                "Click to download the model weights (~18 MB)"
+                f"Download the {spec.display_name} weights "
+                f"(~{spec.weights_size_mb:.0f} MB)"
             )
+
+        self.model_gate_ok = spec.supports_device(device)
+        if self.model_gate_ok:
+            self.model_gate_message = ""
+            self.model_label.setStyleSheet("color: palette(mid);")
+        else:
+            status += " - needs an NVIDIA GPU"
+            self.model_gate_message = (
+                f"{spec.display_name} runs on NVIDIA CUDA GPUs only. Tick "
+                "'Use GPU' in Advanced parameters, or choose SegFormer 3D "
+                "which runs on CPU."
+            )
+            self.model_label.setStyleSheet("color: #b00020;")
+        self.model_label.setText(status)
+        self.model_label.setToolTip(self.model_gate_message)
         self._update_run_button()
 
     def _download_model(self):
         from ..dialogs.model_download_dialog import ModelDownloadDialog
-        dlg = ModelDownloadDialog(self)
+        dlg = ModelDownloadDialog(self._current_spec(), self)
         if dlg.exec():
             self._check_model()
+
+    def _import_model_file(self):
+        spec = self._current_spec()
+        path, _ = QFileDialog.getOpenFileName(
+            self, f"Import {spec.display_name} weights", "",
+            "PyTorch weights (*.pth *.pt);;All files (*)",
+        )
+        if not path:
+            return
+        ok, msg = ModelManager(spec).import_file(path)
+        if ok:
+            self.message_bar.pushMessage(
+                f"{spec.display_name}: weights imported and verified.",
+                Qgis.MessageLevel.Success, duration=5,
+            )
+        else:
+            self.message_bar.pushMessage(msg, Qgis.MessageLevel.Critical, duration=0)
+        self._check_model()
 
     def _clear_gpu_memory(self):
         try:
@@ -890,15 +983,15 @@ class ClassifierDockWidget(QDockWidget):
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 self.message_bar.pushMessage(
-                    "GPU memory cache cleared.", Qgis.Success, duration=4
+                    "GPU memory cache cleared.", Qgis.MessageLevel.Success, duration=4
                 )
             else:
                 self.message_bar.pushMessage(
-                    "No CUDA GPU detected.", Qgis.Info, duration=4
+                    "No CUDA GPU detected.", Qgis.MessageLevel.Info, duration=4
                 )
         except Exception as exc:
             self.message_bar.pushMessage(
-                f"Could not clear GPU memory: {exc}", Qgis.Warning, duration=6
+                f"Could not clear GPU memory: {exc}", Qgis.MessageLevel.Warning, duration=6
             )
 
     # ------------------------------------------------------------------
@@ -968,7 +1061,7 @@ class ClassifierDockWidget(QDockWidget):
             if not found:
                 self.message_bar.pushMessage(
                     "No LAS / LAZ files found in this folder.",
-                    Qgis.Warning, duration=4,
+                    Qgis.MessageLevel.Warning, duration=4,
                 )
             else:
                 self._on_files_dropped(found)
@@ -978,14 +1071,14 @@ class ClassifierDockWidget(QDockWidget):
         layer = self.layer_combo.currentLayer()
         if layer is None:
             self.message_bar.pushMessage(
-                "Pick a point-cloud layer first.", Qgis.Info, duration=4
+                "Pick a point-cloud layer first.", Qgis.MessageLevel.Info, duration=4
             )
             return
         path = self._layer_source_path(layer)
         if path is None:
             self.message_bar.pushMessage(
                 f"Layer '{layer.name()}' has no readable LAS / LAZ source on "
-                "disk.", Qgis.Warning, duration=5,
+                "disk.", Qgis.MessageLevel.Warning, duration=5,
             )
             return
         self._on_files_dropped([path])
@@ -1001,7 +1094,7 @@ class ClassifierDockWidget(QDockWidget):
         if not candidates:
             self.message_bar.pushMessage(
                 "No LAS / LAZ point-cloud layers in the project.",
-                Qgis.Info, duration=4,
+                Qgis.MessageLevel.Info, duration=4,
             )
             return
 
@@ -1109,10 +1202,14 @@ class ClassifierDockWidget(QDockWidget):
         )
 
     def _update_run_button(self):
-        enabled = bool(
-            self.files) and self.model_ready and bool(
-            self.output_widget.filePath())
+        enabled = (
+            bool(self.files) and self.model_ready and self.model_gate_ok
+            and bool(self.output_widget.filePath())
+        )
         self.run_btn.setEnabled(enabled)
+        self.run_btn.setToolTip(
+            self.model_gate_message if not self.model_gate_ok else ""
+        )
 
     # ------------------------------------------------------------------
     # Run / cancel
@@ -1122,7 +1219,7 @@ class ClassifierDockWidget(QDockWidget):
         out_dir = self.output_widget.filePath()
         if not out_dir:
             self.message_bar.pushMessage(
-                "Choose an output folder first.", Qgis.Warning, duration=4
+                "Choose an output folder first.", Qgis.MessageLevel.Warning, duration=4
             )
             return
 
@@ -1140,10 +1237,18 @@ class ClassifierDockWidget(QDockWidget):
             device = str(self.gpu_info.get("backend", "cuda"))
         else:
             device = "cpu"
+        spec = self._current_spec()
+        if not spec.supports_device(device):
+            self.message_bar.pushMessage(
+                self.model_gate_message, Qgis.MessageLevel.Warning, duration=8,
+            )
+            self.run_btn.setEnabled(True)
+            self.cancel_btn.setEnabled(False)
+            return
         field = self.field_edit.text().strip() or "classification"
         is_asprs = field.lower() == "classification"
         self._log(
-            f"Starting classification on {device.upper()} with "
+            f"Starting {spec.display_name} on {device.upper()} with "
             f"{len(self.files)} file(s)"
         )
         self._log(
@@ -1158,11 +1263,9 @@ class ClassifierDockWidget(QDockWidget):
             self.files.copy(),
             out_dir,
             self.suffix_edit.text(),
-            self.config_path,
-            self.model_path,
+            spec.id,
             device,
             field,
-            self.class_mapping,
             tile_enabled=self.tile_check.isChecked(),
             tile_auto=self.tile_auto_check.isChecked(),
             tile_size_m=self.tile_size_spin.value(),
@@ -1199,7 +1302,7 @@ class ClassifierDockWidget(QDockWidget):
         self.iface.messageBar().pushMessage(
             PLUGIN_NAME,
             f"Classification complete: {count} file(s) processed",
-            level=Qgis.Success, duration=8,
+            level=Qgis.MessageLevel.Success, duration=8,
         )
 
     def _on_task_terminated(self):
@@ -1212,7 +1315,7 @@ class ClassifierDockWidget(QDockWidget):
             self.iface.messageBar().pushMessage(
                 PLUGIN_NAME,
                 f"Classification failed: {self.task.error_message[:200]}",
-                level=Qgis.Critical, duration=0,
+                level=Qgis.MessageLevel.Critical, duration=0,
             )
         else:
             self.current_file_label.setText("Cancelled")
@@ -1236,7 +1339,7 @@ class ClassifierDockWidget(QDockWidget):
             self.message_bar.pushMessage(
                 "Cannot auto-load: QgsPointCloudLayer not available in "
                 "this QGIS build. Drag the file from the file manager.",
-                Qgis.Warning, duration=8,
+                Qgis.MessageLevel.Warning, duration=8,
             )
             return
 
@@ -1288,12 +1391,12 @@ class ClassifierDockWidget(QDockWidget):
                 f"Output ready but auto-load failed for "
                 f"'{head[0].name}'{extra}: {head[1]}. "
                 "You can drag the file into QGIS manually.",
-                Qgis.Warning, duration=0,
+                Qgis.MessageLevel.Warning, duration=0,
             )
         elif loaded:
             self.message_bar.pushMessage(
                 f"Loaded {loaded} classified layer(s) into the project.",
-                Qgis.Success, duration=5,
+                Qgis.MessageLevel.Success, duration=5,
             )
 
     # ------------------------------------------------------------------

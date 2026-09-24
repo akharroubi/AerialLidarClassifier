@@ -26,18 +26,28 @@ from qgis.core import (
     QgsProcessingUtils,
 )
 
-from ..config import (
-    DEFAULT_CLASS_MAPPING,
-    PLUGIN_NAME,
-    TILE_DEFAULT_BUFFER_M,
-)
+from ..config import PLUGIN_NAME, TILE_DEFAULT_BUFFER_M
+from ..core.registry import MODELS
 from ..utils.las_units import UNIT_OVERRIDES, resolve_units
+
+# Scoped enums (QGIS >= 3.36, required by QGIS 4 / PyQt6) with the
+# QGIS 3.34 spellings as fallback.
+try:
+    from qgis.core import Qgis as _Qgis
+    _FLAG_ADVANCED = _Qgis.ProcessingParameterFlag.Advanced
+except AttributeError:
+    _FLAG_ADVANCED = QgsProcessingParameterDefinition.FlagAdvanced
+try:
+    _NUMBER_DOUBLE = _Qgis.ProcessingNumberParameterType.Double
+except AttributeError:
+    _NUMBER_DOUBLE = QgsProcessingParameterNumber.Double
 
 
 class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
-    """Classify a LAS / LAZ / COPC point cloud with the 3D SegFormer model."""
+    """Classify a LAS / LAZ / COPC point cloud with a deep-learning model."""
 
     INPUT = "INPUT"
+    MODEL = "MODEL"
     OUTPUT_FOLDER = "OUTPUT_FOLDER"
     SUFFIX = "SUFFIX"
     FIELD_NAME = "FIELD_NAME"
@@ -78,28 +88,31 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
     def groupId(self) -> str:  # noqa: N802
         return "classification"
 
+    @staticmethod
+    def _models_help() -> str:
+        parts = []
+        for spec in MODELS:
+            rows = "".join(
+                f"<tr><td>{info.name}</td><td>{info.asprs_code}</td></tr>"
+                for info in spec.class_mapping.values()
+            )
+            parts.append(
+                f"<p><b>{spec.display_name}</b> ({spec.device_requirement_text()}): "
+                f"{spec.description} Licence: {spec.licence}.</p>"
+                "<table><tr><th align=left>Class</th><th align=left>ASPRS code</th></tr>"
+                f"{rows}</table>"
+            )
+        return "".join(parts)
+
     def shortHelpString(self) -> str:  # noqa: N802
         return self.tr(
             "<h3>Aerial LiDAR Classifier</h3>"
             "<p>Deep-learning semantic segmentation of aerial LiDAR point "
-            "clouds (LAS / LAZ / COPC) using the 3D SegFormer "
-            "<b>UrbanFiltering</b> model from the "
-            "<a href=\"https://github.com/NRCan/TreeAIBox\">TreeAIBox</a> "
-            "project (Z. Xi - NRCan, &copy; Crown Copyright, CC BY-NC 4.0).</p>"
-            "<h4>Output classes</h4>"
-            "<p>The model produces five primary classes mapped to standard "
-            "ASPRS LAS 1.4 codes, plus two auxiliary classes routed to "
-            "ASPRS 1 = <i>Unclassified</i> by default:</p>"
-            "<table>"
-            "<tr><th align=left>Class</th><th align=left>ASPRS code</th></tr>"
-            "<tr><td>Ground</td><td>2</td></tr>"
-            "<tr><td>Vegetation</td><td>5</td></tr>"
-            "<tr><td>Building</td><td>6</td></tr>"
-            "<tr><td>Wires (powerlines)</td><td>14</td></tr>"
-            "<tr><td>Pole</td><td>15</td></tr>"
-            "<tr><td>Vehicles <i>(aux.)</i></td><td>1 - Unclassified</td></tr>"
-            "<tr><td>Fence <i>(aux.)</i></td><td>1 - Unclassified</td></tr>"
-            "</table>"
+            "clouds (LAS / LAZ / COPC). Two models are available; classes "
+            "without an ASPRS code (cars, trucks, fences) are written as "
+            "1 = <i>Unclassified</i>.</p>"
+            "<h4>Models</h4>"
+            + self._models_help() +
             "<h4>ASPRS compliance</h4>"
             "<p>By default the classification is written to the standard "
             "LAS <code>classification</code> dimension. The file is "
@@ -110,6 +123,9 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "<ul>"
             "<li><b>Input point cloud</b> - a single LAS, LAZ or "
             "<code>.copc.laz</code> file.</li>"
+            "<li><b>Model</b> - LitePT-L (NVIDIA CUDA GPU required) or "
+            "SegFormer 3D (GPU or CPU). The weights must have been "
+            "downloaded once from the dock.</li>"
             "<li><b>Output folder</b> - where the classified file is "
             "written.</li>"
             "<li><b>Output filename suffix</b> - appended before the "
@@ -172,6 +188,16 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 fileFilter="Point clouds (*.las *.laz *.copc.laz)",
             )
         )
+        # Index order is part of the public interface (saved models store
+        # the index): keep the registry order stable.
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.MODEL,
+                self.tr("Model"),
+                options=[spec.display_name for spec in MODELS],
+                defaultValue=0,
+            )
+        )
         self.addParameter(
             QgsProcessingParameterFolderDestination(
                 self.OUTPUT_FOLDER,
@@ -227,9 +253,9 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             QgsProcessingParameterNumber(
                 self.TILE_SIZE_M,
                 self.tr(
-                    "Tile size in CRS units (0 = auto, ~10 M points per tile)"
+                    "Tile size in metres (0 = auto, ~10 M points per tile)"
                 ),
-                type=QgsProcessingParameterNumber.Double,
+                type=_NUMBER_DOUBLE,
                 defaultValue=0.0,
                 minValue=0.0,
                 maxValue=50_000.0,
@@ -238,8 +264,8 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         self._add_advanced(
             QgsProcessingParameterNumber(
                 self.TILE_BUFFER_M,
-                self.tr("Tile buffer in CRS units"),
-                type=QgsProcessingParameterNumber.Double,
+                self.tr("Tile buffer in metres"),
+                type=_NUMBER_DOUBLE,
                 defaultValue=TILE_DEFAULT_BUFFER_M,
                 minValue=0.0,
                 maxValue=5_000.0,
@@ -274,9 +300,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
     # ------------------------------------------------------------------
     def _add_advanced(self, param):
         """Add a parameter under the dialog's 'Advanced Parameters' fold."""
-        param.setFlags(
-            param.flags() | QgsProcessingParameterDefinition.FlagAdvanced
-        )
+        param.setFlags(param.flags() | _FLAG_ADVANCED)
         self.addParameter(param)
 
     # ------------------------------------------------------------------
@@ -324,12 +348,17 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         # Make the venv site-packages importable from this Python process.
         ensure_venv_packages_available()
 
-        if not ModelManager.is_model_available():
+        model_idx = self.parameterAsEnum(parameters, self.MODEL, context)
+        if not 0 <= model_idx < len(MODELS):
+            model_idx = 0
+        spec = MODELS[model_idx]
+        manager = ModelManager(spec)
+        if not manager.is_model_available():
             raise QgsProcessingException(
                 self.tr(
-                    "Model weights are not downloaded yet. Open "
-                    f"'{PLUGIN_NAME}' from the Plugins menu and click the "
-                    "download icon in the panel header first."
+                    f"{spec.display_name}: weights are not downloaded yet. "
+                    f"Open '{PLUGIN_NAME}' from the Plugins menu, select the "
+                    "model and click the download icon in the panel header."
                 )
             )
 
@@ -394,10 +423,16 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             device = "cuda" if cuda_available else (
                 "mps" if mps_available else "cpu"
             )
+        if not spec.supports_device(device):
+            raise QgsProcessingException(self.tr(
+                f"{spec.display_name} does not run on '{device}' "
+                f"({spec.device_requirement_text()}). Choose another model "
+                "or compute device."
+            ))
 
         # Imports deferred until dependencies are confirmed
         import laspy
-        from ..core.classifier_core import filterPoints
+        from ..core.backends import create_backend
         from ..workers.classifier_task import (
             ASPRS_CLASSIFICATION_FIELD,
             _classify_tiled,
@@ -407,13 +442,22 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             _write_las,
         )
 
-        config_path = str(ModelManager.get_config_path())
-        model_path = str(ModelManager.get_model_path())
-
         # The class mapping is internal-only: it tells the inference
-        # post-processor how to translate the model's 1-7 IDs into the
+        # post-processor how to translate the model's class ids into the
         # standard ASPRS codes.
-        class_mapping = DEFAULT_CLASS_MAPPING
+        class_mapping = spec.class_mapping
+
+        backend = create_backend(
+            spec, manager.get_model_path(), log=feedback.pushWarning,
+        )
+        feedback.pushInfo(self.tr(f"Model: {spec.display_name}"))
+        try:
+            backend.load(device)
+        except Exception as exc:
+            raise QgsProcessingException(self.tr(str(exc)))
+
+        def predict_fn(xyz_m, progress_cb):
+            return backend.predict(xyz_m, progress_cb, feedback.isCanceled)
 
         # ---- Streaming dispatch (writes the output directly) ----------------
         is_asprs_field = field_name.lower() == ASPRS_CLASSIFICATION_FIELD
@@ -442,11 +486,10 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 written = streaming_tiled_classify(
                     input_path=input_path,
                     output_path=output_path,
-                    classifier_fn=filterPoints,
-                    config_path=config_path,
-                    model_path=model_path,
+                    predict_fn=predict_fn,
                     device=device,
                     class_mapping=class_mapping,
+                    field_description=f"AI classification ({spec.display_name})",
                     laspy_module=laspy,
                     progress_callback=stream_progress,
                     cancel_callback=feedback.isCanceled,
@@ -460,6 +503,8 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 )
             except InterruptedError:
                 raise QgsProcessingException(self.tr("Cancelled."))
+            finally:
+                backend.unload()
 
             if written is None:
                 raise QgsProcessingException(
@@ -498,9 +543,9 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 raise InterruptedError()
             feedback.setProgress(min(100, max(0, int(p))))
 
-        feedback.pushInfo(
-            self.tr(f"Running classification on {device.upper()}...")
-        )
+        feedback.pushInfo(self.tr(
+            f"Running {spec.display_name} on {device.upper()}..."
+        ))
         try:
             if tile_enabled:
                 feedback.pushInfo(self.tr(
@@ -509,18 +554,13 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                     f"buffer={tile_buffer_m:.0f} m)."
                 ))
                 preds = _classify_tiled(
-                    pcd, filterPoints, config_path, model_path,
-                    device, progress_cb, feedback.isCanceled,
+                    pcd, predict_fn, progress_cb, feedback.isCanceled,
                     auto=tile_auto,
                     tile_size_m=None if tile_auto else tile_size_m,
                     buffer_m=tile_buffer_m,
                 )
             else:
-                preds = filterPoints(
-                    config_path, pcd, model_path,
-                    if_bottom_only=False, use_efficient=True,
-                    device=device, progress_callback=progress_cb,
-                )
+                preds = predict_fn(pcd, progress_cb)
         except InterruptedError:
             raise QgsProcessingException(self.tr("Cancelled."))
         except Exception as exc:  # pragma: no cover - surfaced to user
@@ -528,6 +568,8 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             raise QgsProcessingException(
                 self.tr(f"Classification failed: {exc}")
             )
+        finally:
+            backend.unload()
 
         if preds is None:
             raise QgsProcessingException(
@@ -569,7 +611,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             else:
                 las.add_extra_dim(laspy.ExtraBytesParams(
                     name=field_name, type="int32",
-                    description="AI Classification (3D SegFormer / TreeAIBox)",
+                    description=f"AI classification ({spec.display_name})"[:32],
                 ))
                 setattr(las, field_name, asprs)
             feedback.pushInfo(
@@ -589,14 +631,6 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             ))
         feedback.pushInfo(self.tr(f"Writing {output_path.name}..."))
         _write_las(las, output_path, laspy)
-
-        try:
-            if device == "cuda":
-                torch.cuda.empty_cache()
-            elif device == "mps" and hasattr(torch, "mps"):
-                torch.mps.empty_cache()
-        except Exception:
-            pass
 
         log_info(f"Processing algorithm wrote {output_path}")
 

@@ -1,18 +1,18 @@
-"""Model download and cache management.
+"""Model weight discovery, download, import and cache management.
 
-Downloads model weights on first use and caches them inside the QGIS
-user profile directory. Downloads are atomic (write to a temporary file
-then rename) so a failure never leaves truncated weights on disk.
-
-If multiple URLs are configured (primary + fallbacks in ``config.py``)
-each is tried in order until one succeeds. A SHA-256 hash, when
-provided, is verified after every successful download and the file is
-rejected on mismatch.
+One ``ModelManager`` per model (``core.registry.ModelSpec``). Weights live
+under the QGIS user profile, ``AerialLidarClassifier/models/<model id>/``.
+Downloads are atomic (write to a temporary file, then rename) so a failure
+never leaves truncated weights on disk, every candidate URL is tried in
+order, and the SHA-256 declared in the registry is verified before the
+file is accepted. ``import_file`` does the same for a file the user
+already has (an offline machine, or a release that is not published yet).
 """
 
 import hashlib
+import shutil
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
 
 from qgis.core import (
     QgsApplication,
@@ -22,14 +22,8 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtNetwork import QNetworkRequest
 
-from ..config import (
-    DEFAULT_MODEL_URL,
-    MODEL_CONFIG_FILENAME,
-    MODEL_FALLBACK_URLS,
-    MODEL_FILENAME,
-    MODEL_SHA256,
-    SETTINGS_PREFIX,
-)
+from ..config import SETTINGS_PREFIX
+from ..core.registry import ModelSpec, get_model
 from .logger import log_error, log_info, log_warning
 
 
@@ -45,41 +39,56 @@ def _sha256_of(path: Path) -> str:
 
 
 class ModelManager:
-    """Manage model weight discovery, caching and download."""
+    """Manage the weights of one model."""
 
     PLUGIN_FOLDER_NAME = "AerialLidarClassifier"
+
+    def __init__(self, spec: ModelSpec):
+        self.spec = spec
+
+    @classmethod
+    def for_id(cls, model_id: str) -> "ModelManager":
+        return cls(get_model(model_id))
 
     # ------------------------------------------------------------------
     # Paths and availability
     # ------------------------------------------------------------------
 
     @staticmethod
-    def get_model_dir() -> Path:
+    def models_root() -> Path:
         profile_dir = Path(QgsApplication.qgisSettingsDirPath())
-        model_dir = profile_dir / ModelManager.PLUGIN_FOLDER_NAME / "models"
-        model_dir.mkdir(parents=True, exist_ok=True)
-        return model_dir
+        root = profile_dir / ModelManager.PLUGIN_FOLDER_NAME / "models"
+        root.mkdir(parents=True, exist_ok=True)
+        return root
 
-    @staticmethod
-    def get_model_path() -> Path:
-        return ModelManager.get_model_dir() / MODEL_FILENAME
+    def model_dir(self) -> Path:
+        directory = self.models_root() / self.spec.id
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory
 
-    @staticmethod
-    def get_config_path() -> Path:
-        """Return the bundled model-configuration JSON path."""
-        plugin_root = Path(__file__).resolve().parent.parent
-        return plugin_root / "core" / MODEL_CONFIG_FILENAME
+    def get_model_path(self) -> Path:
+        path = self.model_dir() / self.spec.weights_filename
+        if not path.exists():
+            # v1.0 kept the single model directly under models/; adopt it.
+            legacy = self.models_root() / self.spec.weights_filename
+            if legacy.exists():
+                try:
+                    legacy.replace(path)
+                    log_info(f"Moved {legacy.name} into models/{self.spec.id}/")
+                except OSError as exc:
+                    log_warning(f"Could not move legacy model file: {exc}")
+                    return legacy
+        return path
 
-    @staticmethod
-    def is_model_available() -> bool:
-        return (
-            ModelManager.get_model_path().exists()
-            and ModelManager.get_config_path().exists()
-        )
+    def get_config_path(self) -> Path:
+        """The bundled model-configuration file."""
+        return self.spec.config_path
 
-    @staticmethod
-    def get_model_size_mb() -> float:
-        path = ModelManager.get_model_path()
+    def is_model_available(self) -> bool:
+        return self.get_model_path().exists() and self.get_config_path().exists()
+
+    def get_model_size_mb(self) -> float:
+        path = self.get_model_path()
         if path.exists():
             return path.stat().st_size / (1024 * 1024)
         return 0.0
@@ -88,32 +97,25 @@ class ModelManager:
     # URL handling
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def get_model_url() -> str:
-        """Primary URL: a user override (QgsSettings) or the default."""
+    def _url_setting_key(self) -> str:
+        return f"{SETTINGS_PREFIX}/model_url/{self.spec.id}"
+
+    def get_model_url(self) -> str:
+        """Primary URL: a user override (QgsSettings) or the registry's first."""
         s = QgsSettings()
-        return s.value(f"{SETTINGS_PREFIX}/model_url", DEFAULT_MODEL_URL)
+        default = self.spec.weights_urls[0] if self.spec.weights_urls else ""
+        return s.value(self._url_setting_key(), default)
 
-    @staticmethod
-    def set_model_url(url: str) -> None:
-        s = QgsSettings()
-        s.setValue(f"{SETTINGS_PREFIX}/model_url", url)
+    def set_model_url(self, url: str) -> None:
+        QgsSettings().setValue(self._url_setting_key(), url)
 
-    @staticmethod
-    def get_candidate_urls(override: str = None) -> list:
-        """Build the ordered list of URLs to try.
-
-        ``override`` (when truthy) takes precedence; otherwise we start
-        with the configured primary URL followed by every non-empty
-        entry in ``MODEL_FALLBACK_URLS``. Duplicates are removed while
-        preserving order.
-        """
+    def get_candidate_urls(self, override: Optional[str] = None) -> list:
+        """Ordered URLs to try: the override, else the setting then the registry."""
         seen: set = set()
         ordered: list = []
-
         candidates: Iterable[str] = (
             [override] if override else
-            [ModelManager.get_model_url(), *MODEL_FALLBACK_URLS]
+            [self.get_model_url(), *self.spec.weights_urls]
         )
         for url in candidates:
             if not url:
@@ -125,42 +127,51 @@ class ModelManager:
         return ordered
 
     # ------------------------------------------------------------------
-    # Download
+    # Download / import
     # ------------------------------------------------------------------
 
-    @staticmethod
+    def _verify_and_promote(self, tmp_path: Path, origin: str):
+        """SHA-256 check then atomic rename onto the final path."""
+        expected = (self.spec.weights_sha256 or "").lower().strip()
+        if expected:
+            got = _sha256_of(tmp_path)
+            if got != expected:
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+                return False, (
+                    f"SHA-256 mismatch for {origin} (expected "
+                    f"{expected[:12]}..., got {got[:12]}...). The file is "
+                    "not the released model; it was discarded."
+                )
+            log_info(f"{self.spec.short_name}: SHA-256 verified.")
+        final_path = self.get_model_path()
+        if final_path.exists():
+            final_path.unlink()
+        tmp_path.replace(final_path)
+        size_mb = final_path.stat().st_size / (1024 * 1024)
+        log_info(f"{self.spec.short_name}: weights ready ({size_mb:.1f} MB) from {origin}")
+        return True, ""
+
     def download_model(
-        url: str = None,
+        self,
+        url: Optional[str] = None,
         progress_callback: Callable[[int, int], None] = None,
     ):
-        """Download the model weights, trying every configured URL in turn.
+        """Download the weights, trying every candidate URL in turn.
 
-        Uses :class:`QgsBlockingNetworkRequest` so the request honours
-        the user's QGIS proxy / authentication / certificate settings
-        (as recommended in the QGIS plugin guidelines).
-
-        Returns ``(success, error_message)``. On success the file at
-        ``get_model_path()`` is guaranteed to match ``MODEL_SHA256`` if
-        that constant is set; otherwise the only guarantee is non-zero
-        length.
+        Uses :class:`QgsBlockingNetworkRequest` so the request honours the
+        user's QGIS proxy / authentication / certificate settings.
+        Returns ``(success, error_message)``.
         """
-        urls = ModelManager.get_candidate_urls(url)
+        urls = self.get_candidate_urls(url)
         if not urls:
             return False, "No model URL configured."
 
-        final_path = ModelManager.get_model_path()
+        final_path = self.get_model_path()
         tmp_path = final_path.with_suffix(final_path.suffix + ".part")
-
-        # Wipe any stale .part residue from a previous failed download.
         if tmp_path.exists():
-            try:
-                stale_mb = tmp_path.stat().st_size / (1024 * 1024)
-            except OSError:
-                stale_mb = 0.0
-            log_info(
-                f"Removing stale partial download "
-                f"({stale_mb:.1f} MB): {tmp_path.name}"
-            )
             try:
                 tmp_path.unlink()
             except OSError as exc:
@@ -169,11 +180,10 @@ class ModelManager:
         last_error = ""
         for idx, current_url in enumerate(urls, start=1):
             log_info(
-                f"Downloading model from candidate {idx}/{len(urls)}: {current_url}"
+                f"Downloading {self.spec.short_name} weights, candidate "
+                f"{idx}/{len(urls)}: {current_url}"
             )
-            ok, msg = ModelManager._download_one(
-                current_url, tmp_path, progress_callback
-            )
+            ok, msg = self._download_one(current_url, tmp_path, progress_callback)
             if not ok:
                 last_error = msg
                 log_warning(f"Candidate {idx} failed: {msg}")
@@ -183,33 +193,11 @@ class ModelManager:
                     except OSError:
                         pass
                 continue
-
-            # Integrity check
-            if MODEL_SHA256:
-                got = _sha256_of(tmp_path)
-                expected = MODEL_SHA256.lower().strip()
-                if got != expected:
-                    last_error = (
-                        f"SHA-256 mismatch (expected {expected[:12]}..., "
-                        f"got {got[:12]}...)"
-                    )
-                    log_warning(
-                        f"Candidate {idx}: {last_error}. Discarding."
-                    )
-                    try:
-                        tmp_path.unlink()
-                    except OSError:
-                        pass
-                    continue
-                log_info("Model SHA-256 verified.")
-
-            # Promote to the final path atomically.
-            if final_path.exists():
-                final_path.unlink()
-            tmp_path.replace(final_path)
-            size_mb = final_path.stat().st_size / (1024 * 1024)
-            log_info(f"Model downloaded ({size_mb:.1f} MB) from {current_url}")
-            return True, ""
+            ok, msg = self._verify_and_promote(tmp_path, current_url)
+            if ok:
+                return True, ""
+            last_error = msg
+            log_warning(f"Candidate {idx}: {msg}")
 
         return False, last_error or "All download URLs failed."
 
@@ -219,16 +207,15 @@ class ModelManager:
         tmp_path: Path,
         progress_callback: Callable[[int, int], None] = None,
     ):
-        """Download a single URL to ``tmp_path`` via the QGIS network stack.
-
-        QgsBlockingNetworkRequest downloads the body into memory and
-        respects the QGIS proxy + authentication + certificate settings.
-        For the 18 MB model file the memory cost is negligible.
-        """
+        """Download a single URL to ``tmp_path`` via the QGIS network stack."""
         try:
             request = QgsBlockingNetworkRequest()
             err = request.get(QNetworkRequest(QUrl(url)))
-            if err != QgsBlockingNetworkRequest.NoError:
+            try:
+                no_error = QgsBlockingNetworkRequest.ErrorCode.NoError
+            except AttributeError:
+                no_error = QgsBlockingNetworkRequest.NoError
+            if err != no_error:
                 return False, f"Network error: {request.errorMessage() or err}"
 
             reply = request.reply()
@@ -237,8 +224,7 @@ class ModelManager:
             if total == 0:
                 return False, "Downloaded file is empty"
 
-            # Surface a single progress update (Qgs blocking request does
-            # not stream chunks; the read happens fully before we get here).
+            # QgsBlockingNetworkRequest returns the whole body at once.
             if progress_callback:
                 progress_callback(total, total)
 
@@ -253,9 +239,21 @@ class ModelManager:
             log_error(f"Unexpected error downloading {url}: {exc}")
             return False, f"Error: {exc}"
 
-    @staticmethod
-    def delete_model() -> None:
-        path = ModelManager.get_model_path()
+    def import_file(self, source):
+        """Adopt a weights file the user already has (copied, then verified)."""
+        source = Path(source)
+        if not source.is_file():
+            return False, f"File not found: {source}"
+        final_path = self.get_model_path()
+        tmp_path = final_path.with_suffix(final_path.suffix + ".part")
+        try:
+            shutil.copyfile(str(source), str(tmp_path))
+        except OSError as exc:
+            return False, f"Could not copy the file: {exc}"
+        return self._verify_and_promote(tmp_path, source.name)
+
+    def delete_model(self) -> None:
+        path = self.get_model_path()
         if path.exists():
             path.unlink()
-            log_info("Model weights deleted from cache.")
+            log_info(f"{self.spec.short_name}: weights deleted from cache.")

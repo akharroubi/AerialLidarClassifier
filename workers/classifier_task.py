@@ -13,10 +13,13 @@ import numpy as np
 from qgis.core import QgsTask
 
 from ..config import TILE_DEFAULT_BUFFER_M
+from ..core.backends import create_backend
+from ..core.registry import get_model
 from ..core.tiling import compute_tile_grid
 from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_vlrs
 from ..utils.logger import LOG_TAG, log_error, log_info, log_warning
+from ..utils.model_manager import ModelManager
 
 
 # Lazy torch import (so module import is cheap)
@@ -120,19 +123,18 @@ def _compute_tile_grid(
 
 def _classify_tiled(
     pcd: np.ndarray,
-    classifier_fn,
-    config_path: str,
-    model_path: str,
-    device: str,
+    predict_fn,
     progress_callback,
     cancel_callback,
     auto: bool = True,
     tile_size_m: float | None = None,
     buffer_m: float = TILE_DEFAULT_BUFFER_M,
 ) -> np.ndarray | None:
-    """Run the classifier on ``pcd`` in spatial tiles with a buffer halo.
+    """Run ``predict_fn`` on ``pcd`` in spatial tiles with a buffer halo.
 
-    Returns predictions aligned with the input points, or None if cancelled.
+    ``predict_fn(xyz_m, progress_cb)`` returns one model class id per
+    point (a loaded backend's ``predict``). Returns predictions aligned
+    with the input points, or None if cancelled.
     """
     n = len(pcd)
     xy = pcd[:, :2]
@@ -173,11 +175,7 @@ def _classify_tiled(
             progress_callback(overall)
 
         try:
-            tile_preds = classifier_fn(
-                config_path, pcd[buffer_idx], model_path,
-                if_bottom_only=False, use_efficient=True,
-                device=device, progress_callback=tile_progress,
-            )
+            tile_preds = predict_fn(pcd[buffer_idx], tile_progress)
         except InterruptedError:
             return None
 
@@ -222,24 +220,28 @@ def _empty_gpu_cache_safe():
 class ClassificationTask(QgsTask):
     """Background task that runs the classifier over a list of files."""
 
-    def __init__(self, files, out_dir, suffix, config_path, model_path,
-                 device, field_name, class_mapping,
+    def __init__(self, files, out_dir, suffix, model_id, device, field_name,
                  tile_enabled=False, tile_auto=True,
                  tile_size_m=None, tile_buffer_m=TILE_DEFAULT_BUFFER_M,
                  tile_streaming=False, units_override=None):
-        super().__init__("Classifying LiDAR point clouds", QgsTask.CanCancel)
+        try:
+            can_cancel = QgsTask.Flag.CanCancel  # scoped (QGIS 4 / PyQt6)
+        except AttributeError:
+            can_cancel = QgsTask.CanCancel
+        super().__init__("Classifying LiDAR point clouds", can_cancel)
         # "auto" (read the CRS), "metre", "foot" or "us_foot"; see
         # utils.las_units. The model needs metres.
         self.units_override = units_override
         self.files = list(files)
         self.out_dir = Path(out_dir)
         self.suffix = suffix or "_classified"
-        self.config_path = config_path
-        self.model_path = model_path
+        # The model (core.registry) brings its weights, its backend and
+        # its class-id -> ASPRS mapping.
+        self.spec = get_model(model_id)
         # "cuda", "mps" or "cpu" (see classifier_core.resolve_device).
         self.device = device
         self.field_name = field_name or ASPRS_CLASSIFICATION_FIELD
-        self.class_mapping = class_mapping
+        self.class_mapping = self.spec.class_mapping
 
         self.tile_enabled = bool(tile_enabled)
         self.tile_auto = bool(tile_auto)
@@ -254,16 +256,46 @@ class ClassificationTask(QgsTask):
 
     # ------------------------------------------------------------------
     def run(self) -> bool:
+        backend = None
         try:
             import laspy
             _get_torch()  # ensures torch DLL path is set on Windows
-            from ..core.classifier_core import filterPoints
 
             self.out_dir.mkdir(parents=True, exist_ok=True)
 
             total = len(self.files)
             if total == 0:
                 return True
+
+            manager = ModelManager(self.spec)
+            if not manager.is_model_available():
+                self.error_message = (
+                    f"{self.spec.display_name}: weights are not downloaded. "
+                    "Use the download button next to the model selector."
+                )
+                log_error(self.error_message)
+                return False
+            if not self.spec.supports_device(self.device):
+                self.error_message = (
+                    f"{self.spec.display_name} does not run on '{self.device}' "
+                    f"({self.spec.device_requirement_text()}). Choose another "
+                    "model or compute device."
+                )
+                log_error(self.error_message)
+                return False
+
+            # Load the network once for the whole run; every tile of every
+            # file goes through the same backend.
+            backend = create_backend(
+                self.spec, manager.get_model_path(), log=log_warning,
+            )
+            log_info(
+                f"Model: {self.spec.display_name} on {self.device.upper()}"
+            )
+            backend.load(self.device)
+
+            def predict_fn(xyz_m, progress_cb):
+                return backend.predict(xyz_m, progress_cb, self.isCanceled)
 
             for i, fp in enumerate(self.files):
                 if self.isCanceled():
@@ -304,7 +336,7 @@ class ClassificationTask(QgsTask):
 
                 try:
                     actual_path = self._process_one(
-                        fp, out_path, filterPoints, laspy,
+                        fp, out_path, predict_fn, laspy,
                         file_base, file_span,
                     )
                     if actual_path is not None:
@@ -329,6 +361,12 @@ class ClassificationTask(QgsTask):
             log_error(f"Classification error: {self.error_message}")
             _empty_gpu_cache_safe()
             return False
+        finally:
+            if backend is not None:
+                try:
+                    backend.unload()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     def _can_stream(self) -> bool:
@@ -341,7 +379,7 @@ class ClassificationTask(QgsTask):
 
     # ------------------------------------------------------------------
     def _process_one_streaming(
-        self, fp, out_path, filter_fn, laspy,
+        self, fp, out_path, predict_fn, laspy,
         file_base, file_span,
     ):
         """Streaming variant: process a single file with disk-backed tiling."""
@@ -360,11 +398,10 @@ class ClassificationTask(QgsTask):
             written = streaming_tiled_classify(
                 input_path=fp,
                 output_path=out_path,
-                classifier_fn=filter_fn,
-                config_path=self.config_path,
-                model_path=self.model_path,
+                predict_fn=predict_fn,
                 device=self.device,
                 class_mapping=self.class_mapping,
+                field_description=f"AI classification ({self.spec.display_name})",
                 laspy_module=laspy,
                 progress_callback=stream_progress,
                 cancel_callback=self.isCanceled,
@@ -379,13 +416,13 @@ class ClassificationTask(QgsTask):
         return written
 
     # ------------------------------------------------------------------
-    def _process_one(self, fp, out_path, filter_fn, laspy,
+    def _process_one(self, fp, out_path, predict_fn, laspy,
                      file_base, file_span):
         """Run inference on a single file and write the result."""
         # Streaming mode dispatch -------------------------------------------
         if self._can_stream():
             return self._process_one_streaming(
-                fp, out_path, filter_fn, laspy,
+                fp, out_path, predict_fn, laspy,
                 file_base, file_span,
             )
 
@@ -417,18 +454,13 @@ class ClassificationTask(QgsTask):
 
         if self.tile_enabled:
             preds = _classify_tiled(
-                pcd, filter_fn, self.config_path, self.model_path,
-                self.device, progress_cb, self.isCanceled,
+                pcd, predict_fn, progress_cb, self.isCanceled,
                 auto=self.tile_auto,
                 tile_size_m=self.tile_size_m,
                 buffer_m=self.tile_buffer_m,
             )
         else:
-            preds = filter_fn(
-                self.config_path, pcd, self.model_path,
-                if_bottom_only=False, use_efficient=True,
-                device=self.device, progress_callback=progress_cb,
-            )
+            preds = predict_fn(pcd, progress_cb)
 
         if preds is None:
             log_warning(f"Classifier returned no results for {fp.name}")
@@ -471,7 +503,7 @@ class ClassificationTask(QgsTask):
         else:
             las.add_extra_dim(laspy.ExtraBytesParams(
                 name=field, type="int32",
-                description="AI Classification (3D SegFormer / TreeAIBox)",
+                description=f"AI classification ({self.spec.display_name})"[:32],
             ))
             setattr(las, field, asprs_p)
 

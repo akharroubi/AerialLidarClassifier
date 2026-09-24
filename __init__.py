@@ -1,8 +1,9 @@
 """Aerial LiDAR Classifier - QGIS Plugin.
 
-Deep-learning semantic segmentation of aerial LiDAR point clouds using a
-3D SegFormer model from the TreeAIBox project (NRCan, Crown Copyright,
-Government of Canada, CC BY-NC 4.0).
+Deep-learning semantic segmentation of aerial LiDAR point clouds with
+LitePT-L (prs-eth/LitePT, trained on DALES) or the 3D SegFormer from the
+TreeAIBox project (NRCan, Crown Copyright, Government of Canada). Model
+weights are CC BY-NC 4.0; see core/registry.py.
 """
 
 import os

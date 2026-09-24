@@ -4,6 +4,54 @@ All notable changes to **Aerial LiDAR Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] - 2026-09-25
+
+### Added
+- **LitePT-L**, a second model and the new default on NVIDIA GPUs: a
+  point transformer (85.8 M parameters, [prs-eth/LitePT](https://github.com/prs-eth/LitePT),
+  MIT) trained on the DALES aerial LiDAR dataset at 10 cm. Eight
+  classes: ground, vegetation, cars, trucks, power lines, fences,
+  poles, buildings. Custom four-tile DALES test: mIoU 0.824, overall
+  accuracy 97.9 % (per class: ground 0.972, vegetation 0.940, cars
+  0.889, power lines 0.968; trucks 0.367 is the weak class). Weights
+  are shipped as float16 (172 MB, SHA-256 verified) and run in float32.
+  The plugin's port was checked against the reference implementation:
+  99.998 % of 2.7 M points identical on a single pass, 99.09 % through
+  150 m tiles, tiled and streaming outputs identical.
+- Model selector in the dock (with per-model download and "import a
+  weights file" for offline machines) and a `MODEL` parameter in the
+  Processing algorithm. A model that cannot run on the current device
+  is greyed out with the reason instead of failing at run time.
+- Model registry (`core/registry.py`): weights, hash, configuration,
+  class mapping, supported devices and licence of every model in one
+  place; backends (`core/backends/`) share one load/predict contract,
+  so the network is loaded once per run instead of once per tile.
+- Installer: `scipy` always, `spconv-<cuXXX>` on CUDA installs (the
+  sparse convolutions LitePT-L needs; no CPU or macOS build exists, so
+  LitePT-L is CUDA-only and SegFormer 3D stays the model elsewhere).
+  spconv installs in its own non-fatal step and follows torch through
+  the CUDA cascade. cu126 is now preferred over cu128 on non-Blackwell
+  GPUs (spconv has no cu128 wheel yet; RTX 50 cards keep cu128 and
+  cannot run LitePT-L until spconv ships one).
+- QGIS 4.x declared compatible: Qt enums were already scoped, QGIS
+  enums now are, with 3.34 fallbacks. Tested on QGIS 3.44 LTR only.
+
+### Changed
+- Existing environments are rebuilt once on first use (install schema
+  3), which also moves them from cu128 to cu126 where relevant.
+- Tile size and buffer are in metres in every UI (the plugin converts
+  the file's unit, see 1.0.3).
+- The `Qgis.MessageLevel` and other QGIS enums are used in their scoped
+  form throughout.
+
+### Compatibility
+- LitePT-L peak GPU memory is about 4.5 GB with the validated
+  70 000-point / 30 m crops; cards under 8 GB automatically use
+  35 000-point / 20 m crops, and an out-of-memory crop halves the crop
+  size and retries instead of aborting the run.
+- Throughput on an RTX 3090: about 60 000 points/s (LitePT-L) and
+  110 000 points/s (SegFormer 3D).
+
 ## [1.0.3] - 2026-09-25
 
 ### Fixed

@@ -343,19 +343,19 @@ class AerialLidarClassifierPlugin:
                 torch.cuda.empty_cache()
                 self.iface.messageBar().pushMessage(
                     PLUGIN_NAME, tr("GPU memory cache cleared."),
-                    level=Qgis.Success, duration=4,
+                    level=Qgis.MessageLevel.Success, duration=4,
                 )
                 log_info("GPU memory cache cleared via menu action.")
             else:
                 self.iface.messageBar().pushMessage(
                     PLUGIN_NAME, tr("No CUDA GPU detected."),
-                    level=Qgis.Info, duration=4,
+                    level=Qgis.MessageLevel.Info, duration=4,
                 )
         except Exception as exc:
             self.iface.messageBar().pushMessage(
                 PLUGIN_NAME,
                 tr("Could not clear GPU memory: {err}").format(err=exc),
-                level=Qgis.Warning, duration=6,
+                level=Qgis.MessageLevel.Warning, duration=6,
             )
 
     def _open_docs(self):

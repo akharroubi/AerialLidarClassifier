@@ -156,22 +156,15 @@ def resolve_device(device) -> str:
     )
 
 
-def filterPoints(
-        config_file,
-        pcd,
-        model_path,
-        if_bottom_only=True,
-        use_efficient=True,
-        device="cuda",
-        progress_callback=lambda x: None):
-    """Voxelise ``pcd`` block by block and run the 3D SegFormer on it.
+def load_segformer(config_file, model_path, device):
+    """Build the 3D SegFormer from its JSON and load the weights onto ``device``.
 
-    ``device`` is ``"cuda"``, ``"mps"`` or ``"cpu"`` (the v1.0 booleans
-    are still accepted). Returns one model class id per input point,
-    with 0 meaning "no prediction".
+    Returns ``(model, configs)``; ``configs`` carries the block geometry
+    that ``predict_blocks`` needs. Loading once per run and predicting per
+    tile is what the backends do; ``filterPoints`` below keeps the v1.0
+    one-call behaviour.
     """
     device = resolve_device(device)
-    progress_callback(10)
     # Load the block geometry and the network hyper-parameters from the
     # model's JSON (e.g. urbanfiltering_als_esegformer3D_112_30cm...).
     try:
@@ -185,7 +178,6 @@ def filterPoints(
         ) from exc
 
     nbmat_sz = np.array(configs["model"]["voxel_number_in_block"])
-    min_res = np.array(configs["model"]["voxel_resolution_in_meter"])
     num_classes = configs["model"]["num_classes"] + 1
     # Import from local segformer3d.py in core package
     from .segformer3d import Segformer
@@ -226,6 +218,21 @@ def filterPoints(
     model.load_state_dict(state_dict)
     model = model.to(device)
     model.eval()
+    return model, configs
+
+
+def predict_blocks(model, configs, device, pcd, if_bottom_only=False,
+                   progress_callback=lambda x: None):
+    """Voxelise ``pcd`` block by block and run the loaded SegFormer on it.
+
+    ``device`` is ``"cuda"``, ``"mps"`` or ``"cpu"``. Returns one model
+    class id per input point, with 0 meaning "no prediction".
+    """
+    device = resolve_device(device)
+    nbmat_sz = np.array(configs["model"]["voxel_number_in_block"])
+    min_res = np.array(configs["model"]["voxel_resolution_in_meter"])
+    num_classes = configs["model"]["num_classes"] + 1
+    progress_callback(10)
 
     def _forward(x):
         try:
@@ -350,3 +357,24 @@ def filterPoints(
 
         progress_callback(100)
         return pcd_pred.astype(np.int32) + 1  # bool(False,True) to int(1,2)
+
+
+def filterPoints(
+        config_file,
+        pcd,
+        model_path,
+        if_bottom_only=True,
+        use_efficient=True,
+        device="cuda",
+        progress_callback=lambda x: None):
+    """v1.0 entry point kept for compatibility: load the model and predict.
+
+    ``device`` is ``"cuda"``, ``"mps"`` or ``"cpu"`` (the v1.0 booleans
+    are still accepted). Returns one model class id per input point,
+    with 0 meaning "no prediction".
+    """
+    model, configs = load_segformer(config_file, model_path, device)
+    return predict_blocks(
+        model, configs, device, pcd,
+        if_bottom_only=if_bottom_only, progress_callback=progress_callback,
+    )

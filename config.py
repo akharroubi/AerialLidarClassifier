@@ -54,38 +54,11 @@ TILE_RECOMMEND_ABOVE = 20_000_000
 
 
 # =============================================================================
-# Model Info
+# Models
 # =============================================================================
-
-MODEL_INFO = {
-    "name": "SegFormer 3D",
-    "resolution": "30 cm",
-}
-
-MODEL_FILENAME = "urbanfiltering_als_esegformer3D_112_30cm_GPU3GB.pth"
-MODEL_CONFIG_FILENAME = "model_config.json"
-
-# Primary download URL (the upstream TreeAIBox release).
-DEFAULT_MODEL_URL = (
-    "https://github.com/NRCan/TreeAIBox/releases/download/v1.0/"
-    "urbanfiltering_als_esegformer3D_112_30cm_GPU3GB.pth"
-)
-
-# Optional fallback URL(s). Tried in order if DEFAULT_MODEL_URL fails.
-# Mirror hosted on this plugin's own GitHub Releases - the SHA-256
-# check below guarantees the file is byte-identical to the upstream
-# TreeAIBox release. Empty entries are skipped automatically.
-MODEL_FALLBACK_URLS: List[str] = [
-    "https://github.com/akharroubi/AerialLidarClassifier/releases/download/"
-    "v1.0.0/urbanfiltering_als_esegformer3D_112_30cm_GPU3GB.pth",
-]
-
-# SHA-256 of the official .pth file (lowercase hex, 64 chars). Every
-# downloaded copy is hashed and rejected on mismatch - protects against
-# truncated downloads and tampered mirrors. Computed once from the
-# upstream TreeAIBox release; update if the model file is ever
-# re-released. Set to "" to skip verification.
-MODEL_SHA256: str = "cddb791041d46a2e7be3c53d6e94157c9af2218e7ea5595bf3134c4390c1fbc0"  # noqa: E501  # pragma: allowlist secret
+# Everything model-specific (weights URLs, SHA-256, bundled configuration,
+# class mapping, supported devices, licence) is declared in
+# core/registry.py, one ModelSpec per model.
 
 
 # =============================================================================
