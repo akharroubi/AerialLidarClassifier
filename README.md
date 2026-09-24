@@ -5,7 +5,7 @@ inside QGIS, using the 3D SegFormer architecture from the
 [TreeAIBox](https://github.com/NRCan/TreeAIBox) project (Natural Resources Canada).
 
 [![QGIS](https://img.shields.io/badge/QGIS-3.34%2B-1f9b4e)](https://qgis.org)
-[![Python](https://img.shields.io/badge/python-3.10%E2%80%933.12-3776AB)](https://www.python.org)
+[![Python](https://img.shields.io/badge/python-3.9%E2%80%933.13-3776AB)](https://www.python.org)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
 [![Model: CC BY-NC 4.0](https://img.shields.io/badge/model-CC%20BY--NC%204.0-lightgrey)](https://creativecommons.org/licenses/by-nc/4.0/)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-555)](#hardware-and-platform-support)
@@ -26,6 +26,7 @@ PDAL provider) read the result with no special handling.
 - [Usage](#usage)
 - [Hardware and platform support](#hardware-and-platform-support)
 - [Classification output](#classification-output)
+- [Coordinate units](#coordinate-units)
 - [Tiling and streaming](#tiling-and-streaming)
 - [How it works](#how-it-works)
 - [Troubleshooting](#troubleshooting)
@@ -136,24 +137,25 @@ the *Aerial LiDAR Classifier* tag.
 ### Processing algorithm
 
 The plugin registers a Processing provider, so the algorithm
-`aerial_lidar:classify` is available from:
+`aeriallidar:classify_lidar` is available from:
 
 - the **Processing Toolbox**,
-- the **Graphical Modeler** (chainable with any other Processing alg), and
+- the **Graphical Modeler** (chainable with any other Processing alg; the
+  classified file is exposed as the `OUTPUT_FILE` output), and
 - the `qgis_process` CLI:
 
 ```bash
-qgis_process run aerial_lidar:classify \
+qgis_process run aeriallidar:classify_lidar \
   --INPUT=/data/tile.laz \
-  --OUTPUT=/data/tile_classified.laz \
+  --OUTPUT_FOLDER=/data/classified \
   --TILE_ENABLED=true \
   --TILE_SIZE_M=200 \
   --TILE_BUFFER_M=20
 ```
 
 All UI options are exposed as algorithm parameters; advanced options
-(`FIELD_NAME`, `TILE_STREAMING`, &hellip;) live under the Processing dialog's
-*Advanced parameters* group.
+(`FIELD_NAME`, `TILE_STREAMING`, `UNITS`, &hellip;) live under the Processing
+dialog's *Advanced parameters* group.
 
 ---
 
@@ -165,7 +167,7 @@ All UI options are exposed as algorithm parameters; advanced options
 | NVIDIA CUDA 12.4   | Windows 10/11, Linux        | yes    |
 | NVIDIA CUDA 12.6   | Windows 10/11, Linux        | yes    |
 | NVIDIA CUDA 12.8   | Windows 10/11, Linux        | yes    |
-| Apple Silicon MPS  | macOS 13+                   | yes    |
+| Apple Silicon MPS  | macOS 13+                   | code path present, not tested by the author; reports welcome |
 | CPU only           | Windows / Linux / macOS     | yes    |
 
 Recommended for production-sized tiles: an NVIDIA GPU with **&ge; 3&nbsp;GB**
@@ -202,6 +204,37 @@ When the input file already uses Point Record Format &lt; 6, the writer
 upgrades it to PRF 6 / LAS 1.4 (required for ASPRS codes &gt; 31). All other
 attributes (RGB, intensity, return number, GPS time, scan angle, extra
 dimensions) are preserved byte-for-byte.
+
+---
+
+## Coordinate units
+
+The model works in **metres**. Most US LiDAR is delivered in US survey feet
+(state plane coordinate systems); fed to the model unconverted, every distance
+is 3.28 times too small for it, buildings come out as *Wire - Conductor* and
+*Transmission Tower*, and the run is about 13 times slower because the model
+sees ten times more voxel blocks.
+
+Since 1.0.3 the plugin reads the linear unit from the file's CRS (the WKT
+record of LAS 1.4 files, or the GeoTIFF keys of older files), converts XY and
+Z to metres **for the model only**, and logs what it found:
+
+```
+tile.las: coordinate units: XY in US survey foot, Z in US survey foot
+(WKT CRS: US survey foot horizontal, US survey foot vertical); converting to metres for the model
+```
+
+The output file keeps the original coordinates, scales and CRS untouched.
+
+- When the header carries no CRS, metres are assumed and the log says so.
+- When the CRS has no vertical component, Z is assumed to share the
+  horizontal unit (the usual convention for US deliveries).
+- Geographic files (degrees) are refused with a message: reproject them first
+  (for example to the local UTM zone).
+
+To force a unit when the header is missing or wrong, use *Advanced parameters
+&rarr; Input units* in the dock (auto-detect, metres, international feet, US
+survey feet) or the `UNITS` parameter of the Processing algorithm.
 
 ---
 
@@ -362,6 +395,18 @@ Reinstall the **Game Ready** or **Studio** driver from
 (not from Windows Update / OEM tools, which can ship a partial driver
 without `nvidia-smi`).
 
+### Almost everything is classified as wires or towers, or the run is very slow
+
+The file is in feet. See [Coordinate units](#coordinate-units): versions up
+to 1.0.2 fed the coordinates to the model unconverted. Update to 1.0.3 or
+later, or set *Input units* explicitly if the file's CRS is missing or wrong.
+
+### `SyntaxError: unterminated string literal (detected at line 140)` when opening the plugin
+
+Versions 1.0.0 to 1.0.2 could not load on QGIS builds with Python 3.9 to
+3.11 (Ubuntu 22.04, Debian 12, the official macOS 3.34 package). Fixed in
+1.0.3; update from the plugin manager.
+
 ### Inference runs on CPU even though my GPU is detected
 
 Open the dock, expand *Advanced parameters &rarr; Compute device*, and set
@@ -382,8 +427,11 @@ The plugin uses `QgsBlockingNetworkRequest`, which honours the proxy
 configured in *Settings &rarr; Options &rarr; Network*. Verify those
 settings and retry; the fallback URL in `config.py` is tried automatically.
 If both URLs fail you can also drop the `.pth` file (~18&nbsp;MB) manually
-into `~/.qgis_aerial_lidar_classifier/models/` &mdash; the plugin will
-verify its SHA-256 and use it without ever touching the network.
+into the models folder of your QGIS profile
+(`%APPDATA%\QGIS\QGIS3\profiles\default\AerialLidarClassifier\models\` on
+Windows, `~/.local/share/QGIS/QGIS3/profiles/default/AerialLidarClassifier/models/`
+on Linux) &mdash; the plugin will verify its SHA-256 and use it without ever
+touching the network.
 
 ### Install takes a long time / progress bar appears stuck
 

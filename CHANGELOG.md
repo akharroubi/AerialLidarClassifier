@@ -4,6 +4,86 @@ All notable changes to **Aerial LiDAR Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.0.3] - 2026-09-25
+
+### Fixed
+- **The plugin could not open on QGIS builds with Python 3.9 to 3.11**
+  (Ubuntu 22.04, Debian 12, the official macOS 3.34 package):
+  `SyntaxError: unterminated string literal (detected at line 140)` in
+  `utils/venv_manager.py` as soon as the toolbar button was clicked.
+  Four files used a line break inside the braces of an f-string, which
+  only Python 3.12 accepts. Every file now compiles on Python 3.9 and
+  later, and `tests/test_syntax_compat.py` guards it. (GitHub #3)
+- **Feet were fed to the model as if they were metres.** Most US LiDAR
+  is delivered in US survey feet; unconverted, every distance is 3.28x
+  too small for the model, buildings come out as Wire-Conductor and
+  Transmission Tower, and the run is about 13x slower because the model
+  sees 10x more voxel blocks. The plugin now reads the linear unit from
+  the LAS CRS (WKT record or GeoTIFF keys), converts XY and Z to metres
+  for the model only (the output keeps the original coordinates), logs
+  what it found, and offers a manual override: dock `Advanced
+  parameters > Input units`, Processing parameter `UNITS`. Geographic
+  (degree) inputs are refused with a clear message. Measured on a real
+  300 x 300 m subset: 62 % of points agreed with the metric run before,
+  99.3 % after. (GitHub #5, #2)
+- **Flat tiles were classified almost entirely as Building.** In
+  `sliding_blocks_point_indices` the block grid collapsed to zero
+  blocks on any axis whose extent was under 10 % of the block size
+  (5.12 m for the Z block), so a tile with less than 5.12 m of relief
+  (farmland, water, polders, or a single flat tile in tiled or
+  streaming mode) ended up in one bogus block and about 99.5 % of its
+  points kept the fill value 7 = Building. The grid now always has at
+  least one block per axis, and points that never receive a
+  prediction are reported as ASPRS 0 with a warning instead of
+  silently becoming Building. Regression test:
+  `tests/test_block_partition.py`.
+- **Fresh installs ended up with a CPU-only torch.** The second install
+  phase ran `uv pip install --upgrade` without the CUDA index; `timm`
+  depends on torch, so uv replaced the `+cuXXX` wheels with PyPI's
+  latest torch (CPU-only on Windows) as soon as PyPI moved past the
+  version the CUDA index offered. The phase no longer upgrades and pins
+  the torch build installed by the CUDA phase through a constraints
+  file.
+- **Certificate verification was disabled for the package hosts on
+  every install** (`--allow-insecure-host` on the first attempt).
+  Verification is now on; only after a TLS failure is the install
+  retried once with it off for pypi.org, files.pythonhosted.org and
+  download.pytorch.org, with a warning in the log.
+- **A failed CUDA cascade could leave the venv without torch** while
+  the install marker said "ready". The marker is now written only after
+  verification, torch is put back from the preferred index when a
+  cascade step fails, and the marker records the installed torch build
+  and CUDA index.
+- **Apple Silicon:** the dock offered "Use GPU (Apple MPS)" and then
+  crashed with `Torch not compiled with CUDA enabled`. The compute
+  device (`cuda`, `mps`, `cpu`) is now passed end to end, the
+  Processing algorithm gains a "GPU (Apple MPS)" option, and a torch
+  build without 3D convolutions on MPS stops with a readable message.
+- **Processing algorithm:** the result layer was added to the project
+  from the worker thread (a known way to crash QGIS). Processing now
+  loads it on completion and the 3D renderer is attached in the main
+  thread. The classified file is exposed as the `OUTPUT_FILE` output so
+  the Graphical Modeler can chain it.
+- The About dialog and the Processing provider reported version 1.0.1
+  for the 1.0.2 release; the version is now read from `metadata.txt`.
+- Auto tile size: corridor-shaped extents got tiles with up to 2.5x the
+  target point count; tiles are now sized from the area. A sliver tile
+  at the far edge (a full inference pass for a handful of points) no
+  longer occurs.
+- A missing or unreadable model configuration skipped the file silently
+  and the run reported "Complete"; it now stops with the reason.
+- Streaming mode keeps 1 byte per point for the predictions instead of
+  4 (a 2 G-point file: 2 GB instead of 8 GB of RAM).
+- The tiled merge log said "filled via nearest tile prediction" while
+  it wrote 0; it now says what happens and counts the points.
+
+### Changed
+- Dock: new **Input units** selector under Advanced parameters
+  (auto-detect, metres, international feet, US survey feet).
+- Processing: new `UNITS` parameter and `OUTPUT_FILE` output.
+- `tests/` (not shipped in the zip): block partition, tile grid, unit
+  detection, Python 3.9 syntax compatibility and a model smoke test.
+
 ## [1.0.2] - 2026-05-19
 
 ### Fixed

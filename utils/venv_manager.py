@@ -133,30 +133,26 @@ def _log_system_info():
     except Exception:
         qgis_version = "Unknown"
 
+    # Keep every f-string on one line: a line break inside ``{...}`` of a
+    # single-quoted f-string is Python 3.12+ syntax (PEP 701) and made
+    # this module fail to import on the Python 3.9-3.11 QGIS builds.
     info_lines = [
-        "=" *
-        50,
+        "=" * 50,
         "Installation Environment:",
-        f"  OS: {
-            sys.platform} ({
-            platform.system()} {
-                platform.release()})",
-        f"  Architecture: {
-            platform.machine()}",
-        f"  Python: {
-            sys.version_info.major}.{
-            sys.version_info.minor}.{
-            sys.version_info.micro}",
+        f"  OS: {sys.platform} ({platform.system()} {platform.release()})",
+        f"  Architecture: {platform.machine()}",
+        f"  Python: {sys.version_info.major}.{sys.version_info.minor}."
+        f"{sys.version_info.micro}",
         f"  QGIS: {qgis_version}",
     ]
     if os.environ.get("AERIAL_LIDAR_CLASSIFIER_CACHE_DIR"):
         info_lines.append(
-            f"  AERIAL_LIDAR_CLASSIFIER_CACHE_DIR: {
-                os.environ['AERIAL_LIDAR_CLASSIFIER_CACHE_DIR']}")
+            "  AERIAL_LIDAR_CLASSIFIER_CACHE_DIR: "
+            + os.environ["AERIAL_LIDAR_CLASSIFIER_CACHE_DIR"])
     elif os.environ.get("AERIAL_LIDAR_CLASSIFIER_VENV_DIR"):
         info_lines.append(
-            f"  AERIAL_LIDAR_CLASSIFIER_VENV_DIR: {
-                os.environ['AERIAL_LIDAR_CLASSIFIER_VENV_DIR']}")
+            "  AERIAL_LIDAR_CLASSIFIER_VENV_DIR: "
+            + os.environ["AERIAL_LIDAR_CLASSIFIER_VENV_DIR"])
     info_lines.append(f"  Cache directory: {CACHE_DIR}")
     info_lines.append("=" * 50)
     for line in info_lines:
@@ -616,59 +612,125 @@ def _is_hash_mismatch(output: str) -> bool:
     return "do not match the hashes" in output_lower or "hash mismatch" in output_lower
 
 
-def _get_pip_ssl_flags() -> List[str]:
-    """Get pip flags for TLS on corporate networks.
+# TLS handling. The first attempt always verifies certificates. Only when
+# an install fails with a TLS error (a corporate proxy re-signing HTTPS
+# traffic) is it retried once with verification disabled for the three
+# package hosts, and that mode is then kept for the rest of the same
+# install run so the later steps (batch install, CUDA cascade) do not
+# fail in turn. v1.0.1 and v1.0.2 disabled verification on the first
+# attempt for every user, which let anyone on the network path serve
+# arbitrary wheels that QGIS then imported.
+_TLS_INSECURE_FALLBACK_ACTIVE = False
 
-    Returns:
-        List of pip command-line flags.
-    """
-    return [
-        "--trusted-host",
-        "pypi.org",
-        "--trusted-host",
-        "pypi.python.org",
-        "--trusted-host",
-        "files.pythonhosted.org",
-        # PyTorch wheels live here; without this, corporate SSL
-        # inspection on the cu128/cu126/cu121/cu118 index URLs causes
-        # pip to abort with "SSL certificate error".
-        "--trusted-host",
-        "download.pytorch.org",
-    ]
+_PACKAGE_HOSTS = (
+    "pypi.org",
+    "files.pythonhosted.org",
+    # PyTorch wheels live here; the cu128/cu126/cu121/cu118 index URLs
+    # are what corporate SSL inspection breaks first.
+    "download.pytorch.org",
+)
+
+
+def _reset_tls_insecure_fallback() -> None:
+    global _TLS_INSECURE_FALLBACK_ACTIVE
+    _TLS_INSECURE_FALLBACK_ACTIVE = False
+
+
+def _enable_tls_insecure_fallback() -> None:
+    global _TLS_INSECURE_FALLBACK_ACTIVE
+    _TLS_INSECURE_FALLBACK_ACTIVE = True
+
+
+def _tls_insecure_fallback_active() -> bool:
+    return _TLS_INSECURE_FALLBACK_ACTIVE
+
+
+def _get_pip_trusted_host_flags() -> List[str]:
+    """pip flags that skip certificate checks for the package hosts."""
+    flags: List[str] = []
+    for host in _PACKAGE_HOSTS + ("pypi.python.org",):
+        flags.extend(["--trusted-host", host])
+    return flags
+
+
+def _get_uv_insecure_host_flags() -> List[str]:
+    """uv flags that skip certificate checks for the package hosts."""
+    flags: List[str] = []
+    for host in _PACKAGE_HOSTS:
+        flags.extend(["--allow-insecure-host", host])
+    return flags
+
+
+def _get_pip_ssl_flags() -> List[str]:
+    """Get pip TLS flags: none by default, trusted hosts only once the
+    insecure fallback has been activated by a successful retry."""
+    if _tls_insecure_fallback_active():
+        return _get_pip_trusted_host_flags()
+    return []
 
 
 def _get_uv_ssl_flags() -> List[str]:
-    """Get uv flags for TLS handling on corporate networks.
+    """Get uv TLS flags for corporate networks.
 
     ``--native-tls`` tells uv to use the operating system's native TLS
     implementation (Schannel on Windows, Secure Transport on macOS,
     OpenSSL on Linux) instead of uv's bundled webpki roots. The OS
     store trusts whatever CAs have been installed by IT / Group
     Policy, which is what's needed when a corporate proxy injects its
-    own certificate for SSL inspection. uv's bundled roots never
-    include corporate CAs, so without this flag the install fails
-    with 'Failed to install torch: SSL certificate error' as soon as
-    uv tries to fetch from download.pytorch.org.
+    own certificate for SSL inspection. Certificates are still
+    verified.
 
-    ``--allow-insecure-host`` is the last-resort fallback for the
-    three hosts the plugin actually fetches wheels from. Some
-    corporate proxies present such a broken chain that even native
-    TLS rejects it; for those users, allowing insecure TLS for these
-    specific hosts unblocks the install without weakening security
-    for anything else.
+    ``--allow-insecure-host`` disables certificate verification for a
+    host. It is added only after an install failed with a TLS error
+    and a retry with the flag succeeded (see ``_retry_if_tls_error``),
+    never on the first attempt.
 
     Returns:
         List of uv command-line flags.
     """
-    return [
-        "--native-tls",
-        "--allow-insecure-host",
-        "pypi.org",
-        "--allow-insecure-host",
-        "files.pythonhosted.org",
-        "--allow-insecure-host",
-        "download.pytorch.org",
-    ]
+    flags = ["--native-tls"]
+    if _tls_insecure_fallback_active():
+        flags.extend(_get_uv_insecure_host_flags())
+    return flags
+
+
+def _retry_if_tls_error(result, base_cmd: List[str], use_uv: bool, run_install):
+    """Re-run ``base_cmd`` once with certificate checks disabled for the
+    package hosts when ``result`` failed on a TLS error.
+
+    ``run_install`` takes the command list and returns a ``_PipResult``;
+    it carries the timeout / progress / cancel plumbing of the call
+    site. The insecure mode is latched for the rest of this install run
+    only when the retry succeeds, so every later command (batch
+    install, CUDA cascade) gets the same flags through
+    ``_get_uv_ssl_flags`` / ``_get_pip_ssl_flags``.
+    """
+    if result.returncode == 0 or _tls_insecure_fallback_active():
+        return result
+    error_output = result.stderr or result.stdout or ""
+    if not _is_ssl_error(error_output):
+        return result
+    _log(
+        "TLS certificate verification failed against the package index "
+        "(typically a corporate proxy that re-signs HTTPS traffic). "
+        "Retrying once with certificate verification disabled for "
+        + ", ".join(_PACKAGE_HOSTS) + ".",
+        Qgis.Warning,
+    )
+    if use_uv:
+        retry_cmd = base_cmd + _get_uv_insecure_host_flags()
+    else:
+        retry_cmd = base_cmd + _get_pip_trusted_host_flags()
+    retry = run_install(retry_cmd)
+    if retry.returncode == 0:
+        _enable_tls_insecure_fallback()
+        _log(
+            "Install succeeded without certificate verification for the "
+            "package hosts; keeping that mode for the rest of this "
+            "installation.",
+            Qgis.Warning,
+        )
+    return retry
 
 
 def _is_network_error(output: str) -> bool:
@@ -1727,8 +1789,8 @@ def create_venv(
             return True, "Virtual environment created"
         else:
             error_msg = (
-                result.stderr or result.stdout or f"Return code {
-                    result.returncode}")
+                result.stderr or result.stdout
+                or f"Return code {result.returncode}")
             _log(f"Failed to create venv: {error_msg}", Qgis.Critical)
             _cleanup_partial_venv(venv_dir)
             if _is_application_control_error(error_msg):
@@ -1981,6 +2043,87 @@ def _run_pip_install(
 # ---------------------------------------------------------------------------
 # Dependency installation
 # ---------------------------------------------------------------------------
+
+
+def _get_installed_versions(
+    python_path: str,
+    package_names,
+    env: dict,
+    subprocess_kwargs: dict,
+) -> dict:
+    """Return ``{name: version}`` for the given packages installed in the venv.
+
+    Uses ``uv pip freeze`` when uv is available (fast, no torch import),
+    otherwise ``python -m pip freeze``. Names are normalised to
+    lower-case with dashes. Missing packages are simply absent from the
+    result; any failure is logged and returns ``{}``.
+    """
+    from .uv_manager import get_uv_path, uv_exists
+
+    wanted = {str(n).lower().replace("_", "-") for n in package_names}
+    if uv_exists():
+        cmd = [get_uv_path(), "pip", "freeze", "--python", python_path]
+    else:
+        cmd = [python_path, "-m", "pip", "freeze",
+               "--disable-pip-version-check"]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, env=env,
+            **subprocess_kwargs,
+        )
+    except Exception as exc:
+        _log(f"Could not list installed packages: {exc}", Qgis.Warning)
+        return {}
+    if result.returncode != 0:
+        _log(
+            "Could not list installed packages: "
+            f"{(result.stderr or result.stdout or '')[:300]}",
+            Qgis.Warning,
+        )
+        return {}
+    found = {}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if "==" not in line:
+            continue
+        name, _, version = line.partition("==")
+        key = name.strip().lower().replace("_", "-")
+        if key in wanted:
+            found[key] = version.strip()
+    return found
+
+
+def _write_torch_constraints(venv_dir: str, versions: dict) -> Optional[str]:
+    """Write a pip/uv constraints file pinning torch and torchvision.
+
+    Every install that runs after the CUDA phase passes this file with
+    ``--constraint`` so a later resolution (the batch phase pulls in
+    ``timm``, which depends on torch) can never replace the +cuXXX build
+    with the CPU-only build PyPI publishes under the same name. The pin
+    keeps the local version segment (``2.12.0+cu126``): a bare
+    ``==2.12.0`` would still match PyPI's ``2.12.0``.
+
+    Returns the file path, or None when torch is not installed.
+    """
+    pins = [
+        f"{name}=={version}"
+        for name, version in versions.items()
+        if name in ("torch", "torchvision") and version
+    ]
+    if not pins:
+        return None
+    path = os.path.join(venv_dir, "torch_constraints.txt")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(pins) + "\n")
+    except Exception as exc:
+        _log(f"Could not write torch constraints file: {exc}", Qgis.Warning)
+        return None
+    _log(
+        "Pinned for the rest of the install: " + ", ".join(pins),
+        Qgis.Info,
+    )
+    return path
 
 
 def _is_cpu_torch_installed(
@@ -2615,6 +2758,24 @@ def install_dependencies(
                             cancel_check=cancel_check,
                         )
 
+                # Retry on TLS errors (corporate SSL inspection): one
+                # attempt with certificate checks off for the package
+                # hosts, latched for the rest of the run if it works.
+                result = _retry_if_tls_error(
+                    result, base_cmd, use_uv,
+                    lambda cmd: _run_pip_install(
+                        cmd=cmd,
+                        timeout=pkg_timeout,
+                        env=env,
+                        subprocess_kwargs=subprocess_kwargs,
+                        label="{} (TLS retry)".format(label),
+                        progress_start=pkg_start,
+                        progress_end=pkg_end,
+                        progress_callback=progress_callback,
+                        cancel_check=cancel_check,
+                    ),
+                )
+
                 # Retry on network errors
                 if result.returncode != 0:
                     error_output = result.stderr or result.stdout or ""
@@ -2825,27 +2986,50 @@ def install_dependencies(
         if progress_callback:
             progress_callback(batch_start, "Installing dependencies...")
 
+        # Pin the torch build the CUDA phase installed. ``timm`` depends
+        # on torch and torchvision, so this resolution would otherwise be
+        # free to replace the +cuXXX wheels with the CPU-only build PyPI
+        # publishes under the same name (it did exactly that as soon as
+        # PyPI moved past the version the CUDA index offered). No
+        # ``--upgrade`` here either: the venv is freshly created, there
+        # is nothing to upgrade, and with uv the flag re-resolves every
+        # package in the graph instead of only the ones named.
+        constraint_args: List[str] = []
+        if cuda_packages:
+            installed = _get_installed_versions(
+                python_path, ("torch", "torchvision"), env, subprocess_kwargs
+            )
+            constraints_path = _write_torch_constraints(venv_dir, installed)
+            if constraints_path:
+                constraint_args = ["--constraint", constraints_path]
+            else:
+                _log(
+                    "torch is not installed after the CUDA phase; the batch "
+                    "install runs without a torch pin.",
+                    Qgis.Warning,
+                )
+
         if use_uv:
             pip_args = [
                 "pip",
                 "install",
                 "--python",
                 python_path,
-                "--upgrade",
             ]
             pip_args.extend(_get_uv_ssl_flags())
+            pip_args.extend(constraint_args)
             pip_args.extend(batch_specs)
             base_cmd = [uv_path] + pip_args
         else:
             pip_args = [
                 "install",
-                "--upgrade",
                 "--no-warn-script-location",
                 "--disable-pip-version-check",
                 "--prefer-binary",
             ]
             pip_args.extend(_get_pip_ssl_flags())
             pip_args.extend(_get_pip_proxy_args())
+            pip_args.extend(constraint_args)
             pip_args.extend(batch_specs)
             base_cmd = [python_path, "-m", "pip"] + pip_args
 
@@ -2888,6 +3072,22 @@ def install_dependencies(
                         progress_callback=progress_callback,
                         cancel_check=cancel_check,
                     )
+
+            # Retry on TLS errors (corporate SSL inspection), see Phase A.
+            result = _retry_if_tls_error(
+                result, base_cmd, use_uv,
+                lambda cmd: _run_pip_install(
+                    cmd=cmd,
+                    timeout=batch_timeout,
+                    env=env,
+                    subprocess_kwargs=subprocess_kwargs,
+                    label="dependencies (TLS retry)",
+                    progress_start=batch_start,
+                    progress_end=batch_end,
+                    progress_callback=progress_callback,
+                    cancel_check=cancel_check,
+                ),
+            )
 
             # Retry on network errors
             if result.returncode != 0:
@@ -2941,21 +3141,21 @@ def install_dependencies(
                                 "install",
                                 "--python",
                                 python_path,
-                                "--upgrade",
                             ]
                             retry_args.extend(_get_uv_ssl_flags())
+                            retry_args.extend(constraint_args)
                             retry_args.extend(retry_specs)
                             retry_cmd = [uv_path] + retry_args
                         else:
                             retry_args = [
                                 "install",
-                                "--upgrade",
                                 "--no-warn-script-location",
                                 "--disable-pip-version-check",
                                 "--prefer-binary",
                             ]
                             retry_args.extend(_get_pip_ssl_flags())
                             retry_args.extend(_get_pip_proxy_args())
+                            retry_args.extend(constraint_args)
                             retry_args.extend(retry_specs)
                             retry_cmd = [
                                 python_path,
@@ -3043,12 +3243,9 @@ def install_dependencies(
     _log(f"Virtual environment: {venv_dir}", Qgis.Success)
     _log("=" * 50, Qgis.Success)
 
-    # Stamp the venv with the current plugin version so the next
-    # dependency check knows this install is fresh. If the user later
-    # upgrades to a plugin version with a different install pipeline,
-    # the missing / mismatched marker will force a clean reinstall
-    # instead of silently keeping a stale broken venv.
-    _write_install_marker(venv_dir)
+    # The install marker is written by create_venv_and_install() once
+    # verification and the CUDA cascade are over. Writing it here let an
+    # interrupted cascade leave a venv stamped "ready" without torch.
 
     if _driver_too_old:
         return True, "All dependencies installed successfully [DRIVER_TOO_OLD]"
@@ -3361,7 +3558,9 @@ def _get_install_marker_path(venv_dir: str = None) -> str:
     return os.path.join(venv_dir, _INSTALL_MARKER_FILENAME)
 
 
-def _write_install_marker(venv_dir: str = None) -> None:
+def _write_install_marker(
+    venv_dir: str = None, extra: Optional[dict] = None,
+) -> None:
     """Stamp the venv with the install-schema version and a timestamp.
 
     The ``install_schema_version`` field is the value that
@@ -3371,6 +3570,10 @@ def _write_install_marker(venv_dir: str = None) -> None:
     diagnostic purposes only - it is NOT used for the freshness
     comparison, otherwise every minor plugin bump would force users to
     re-download multi-GB of dependencies for no install-side benefit.
+
+    ``extra`` adds informational fields (installed torch version, CUDA
+    index, CUDA mode) that later releases can use to install only what
+    a new model needs instead of rebuilding the whole venv.
 
     Best-effort: failure to write the marker is logged but does not
     fail the install. The next dependency check then sees a missing
@@ -3390,6 +3593,8 @@ def _write_install_marker(venv_dir: str = None) -> None:
         "cuda_logic_version": _CUDA_LOGIC_VERSION,
         "written_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+    if extra:
+        payload.update(extra)
     try:
         with open(marker_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
@@ -3572,6 +3777,9 @@ def create_venv_and_install(
     from .uv_manager import uv_exists as _uv_exists
 
     _log_system_info()
+    # Certificate verification is on for every run until a TLS failure
+    # is retried successfully with it off (see _retry_if_tls_error).
+    _reset_tls_insecure_fallback()
 
     # Early check: verify cache directory is writable
     try:
@@ -3757,6 +3965,13 @@ def create_venv_and_install(
     # (cu128 -> cu126 -> cu124 ...) and retry torch + torchvision
     # install at each lower toolkit the driver still supports. The
     # first one that produces a working +cuXXX wheel wins.
+    # Which torch build ends up in the venv, recorded in the install
+    # marker so a later release can tell what it is dealing with.
+    torch_index_in_use: Optional[str] = None
+    if cuda_enabled and not _driver_too_old and not _cuda_fell_back:
+        _, _gpu_info_for_marker = detect_nvidia_gpu()
+        torch_index_in_use = _select_cuda_index(_gpu_info_for_marker)
+
     _cuda_smoke_failed = False
     if is_valid and cuda_enabled:
         if progress_callback:
@@ -3805,27 +4020,65 @@ def create_venv_and_install(
                     )
                     cuda_works = True
                     recovered = True
+                    torch_index_in_use = next_idx
                     break
             if not recovered:
                 _log(
-                    "All CUDA cascade retries exhausted. Keeping the "
-                    "currently-installed torch (likely +cpu) so the "
-                    "user can still run on CPU.",
+                    "All CUDA cascade retries exhausted. The plugin will "
+                    "run on CPU with whatever torch build is installed.",
                     Qgis.Warning,
                 )
                 _cuda_smoke_failed = True
+                # Each cascade step uninstalls torch + torchvision before
+                # reinstalling, so a failed step can leave the venv with
+                # no torch at all. Check what is really on disk and put
+                # the preferred index's build back if needed; the "ready"
+                # verdict below must describe the venv as it is.
+                is_valid, verify_msg = verify_venv(
+                    progress_callback=verify_progress)
+                if not is_valid and candidates:
+                    _log(
+                        "torch is missing or broken after the CUDA "
+                        f"retries; reinstalling it via {candidates[0]}.",
+                        Qgis.Warning,
+                    )
+                    if _reinstall_torch_at_cuda_index(
+                        VENV_DIR, candidates[0], progress_callback
+                    ):
+                        is_valid, verify_msg = verify_venv(
+                            progress_callback=verify_progress)
 
     if not is_valid:
         return False, f"Verification failed: {verify_msg}"
 
     _write_deps_hash()
 
-    if cuda_enabled and not _cuda_fell_back and not _driver_too_old:
-        _write_cuda_flag("cuda")
-    elif cuda_enabled and _cuda_fell_back:
-        _write_cuda_flag("cuda_fallback")
+    if _driver_too_old or not cuda_enabled:
+        cuda_mode = "cpu"
+    elif _cuda_fell_back:
+        cuda_mode = "cuda_fallback"
+    elif _cuda_smoke_failed:
+        # torch is installed and imports, but CUDA does not work with it
+        # (typically a +cpu wheel at every toolkit the driver supports).
+        cuda_mode = "cpu"
     else:
-        _write_cuda_flag("cpu")
+        cuda_mode = "cuda"
+    _write_cuda_flag(cuda_mode)
+
+    # Stamp the venv only now: every package imports and the CUDA cascade
+    # (which uninstalls torch between retries) is over. The extra fields
+    # record what was actually installed so later releases can add the
+    # packages a new model needs without rebuilding the whole venv.
+    final_versions = _get_installed_versions(
+        get_venv_python_path(VENV_DIR), ("torch", "torchvision"),
+        _get_clean_env_for_venv(), _get_subprocess_kwargs(),
+    )
+    _write_install_marker(VENV_DIR, extra={
+        "torch_version": final_versions.get("torch"),
+        "torchvision_version": final_versions.get("torchvision"),
+        "cuda_index": torch_index_in_use,
+        "cuda_mode": cuda_mode,
+    })
 
     if progress_callback:
         progress_callback(100, "All dependencies installed and verified")

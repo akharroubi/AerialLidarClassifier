@@ -52,7 +52,6 @@ Memory footprint is roughly *(global predictions = 4 bytes / point) +
 
 from __future__ import annotations
 
-import math
 import shutil
 import tempfile
 from copy import deepcopy
@@ -61,7 +60,9 @@ from typing import Callable
 
 import numpy as np
 
-from ..config import TILE_AUTO_TARGET_POINTS, TILE_DEFAULT_BUFFER_M
+from ..config import TILE_DEFAULT_BUFFER_M
+from ..core.tiling import compute_tile_grid
+from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_from_header
 from ..utils.logger import log_info, log_warning
 
@@ -231,41 +232,12 @@ def _grid_from_bounds(
 ) -> tuple[list[tuple[float, float, float, float]], float]:
     """Build a non-overlapping XY tile grid covering [xmin..xmax] x [ymin..ymax].
 
-    The right/top edge of the outermost tiles is nudged by a small
-    epsilon so that points exactly at ``xmax`` or ``ymax`` fall inside
-    the last tile's half-open ``[lo, hi)`` core (and are not silently
-    skipped at write time).
+    Thin wrapper around ``core.tiling.compute_tile_grid`` (shared with
+    the in-memory tiled path) kept for readability at the call site.
     """
-    width = max(xmax - xmin, 1.0)
-    height = max(ymax - ymin, 1.0)
-
-    if auto:
-        n_tiles_needed = max(1, math.ceil(n_points / TILE_AUTO_TARGET_POINTS))
-        side = max(1, math.ceil(math.sqrt(n_tiles_needed)))
-        tile_size_m = max(width, height) / side
-    else:
-        tile_size_m = float(manual_tile_size_m or 500.0)
-
-    # Nudge upper bounds by a relative epsilon (max(1e-6, range*1e-9)) so
-    # that the half-open core [lo, hi) still covers points exactly at
-    # xmax/ymax. The buffer halo absorbs this rounding harmlessly.
-    eps_x = max(1e-6, abs(xmax - xmin) * 1e-9)
-    eps_y = max(1e-6, abs(ymax - ymin) * 1e-9)
-    xmax_eff = xmax + eps_x
-    ymax_eff = ymax + eps_y
-
-    tiles: list[tuple[float, float, float, float]] = []
-    y = ymin
-    while y < ymax_eff:
-        x = xmin
-        while x < xmax_eff:
-            tiles.append(
-                (x, y, min(x + tile_size_m, xmax_eff),
-                 min(y + tile_size_m, ymax_eff))
-            )
-            x += tile_size_m
-        y += tile_size_m
-    return tiles, tile_size_m
+    return compute_tile_grid(
+        xmin, ymin, xmax, ymax, n_points, auto, manual_tile_size_m
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +250,7 @@ def streaming_tiled_classify(
     classifier_fn: Callable,
     config_path: str,
     model_path: str,
-    use_cuda: bool,
+    device: str,
     class_mapping: dict,
     laspy_module,
     progress_callback: Callable[[float], None],
@@ -290,6 +262,7 @@ def streaming_tiled_classify(
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     info_callback: Callable[[str], None] | None = None,
     warning_callback: Callable[[str], None] | None = None,
+    units_override: str | None = None,
 ) -> Path | None:
     """Run a streaming tiled classification of ``input_path`` to ``output_path``.
 
@@ -330,11 +303,22 @@ def streaming_tiled_classify(
     with laspy_module.open(str(input_path)) as reader:
         header = reader.header
         n_points = int(header.point_count)
-        xmin = float(header.mins[0])
-        ymin = float(header.mins[1])
-        xmax = float(header.maxs[0])
-        ymax = float(header.maxs[1])
         input_pf_id = int(header.point_format.id)
+        # The model works in metres; the tile grid and every point handed
+        # to it are scaled by the file's linear unit (see utils.las_units).
+        # The output written in pass 4 keeps the original coordinates.
+        units = resolve_units(header, units_override)
+        if units.angular:
+            raise RuntimeError(
+                f"{input_path.name} is in geographic coordinates (degrees). "
+                "The model needs projected coordinates: reproject the file "
+                "(for example to the local UTM zone) and run again."
+            )
+        emit_info(f"Coordinate units: {units.describe()}")
+        xmin = float(header.mins[0]) * units.xy_to_m
+        ymin = float(header.mins[1]) * units.xy_to_m
+        xmax = float(header.maxs[0]) * units.xy_to_m
+        ymax = float(header.maxs[1]) * units.xy_to_m
 
     if n_points <= 0:
         log_warning("Streaming: input has zero points; nothing to do.")
@@ -349,10 +333,12 @@ def streaming_tiled_classify(
         f"tile size ~{resolved_size:.0f} m, buffer {buffer_m:.0f} m"
     )
 
-    # ASPRS predictions live in an int32 array so they can carry any
-    # ASPRS code 0-255 plus model IDs during the merge. We cast to the
-    # final field dtype at write time.
-    predictions = np.zeros(n_points, dtype=np.int32)
+    # One byte per point for the whole file: the class mapping only ever
+    # produces ASPRS codes (0-255), and that is what pass 4 writes, cast
+    # to the field's dtype. v1.0.2 used int32 here, four times the RAM
+    # for nothing (a 2 G-point file: 8 GB instead of 2 GB). Pass 3
+    # refuses codes above 255 rather than letting them wrap.
+    predictions = np.zeros(n_points, dtype=np.uint8)
 
     # Working directory for per-tile sidecars.
     workdir = Path(tempfile.mkdtemp(prefix="alc_stream_"))
@@ -364,12 +350,13 @@ def streaming_tiled_classify(
         if not _pass2_partition(
             input_path, tiles, tile_dirs, buffer_m,
             chunk_size, laspy_module, progress_callback, cancel_callback,
+            units,
         ):
             return None
 
         if not _pass3_inference(
             tiles, tile_dirs, predictions, class_mapping,
-            classifier_fn, config_path, model_path, use_cuda,
+            classifier_fn, config_path, model_path, device,
             progress_callback, cancel_callback,
             emit_warning=emit_warning,
         ):
@@ -411,14 +398,16 @@ def streaming_tiled_classify(
         # next run starves. Wrapped in try/except because torch may
         # not be importable at all on a CPU-only install or after a
         # failed dep install.
-        if use_cuda:
+        if device in ("cuda", "mps"):
             try:
                 import torch
-                if torch.cuda.is_available():
+                if device == "cuda" and torch.cuda.is_available():
                     torch.cuda.empty_cache()
+                elif device == "mps" and hasattr(torch, "mps"):
+                    torch.mps.empty_cache()
             except Exception as exc:
                 log_warning(
-                    f"Streaming: could not empty CUDA cache: {exc}"
+                    f"Streaming: could not empty the {device} cache: {exc}"
                 )
 
 
@@ -435,6 +424,7 @@ def _pass2_partition(
     laspy_module,
     progress_callback,
     cancel_callback,
+    units,
 ) -> bool:
     log_info("Streaming pass 2/4: partitioning points into tile sidecars")
 
@@ -451,9 +441,10 @@ def _pass2_partition(
             if cancel_callback():
                 return False
 
-            x = np.asarray(chunk.x, dtype=np.float64)
-            y = np.asarray(chunk.y, dtype=np.float64)
-            z = np.asarray(chunk.z, dtype=np.float64)
+            # Sidecars hold metres (see the unit handling in pass 1).
+            x = np.asarray(chunk.x, dtype=np.float64) * units.xy_to_m
+            y = np.asarray(chunk.y, dtype=np.float64) * units.xy_to_m
+            z = np.asarray(chunk.z, dtype=np.float64) * units.z_to_m
             n_chunk = len(x)
             global_idx = np.arange(
                 global_offset, global_offset + n_chunk, dtype=np.uint64
@@ -490,7 +481,7 @@ def _pass2_partition(
 
 def _pass3_inference(
     tiles, tile_dirs, predictions, class_mapping,
-    classifier_fn, config_path, model_path, use_cuda,
+    classifier_fn, config_path, model_path, device,
     progress_callback, cancel_callback,
     emit_warning=log_warning,
 ) -> bool:
@@ -545,15 +536,15 @@ def _pass3_inference(
             tile_preds = classifier_fn(
                 config_path, tile_pcd, model_path,
                 if_bottom_only=False, use_efficient=True,
-                use_cuda=use_cuda, progress_callback=tile_progress,
+                device=device, progress_callback=tile_progress,
             )
         except InterruptedError:
             return False
 
         if tile_preds is None:
             emit_warning(
-                f"Streaming tile {
-                    tile_idx + 1}/{n_tiles} returned no predictions.")
+                f"Streaming tile {tile_idx + 1}/{n_tiles} "
+                "returned no predictions.")
             continue
 
         in_core = (
@@ -578,6 +569,12 @@ def _pass3_inference(
                 "set to ASPRS 0."
             )
 
+        if asprs.size and int(asprs.max()) > 255:
+            raise RuntimeError(
+                "The class mapping produced an ASPRS code above 255 "
+                f"({int(asprs.max())}), which no LAS classification field "
+                "can hold. Fix the mapping."
+            )
         predictions[core_indices] = asprs
 
     return True

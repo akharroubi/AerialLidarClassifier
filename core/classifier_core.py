@@ -38,7 +38,15 @@ def sliding_blocks_point_indices(pts, block_size, overlap_ratio):
 
     p_min = pts.min(axis=0)
     p_max = pts.max(axis=0)
+    # Number of stride steps needed so the last block still reaches p_max.
+    # Clamped at 0: when an axis spans less than (block - stride), the raw
+    # value goes negative, ``dims`` drops to 0, every point collapses into
+    # one bogus block (index -1) and the voxel filter downstream then keeps
+    # only the corner nearest the minimum. A single block per axis always
+    # covers such a thin extent, e.g. a flat tile whose Z range is under
+    # 10 % of the 51.2 m Z block (farmland, water, polders).
     steps = np.floor((p_max - p_min - bs) / stride).astype(int) + 1
+    steps = np.maximum(steps, 0)
     dims = steps + 1  # number of blocks along each axis
 
     # Compute each point’s “primary” block index along each dimension
@@ -109,24 +117,72 @@ def sliding_blocks_point_indices(pts, block_size, overlap_ratio):
     return origins, [np.array(g, int) for g in groups]
 
 
+def resolve_device(device) -> str:
+    """Validate the requested compute device and return its torch name.
+
+    Accepts ``"cuda"``, ``"mps"``, ``"cpu"`` (and the v1.0 booleans:
+    ``True`` -> cuda, ``False`` -> cpu). Raises a RuntimeError with an
+    actionable message instead of letting torch fail deep inside the
+    model: v1.0.2 called ``model.cuda()`` for any "GPU" choice, which on
+    Apple Silicon (where the probe reports MPS) died with a bare
+    ``AssertionError: Torch not compiled with CUDA enabled``.
+    """
+    if device is True:
+        device = "cuda"
+    if device is False or device is None:
+        device = "cpu"
+    device = str(device).lower()
+    if device.startswith("cuda"):
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA was requested but this torch build has no working "
+                f"CUDA device (torch {torch.__version__}, CUDA build: "
+                f"{torch.version.cuda}). Choose CPU, or reinstall the "
+                "dependencies from the Setup panel."
+            )
+        return device
+    if device == "mps":
+        mps = getattr(torch.backends, "mps", None)
+        if mps is None or not mps.is_available():
+            raise RuntimeError(
+                "Apple MPS was requested but is not available in this "
+                "torch build. Choose CPU."
+            )
+        return device
+    if device == "cpu":
+        return device
+    raise RuntimeError(
+        f"Unknown compute device '{device}'. Use 'cuda', 'mps' or 'cpu'."
+    )
+
+
 def filterPoints(
         config_file,
         pcd,
         model_path,
         if_bottom_only=True,
         use_efficient=True,
-        use_cuda=True,
+        device="cuda",
         progress_callback=lambda x: None):
+    """Voxelise ``pcd`` block by block and run the 3D SegFormer on it.
+
+    ``device`` is ``"cuda"``, ``"mps"`` or ``"cpu"`` (the v1.0 booleans
+    are still accepted). Returns one model class id per input point,
+    with 0 meaning "no prediction".
+    """
+    device = resolve_device(device)
     progress_callback(10)
-    # laod variables from the config file (e.g.
-    # woodcls_branch_tls_segformer3D_112_4cm(GPU8GB).json
+    # Load the block geometry and the network hyper-parameters from the
+    # model's JSON (e.g. urbanfiltering_als_esegformer3D_112_30cm...).
     try:
         with open(config_file) as json_file:
             configs = json.load(json_file)
-    except Exception as e:
-        print(config_file)
-        print("Cannot load config file:", e)
-        return
+    except Exception as exc:
+        # Callers treat a None result as "no predictions" and skip the
+        # file; a missing or broken config must stop the run instead.
+        raise RuntimeError(
+            f"Cannot load the model configuration {config_file}: {exc}"
+        ) from exc
 
     nbmat_sz = np.array(configs["model"]["voxel_number_in_block"])
     min_res = np.array(configs["model"]["voxel_resolution_in_meter"])
@@ -150,17 +206,14 @@ def filterPoints(
         drop_path_rate=0.0,
     )
 
-    device = "cuda" if use_cuda else "cpu"
-
-    if use_cuda:
-        model = model.cuda()
-        state_dict = torch.load(model_path, weights_only=True)
-    else:
-        state_dict = torch.load(
-            model_path,
-            map_location=torch.device('cpu'),
-            weights_only=True,
-        )
+    # Weights are always read onto the CPU first, then the whole model
+    # moves to the requested device: the one code path that works for
+    # CUDA, Apple MPS and CPU alike.
+    state_dict = torch.load(
+        model_path,
+        map_location=torch.device("cpu"),
+        weights_only=True,
+    )
 
     model.max_accu = state_dict.get('max_accu', 0.0)
     if 'max_accu' in state_dict:
@@ -171,8 +224,21 @@ def filterPoints(
         state_dict.pop('best_mIoU')
 
     model.load_state_dict(state_dict)
-
+    model = model.to(device)
     model.eval()
+
+    def _forward(x):
+        try:
+            with torch.no_grad():
+                return model(x.to(device))
+        except NotImplementedError as exc:
+            if device == "mps":
+                raise RuntimeError(
+                    "This model uses 3D convolutions that your torch build "
+                    "does not support on Apple MPS. Uncheck 'Use GPU' (or "
+                    "pick CPU as the compute device) to run on the CPU."
+                ) from exc
+            raise
 
     nb_tsz = int(np.prod(nbmat_sz))
 
@@ -212,7 +278,13 @@ def filterPoints(
 
     # apply the DL model blockwisely
     if num_classes > 3:
-        pcd_pred = np.full(len(pcd), dtype=int, fill_value=num_classes - 1)
+        # 0 = "no prediction". A point only keeps this value if it never
+        # entered any block (the grid now always covers the extent, so this
+        # is a safety net) or fell outside a block's voxel grid. Model id 0
+        # is absent from the class mapping, so the callers' unmapped-id
+        # warning surfaces any leftover as ASPRS 0 instead of silently
+        # handing it the last class (7 = Building, the previous default).
+        pcd_pred = np.zeros(len(pcd), dtype=int)
 
         total_nbs = len(nb_idxs)
         for i in range(total_nbs):
@@ -226,8 +298,7 @@ def filterPoints(
                 torch.moveaxis(
                     x.reshape(
                         (1, *nbmat_sz, 1)).float(), -1, 1), -1, 2)
-            with torch.no_grad():
-                h = model(x.to(device))
+            h = _forward(x)
 
             h_nonzero = torch.moveaxis(torch.unsqueeze(torch.moveaxis(torch.swapaxes(
                 h, -1, 2), 1, -1).reshape((nb_tsz, num_classes))[nb_idx, :], 0), -1, 1)
@@ -257,8 +328,7 @@ def filterPoints(
                 torch.moveaxis(
                     x.reshape(
                         (1, *nbmat_sz, 1)).float(), -1, 1), -1, 2)
-            with torch.no_grad():
-                h = model(x.to(device))
+            h = _forward(x)
 
             h_nonzero = torch.moveaxis(torch.unsqueeze(torch.moveaxis(torch.swapaxes(
                 h, -1, 2), 1, -1).reshape((nb_tsz, num_classes))[nb_idx, :], 0), -1, 1)

@@ -5,7 +5,6 @@ imports (torch, laspy, classifier core) are deferred to the ``run()``
 method so creating the task does not pull them in.
 """
 
-import math
 import traceback
 from pathlib import Path
 
@@ -13,7 +12,9 @@ import numpy as np
 
 from qgis.core import QgsTask
 
-from ..config import TILE_AUTO_TARGET_POINTS, TILE_DEFAULT_BUFFER_M
+from ..config import TILE_DEFAULT_BUFFER_M
+from ..core.tiling import compute_tile_grid
+from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_vlrs
 from ..utils.logger import LOG_TAG, log_error, log_info, log_warning
 
@@ -112,36 +113,9 @@ def _compute_tile_grid(
     """
     xmin, ymin = float(xy[:, 0].min()), float(xy[:, 1].min())
     xmax, ymax = float(xy[:, 0].max()), float(xy[:, 1].max())
-    width = max(xmax - xmin, 1.0)
-    height = max(ymax - ymin, 1.0)
-
-    if auto:
-        n_tiles_needed = max(1, math.ceil(n_points / TILE_AUTO_TARGET_POINTS))
-        side = max(1, math.ceil(math.sqrt(n_tiles_needed)))
-        tile_size_m = max(width, height) / side
-    else:
-        tile_size_m = float(manual_tile_size_m or 500.0)
-
-    # See the equivalent comment in streaming_classifier._grid_from_bounds:
-    # nudge the upper bounds so the half-open core [lo, hi) still
-    # captures points exactly at xmax/ymax.
-    eps_x = max(1e-6, abs(xmax - xmin) * 1e-9)
-    eps_y = max(1e-6, abs(ymax - ymin) * 1e-9)
-    xmax_eff = xmax + eps_x
-    ymax_eff = ymax + eps_y
-
-    tiles: list[tuple[float, float, float, float]] = []
-    y = ymin
-    while y < ymax_eff:
-        x = xmin
-        while x < xmax_eff:
-            tiles.append(
-                (x, y, min(x + tile_size_m, xmax_eff),
-                 min(y + tile_size_m, ymax_eff))
-            )
-            x += tile_size_m
-        y += tile_size_m
-    return tiles, tile_size_m
+    return compute_tile_grid(
+        xmin, ymin, xmax, ymax, n_points, auto, manual_tile_size_m
+    )
 
 
 def _classify_tiled(
@@ -149,7 +123,7 @@ def _classify_tiled(
     classifier_fn,
     config_path: str,
     model_path: str,
-    use_cuda: bool,
+    device: str,
     progress_callback,
     cancel_callback,
     auto: bool = True,
@@ -202,7 +176,7 @@ def _classify_tiled(
             tile_preds = classifier_fn(
                 config_path, pcd[buffer_idx], model_path,
                 if_bottom_only=False, use_efficient=True,
-                use_cuda=use_cuda, progress_callback=tile_progress,
+                device=device, progress_callback=tile_progress,
             )
         except InterruptedError:
             return None
@@ -217,17 +191,17 @@ def _classify_tiled(
 
         progress_callback(((i + 1) / n_tiles) * 100.0)
 
-    # Edge effect: any point near the global bounds may have ended up
-    # outside every core but inside at least one buffer. Run a last
-    # cleanup pass for unassigned points (rare, < 0.1%).
+    # The grid covers the whole extent with half-open cores, so every
+    # point belongs to exactly one core and this should never fire. If
+    # it does (a tile returned nothing, NaN coordinates), say so plainly
+    # rather than pretending a neighbour's prediction was used: these
+    # points keep model id 0, which the caller reports as "unmapped ->
+    # ASPRS 0" together with a count.
     if not assigned.all():
-        log_info(
-            f"Filling {(~assigned).sum()} unassigned point(s) via nearest "
-            "tile prediction."
+        log_warning(
+            f"{int((~assigned).sum()):,} point(s) were not covered by any "
+            "tile core and have no prediction (written as ASPRS 0)."
         )
-        # Cheap fallback: use 0 (unclassified) for any remaining holes.
-        # These points are by construction outside all tile cores, so
-        # they were never part of any tile inference.
         predictions[~assigned] = 0
 
     return predictions
@@ -238,6 +212,9 @@ def _empty_gpu_cache_safe():
         t = _get_torch()
         if t.cuda.is_available():
             t.cuda.empty_cache()
+        mps = getattr(t.backends, "mps", None)
+        if mps is not None and mps.is_available() and hasattr(t, "mps"):
+            t.mps.empty_cache()
     except Exception:
         pass
 
@@ -246,17 +223,21 @@ class ClassificationTask(QgsTask):
     """Background task that runs the classifier over a list of files."""
 
     def __init__(self, files, out_dir, suffix, config_path, model_path,
-                 use_cuda, field_name, class_mapping,
+                 device, field_name, class_mapping,
                  tile_enabled=False, tile_auto=True,
                  tile_size_m=None, tile_buffer_m=TILE_DEFAULT_BUFFER_M,
-                 tile_streaming=False):
+                 tile_streaming=False, units_override=None):
         super().__init__("Classifying LiDAR point clouds", QgsTask.CanCancel)
+        # "auto" (read the CRS), "metre", "foot" or "us_foot"; see
+        # utils.las_units. The model needs metres.
+        self.units_override = units_override
         self.files = list(files)
         self.out_dir = Path(out_dir)
         self.suffix = suffix or "_classified"
         self.config_path = config_path
         self.model_path = model_path
-        self.use_cuda = use_cuda
+        # "cuda", "mps" or "cpu" (see classifier_core.resolve_device).
+        self.device = device
         self.field_name = field_name or ASPRS_CLASSIFICATION_FIELD
         self.class_mapping = class_mapping
 
@@ -382,7 +363,7 @@ class ClassificationTask(QgsTask):
                 classifier_fn=filter_fn,
                 config_path=self.config_path,
                 model_path=self.model_path,
-                use_cuda=self.use_cuda,
+                device=self.device,
                 class_mapping=self.class_mapping,
                 laspy_module=laspy,
                 progress_callback=stream_progress,
@@ -391,6 +372,7 @@ class ClassificationTask(QgsTask):
                 tile_auto=self.tile_auto,
                 tile_size_m=None if self.tile_auto else self.tile_size_m,
                 buffer_m=self.tile_buffer_m,
+                units_override=self.units_override,
             )
         except InterruptedError:
             raise
@@ -415,7 +397,18 @@ class ClassificationTask(QgsTask):
             log_warning(f"Skipping {fp.name}: input has zero points.")
             return None
 
-        pcd = np.transpose(np.array([las.x, las.y, las.z]))
+        # The model works in metres. US files are usually in US survey
+        # feet; without this conversion every distance is 3.28x too
+        # small for it and buildings come out as wires and towers.
+        units = resolve_units(las.header, self.units_override)
+        if units.angular:
+            raise RuntimeError(
+                f"{fp.name} is in geographic coordinates (degrees). The "
+                "model needs projected coordinates: reproject the file (for "
+                "example to the local UTM zone) and run again."
+            )
+        log_info(f"{fp.name}: coordinate units: {units.describe()}")
+        pcd = units.apply(np.transpose(np.array([las.x, las.y, las.z])))
 
         def progress_cb(p):
             if self.isCanceled():
@@ -425,7 +418,7 @@ class ClassificationTask(QgsTask):
         if self.tile_enabled:
             preds = _classify_tiled(
                 pcd, filter_fn, self.config_path, self.model_path,
-                self.use_cuda, progress_cb, self.isCanceled,
+                self.device, progress_cb, self.isCanceled,
                 auto=self.tile_auto,
                 tile_size_m=self.tile_size_m,
                 buffer_m=self.tile_buffer_m,
@@ -434,7 +427,7 @@ class ClassificationTask(QgsTask):
             preds = filter_fn(
                 self.config_path, pcd, self.model_path,
                 if_bottom_only=False, use_efficient=True,
-                use_cuda=self.use_cuda, progress_callback=progress_cb,
+                device=self.device, progress_callback=progress_cb,
             )
 
         if preds is None:

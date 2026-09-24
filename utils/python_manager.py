@@ -68,8 +68,7 @@ def _safe_extract_tar(tar: tarfile.TarFile, dest_dir: str) -> None:
         if not member_path.startswith(
                 dest_dir + os.sep) and member_path != dest_dir:
             raise ValueError(
-                f"Attempted path traversal in tar archive: {
-                    member.name}")
+                f"Attempted path traversal in tar archive: {member.name}")
         # On Python <3.12 the ``filter="data"`` safety mechanism is not
         # available, so explicitly reject symlinks and hardlinks that
         # could escape the destination directory.
@@ -292,15 +291,13 @@ def download_python_standalone(
         if progress_callback:
             total_mb = len(content) / (1024 * 1024)
             progress_callback(
-                5, f"Downloaded {
-                    total_mb:.1f} MB, extracting...")
+                5, f"Downloaded {total_mb:.1f} MB, extracting...")
 
         with open(temp_path, "wb") as f:
             f.write(content.data())
 
         _log(
-            f"Download complete ({
-                len(content)} bytes), extracting...",
+            f"Download complete ({len(content)} bytes), extracting...",
             Qgis.Info)
 
         if progress_callback:

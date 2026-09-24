@@ -12,17 +12,37 @@ from typing import Dict, List
 # =============================================================================
 
 PLUGIN_NAME = "Aerial LiDAR Classifier"
-PLUGIN_VERSION = "1.0.1"
 SETTINGS_PREFIX = "AerialLidarClassifier"
+
+
+def _read_plugin_version() -> str:
+    """Read ``version=`` from metadata.txt.
+
+    metadata.txt is what the QGIS plugin manager and plugins.qgis.org
+    show, so it is the single source of truth. v1.0.2 shipped with a
+    separate constant still saying 1.0.1, which the About dialog, the
+    Processing provider name and the install marker then reported.
+    """
+    try:
+        metadata = Path(__file__).resolve().parent / "metadata.txt"
+        for line in metadata.read_text(encoding="utf-8").splitlines():
+            if line.strip().startswith("version="):
+                return line.split("=", 1)[1].strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+PLUGIN_VERSION = _read_plugin_version()
 
 
 # =============================================================================
 # Tiling defaults
 # =============================================================================
 
-# Target number of points per tile (auto-size mode). Picked to keep the
-# voxel-based inference within reasonable GPU memory for a ~3 GB card
-# at the model's default 30 cm resolution.
+# Target number of points per tile (auto-size mode). The model runs one
+# fixed-size voxel block at a time, so this bounds the host RAM a tile
+# needs (its point arrays and block index lists), not GPU memory.
 TILE_AUTO_TARGET_POINTS = 10_000_000
 
 # Default lateral buffer in metres around each tile, to provide spatial

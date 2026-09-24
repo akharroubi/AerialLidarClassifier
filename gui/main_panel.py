@@ -17,6 +17,7 @@ from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QAction,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDockWidget,
     QDoubleSpinBox,
@@ -63,6 +64,7 @@ from ..config import (
     TILE_DEFAULT_BUFFER_M,
 )
 from ..utils.helpers import get_gpu_info, truncate_name
+from ..utils.las_units import UNIT_OVERRIDES
 from ..utils.las_utils import find_las_files
 from ..utils.logger import LOG_TAG, log_error, log_info, log_warning
 from ..utils.model_manager import ModelManager
@@ -237,6 +239,9 @@ class ClassifierDockWidget(QDockWidget):
         self._saved_tile_streaming = s.value(
             f"{SETTINGS_PREFIX}/tile_streaming", False, type=bool
         )
+        self._saved_units = str(
+            s.value(f"{SETTINGS_PREFIX}/input_units", "auto") or "auto"
+        )
 
     def _save_settings(self):
         s = QgsSettings()
@@ -276,6 +281,10 @@ class ClassifierDockWidget(QDockWidget):
         s.setValue(
             f"{SETTINGS_PREFIX}/tile_streaming",
             self.tile_streaming_check.isChecked(),
+        )
+        s.setValue(
+            f"{SETTINGS_PREFIX}/input_units",
+            self.units_combo.currentData() or "auto",
         )
 
     # ------------------------------------------------------------------
@@ -671,6 +680,28 @@ class ClassifierDockWidget(QDockWidget):
         )
         self.tile_streaming_check.toggled.connect(self._on_streaming_toggled)
         lay.addWidget(self.tile_streaming_check)
+
+        lay.addWidget(self._hline())
+
+        # ---- Input units -------------------------------------------------
+        lay.addWidget(self._section_header("Input units"))
+
+        units_form = QFormLayout()
+        units_form.setSpacing(6)
+        units_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.units_combo = QComboBox()
+        for key, label in UNIT_OVERRIDES:
+            self.units_combo.addItem(label, key)
+        saved_idx = self.units_combo.findData(self._saved_units)
+        self.units_combo.setCurrentIndex(saved_idx if saved_idx >= 0 else 0)
+        self.units_combo.setToolTip(
+            "The model works in metres. By default the unit is read from "
+            "each file's CRS (WKT or GeoTIFF keys) and feet are converted "
+            "before inference; the log says what was found. Force metres "
+            "or feet when the header is missing or wrong."
+        )
+        units_form.addRow("Units:", self.units_combo)
+        lay.addLayout(units_form)
 
         self._update_tile_controls_enabled()
         return group
@@ -1101,11 +1132,19 @@ class ClassifierDockWidget(QDockWidget):
         self.current_file_label.setText("Starting classification...")
         self._save_settings()
 
-        device = "GPU" if self.gpu_check.isChecked() else "CPU"
+        # "cuda", "mps" or "cpu": the backend the GPU probe reported, but
+        # only while the box is checked. v1.0.2 passed a boolean down and
+        # the core called model.cuda() for it, which crashed every run on
+        # Apple Silicon (where the probe reports MPS).
+        if self.gpu_check.isChecked() and self.gpu_info.get("available"):
+            device = str(self.gpu_info.get("backend", "cuda"))
+        else:
+            device = "cpu"
         field = self.field_edit.text().strip() or "classification"
         is_asprs = field.lower() == "classification"
         self._log(
-            f"Starting classification on {device} with {len(self.files)} file(s)"
+            f"Starting classification on {device.upper()} with "
+            f"{len(self.files)} file(s)"
         )
         self._log(
             f"Output: {out_dir} - "
@@ -1121,7 +1160,7 @@ class ClassifierDockWidget(QDockWidget):
             self.suffix_edit.text(),
             self.config_path,
             self.model_path,
-            self.gpu_check.isChecked(),
+            device,
             field,
             self.class_mapping,
             tile_enabled=self.tile_check.isChecked(),
@@ -1129,6 +1168,7 @@ class ClassifierDockWidget(QDockWidget):
             tile_size_m=self.tile_size_spin.value(),
             tile_buffer_m=self.tile_buffer_spin.value(),
             tile_streaming=self.tile_streaming_check.isChecked(),
+            units_override=self.units_combo.currentData() or "auto",
         )
         self.task.progressChanged.connect(self._on_progress)
         self.task.taskCompleted.connect(self._on_task_completed)
@@ -1241,8 +1281,9 @@ class ClassifierDockWidget(QDockWidget):
 
         if failures:
             head = failures[0]
-            extra = f" (+{len(failures) -
-                          1} more)" if len(failures) > 1 else ""
+            extra = (
+                f" (+{len(failures) - 1} more)" if len(failures) > 1 else ""
+            )
             self.message_bar.pushMessage(
                 f"Output ready but auto-load failed for "
                 f"'{head[0].name}'{extra}: {head[1]}. "

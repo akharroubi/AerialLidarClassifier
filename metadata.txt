@@ -3,7 +3,7 @@ name=Aerial LiDAR Classifier
 qgisMinimumVersion=3.34
 qgisMaximumVersion=3.99
 description=Deep-learning semantic segmentation of aerial LiDAR point clouds with a 3D SegFormer model (TreeAIBox / NRCan).
-version=1.0.2
+version=1.0.3
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
 email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
@@ -34,6 +34,37 @@ hasProcessingProvider=yes
 server=False
 
 changelog=
+    1.0.3
+        - Fix: the plugin could not open on QGIS builds with Python
+          3.9 to 3.11 (Ubuntu 22.04, Debian 12, macOS 3.34):
+          "SyntaxError: unterminated string literal" in venv_manager.py.
+          All files now compile on Python 3.9+. (GitHub #3)
+        - Fix: files in feet (most US LiDAR) were fed to the model
+          unconverted, so buildings came out as Wire-Conductor and
+          Transmission Tower and the run was about 13x slower. The unit
+          is now read from the LAS CRS and converted to metres for the
+          model; a manual override exists in the dock (Advanced
+          parameters > Input units) and in Processing (UNITS).
+          (GitHub #5, #2)
+        - Fix: flat tiles (less than 5.12 m of relief) were classified
+          almost entirely as Building; the block grid now always covers
+          the extent and unpredicted points are reported as ASPRS 0.
+        - Fix: fresh installs could end up with a CPU-only torch because
+          the second install phase let uv replace the CUDA torch with
+          PyPI's newest release; the CUDA build is now pinned.
+        - Fix: certificate verification for the package hosts is on by
+          default; it is relaxed only after a TLS failure, with a warning.
+        - Fix: a failed CUDA cascade could leave the venv without torch
+          while it was reported ready.
+        - Fix: Apple Silicon crashed at run time ("Torch not compiled
+          with CUDA enabled"); the device is now passed end to end.
+        - Fix: the Processing algorithm loaded the result layer from the
+          worker thread; it is now loaded on completion, and the
+          classified file is exposed as the OUTPUT_FILE output.
+        - Fix: version shown in About and the Processing provider.
+        - Fix: auto tile size on corridor-shaped extents; sliver tiles.
+        - Streaming mode uses 1 byte per point for predictions instead
+          of 4.
     1.0.2
         - Fix: Linux install failed at the venv pre-flight check with
           "error while loading shared libraries: libpython3.12.so.1.0:

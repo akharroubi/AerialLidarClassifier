@@ -12,7 +12,10 @@ from pathlib import Path
 
 from qgis.core import (
     QgsProcessingAlgorithm,
+    QgsProcessingContext,
     QgsProcessingException,
+    QgsProcessingLayerPostProcessorInterface,
+    QgsProcessingOutputFile,
     QgsProcessingParameterBoolean,
     QgsProcessingParameterDefinition,
     QgsProcessingParameterEnum,
@@ -20,6 +23,7 @@ from qgis.core import (
     QgsProcessingParameterFolderDestination,
     QgsProcessingParameterNumber,
     QgsProcessingParameterString,
+    QgsProcessingUtils,
 )
 
 from ..config import (
@@ -27,6 +31,7 @@ from ..config import (
     PLUGIN_NAME,
     TILE_DEFAULT_BUFFER_M,
 )
+from ..utils.las_units import UNIT_OVERRIDES, resolve_units
 
 
 class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
@@ -42,8 +47,17 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
     TILE_SIZE_M = "TILE_SIZE_M"
     TILE_BUFFER_M = "TILE_BUFFER_M"
     TILE_STREAMING = "TILE_STREAMING"
+    UNITS = "UNITS"
+    OUTPUT_FILE = "OUTPUT_FILE"
 
-    DEVICE_OPTIONS = ["Auto (GPU if available)", "GPU (CUDA)", "CPU"]
+    # Index order is part of the algorithm's public interface (saved
+    # models and scripts store the index), so new entries go at the end.
+    DEVICE_OPTIONS = [
+        "Auto (GPU if available)",
+        "GPU (CUDA)",
+        "CPU",
+        "GPU (Apple MPS)",
+    ]
 
     def tr(self, text: str) -> str:
         from .. import tr
@@ -104,9 +118,10 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "predictions into. Default <code>classification</code> "
             "(ASPRS standard). Use any other name to add an extra-byte "
             "field instead.</li>"
-            "<li><b>Compute device</b> - <i>Auto</i> uses the GPU when "
-            "PyTorch reports CUDA available; otherwise falls back to CPU."
-            "</li>"
+            "<li><b>Compute device</b> - <i>Auto</i> uses CUDA when "
+            "PyTorch reports it, then Apple MPS, otherwise the CPU. "
+            "<i>GPU (CUDA)</i> and <i>GPU (Apple MPS)</i> stop with a "
+            "message when that device is not available.</li>"
             "<li><b>Load classified file in QGIS</b> - when on, the "
             "result is added to the project as a point-cloud layer.</li>"
             "</ul>"
@@ -134,6 +149,11 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "inference one tile at a time and streams the output writer. "
             "Memory footprint is roughly 4 bytes/point + one tile + one "
             "chunk. Requires tiling to be enabled.</li>"
+            "<li><b>Input units</b> - the model works in metres. By "
+            "default the unit is read from the file's CRS (WKT or GeoTIFF "
+            "keys) and feet are converted before inference; the log says "
+            "what was found. Force metres or feet when the header is "
+            "missing or wrong.</li>"
             "</ul>"
             "<h4>Notes</h4>"
             "<ul>"
@@ -235,6 +255,21 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 defaultValue=False,
             )
         )
+        self._add_advanced(
+            QgsProcessingParameterEnum(
+                self.UNITS,
+                self.tr("Input units (the model works in metres)"),
+                options=[label for _key, label in UNIT_OVERRIDES],
+                defaultValue=0,
+            )
+        )
+        # The classified file itself, so the Graphical Modeler can chain
+        # it into a next step (v1.0.2 only returned the folder).
+        self.addOutput(
+            QgsProcessingOutputFile(
+                self.OUTPUT_FILE, self.tr("Classified point cloud")
+            )
+        )
 
     # ------------------------------------------------------------------
     def _add_advanced(self, param):
@@ -327,18 +362,38 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         tile_streaming = self.parameterAsBool(
             parameters, self.TILE_STREAMING, context
         )
+        units_idx = self.parameterAsEnum(parameters, self.UNITS, context)
+        if not 0 <= units_idx < len(UNIT_OVERRIDES):
+            units_idx = 0
+        units_override = UNIT_OVERRIDES[units_idx][0]
 
         output_folder.mkdir(parents=True, exist_ok=True)
 
-        # Resolve compute device. The venv was made importable above.
+        # Resolve the compute device ("cuda", "mps" or "cpu"). The venv
+        # was made importable above.
         import torch
         cuda_available = torch.cuda.is_available()
-        if device_choice == 1 and not cuda_available:
-            raise QgsProcessingException(
-                self.tr("CUDA was requested but no usable GPU is available.")
+        mps_attr = getattr(torch.backends, "mps", None)
+        mps_available = bool(mps_attr is not None and mps_attr.is_available())
+        if device_choice == 1:
+            if not cuda_available:
+                raise QgsProcessingException(self.tr(
+                    "CUDA was requested but no usable GPU is available."
+                ))
+            device = "cuda"
+        elif device_choice == 3:
+            if not mps_available:
+                raise QgsProcessingException(self.tr(
+                    "Apple MPS was requested but is not available in this "
+                    "torch build."
+                ))
+            device = "mps"
+        elif device_choice == 2:
+            device = "cpu"
+        else:
+            device = "cuda" if cuda_available else (
+                "mps" if mps_available else "cpu"
             )
-        use_cuda = (
-            device_choice == 0 and cuda_available) or device_choice == 1
 
         # Imports deferred until dependencies are confirmed
         import laspy
@@ -390,7 +445,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                     classifier_fn=filterPoints,
                     config_path=config_path,
                     model_path=model_path,
-                    use_cuda=use_cuda,
+                    device=device,
                     class_mapping=class_mapping,
                     laspy_module=laspy,
                     progress_callback=stream_progress,
@@ -401,6 +456,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                     buffer_m=tile_buffer_m,
                     info_callback=feedback.pushInfo,
                     warning_callback=feedback.pushWarning,
+                    units_override=units_override,
                 )
             except InterruptedError:
                 raise QgsProcessingException(self.tr("Cancelled."))
@@ -412,8 +468,11 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
 
             log_info(f"Streaming processing wrote {written}")
             if load_as_layer:
-                self._add_output_layer(written, context, feedback)
-            return {self.OUTPUT_FOLDER: str(output_folder)}
+                self._register_output_layer(written, context, feedback)
+            return {
+                self.OUTPUT_FOLDER: str(output_folder),
+                self.OUTPUT_FILE: str(written),
+            }
 
         feedback.pushInfo(self.tr(f"Loading {input_path.name}..."))
         with laspy.open(str(input_path), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
@@ -424,7 +483,15 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 self.tr("Input file has zero points - nothing to classify.")
             )
 
-        pcd = np.transpose(np.array([las.x, las.y, las.z]))
+        units = resolve_units(las.header, units_override)
+        if units.angular:
+            raise QgsProcessingException(self.tr(
+                "The input is in geographic coordinates (degrees). The model "
+                "needs projected coordinates: reproject the file (for example "
+                "to the local UTM zone) and run again."
+            ))
+        feedback.pushInfo(self.tr(f"Coordinate units: {units.describe()}"))
+        pcd = units.apply(np.transpose(np.array([las.x, las.y, las.z])))
 
         def progress_cb(p):
             if feedback.isCanceled():
@@ -432,9 +499,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             feedback.setProgress(min(100, max(0, int(p))))
 
         feedback.pushInfo(
-            self.tr(
-                f"Running classification on {'GPU' if use_cuda else 'CPU'}..."
-            )
+            self.tr(f"Running classification on {device.upper()}...")
         )
         try:
             if tile_enabled:
@@ -445,7 +510,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 ))
                 preds = _classify_tiled(
                     pcd, filterPoints, config_path, model_path,
-                    use_cuda, progress_cb, feedback.isCanceled,
+                    device, progress_cb, feedback.isCanceled,
                     auto=tile_auto,
                     tile_size_m=None if tile_auto else tile_size_m,
                     buffer_m=tile_buffer_m,
@@ -454,7 +519,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 preds = filterPoints(
                     config_path, pcd, model_path,
                     if_bottom_only=False, use_efficient=True,
-                    use_cuda=use_cuda, progress_callback=progress_cb,
+                    device=device, progress_callback=progress_cb,
                 )
         except InterruptedError:
             raise QgsProcessingException(self.tr("Cancelled."))
@@ -525,49 +590,74 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         feedback.pushInfo(self.tr(f"Writing {output_path.name}..."))
         _write_las(las, output_path, laspy)
 
-        if use_cuda:
-            try:
+        try:
+            if device == "cuda":
                 torch.cuda.empty_cache()
-            except Exception:
-                pass
+            elif device == "mps" and hasattr(torch, "mps"):
+                torch.mps.empty_cache()
+        except Exception:
+            pass
 
         log_info(f"Processing algorithm wrote {output_path}")
 
         if load_as_layer:
-            self._add_output_layer(output_path, context, feedback)
+            self._register_output_layer(output_path, context, feedback)
 
-        return {self.OUTPUT_FOLDER: str(output_folder)}
+        return {
+            self.OUTPUT_FOLDER: str(output_folder),
+            self.OUTPUT_FILE: str(output_path),
+        }
 
     # ------------------------------------------------------------------
-    def _add_output_layer(self, output_path: Path, context, feedback) -> None:
-        """Add the classified file to the QGIS project as a point-cloud layer."""
-        try:
-            from qgis.core import QgsPointCloudLayer, QgsProject
-        except ImportError:
-            feedback.pushWarning(self.tr(
-                "QgsPointCloudLayer not available in this QGIS version - "
-                "cannot auto-load the result."
+    def _register_output_layer(self, output_path: Path, context, feedback) -> None:
+        """Ask Processing to load the result once the algorithm has finished.
+
+        ``processAlgorithm`` runs in a worker thread when launched from
+        the Toolbox, and creating a layer plus adding it to the project
+        from there is not thread-safe (v1.0.2 did exactly that and could
+        crash QGIS). ``addLayerToLoadOnCompletion`` defers the load to
+        the main thread; the post-processor then attaches the 3D
+        renderer there, so a 3D Map View shows the points instead of a
+        flat sprite.
+        """
+        project = context.project()
+        if project is None:
+            feedback.pushInfo(self.tr(
+                "No project in this context; the classified file is not "
+                "loaded as a layer."
             ))
             return
 
-        layer = QgsPointCloudLayer(str(output_path), output_path.stem, "pdal")
-        if not layer.isValid():
-            feedback.pushWarning(self.tr(
-                f"Output written but could not be loaded as point-cloud "
-                f"layer: {output_path}"
-            ))
-            return
-
-        # Add to project (and to context so the Processing post-processor
-        # also tracks the layer when the algorithm is run from a model).
-        QgsProject.instance().addMapLayer(layer)
-
-        # Wire up a 3D renderer so the layer renders correctly as soon
-        # as the user opens a 3D Map View - without this, QGIS shows the
-        # layer as a flat 2D sprite inside the 3D view.
-        from ..utils.helpers import enable_point_cloud_3d_rendering
-        enable_point_cloud_3d_rendering(layer)
-
-        feedback.pushInfo(
-            self.tr(f"Loaded layer '{output_path.stem}' into the project.")
+        details = QgsProcessingContext.LayerDetails(
+            output_path.stem, project, self.OUTPUT_FILE, _POINT_CLOUD_HINT
         )
+        # Processing only keeps a weak reference to the post-processor;
+        # one that is garbage-collected is silently skipped.
+        self._post_processor = _PointCloud3DPostProcessor()
+        details.setPostProcessor(self._post_processor)
+        context.addLayerToLoadOnCompletion(str(output_path), details)
+        feedback.pushInfo(self.tr(
+            f"'{output_path.name}' will be added to the project when the "
+            "algorithm finishes."
+        ))
+
+
+# Point-cloud hint for addLayerToLoadOnCompletion (QGIS >= 3.22); older
+# builds fall back to the generic loader, which also handles LAS/LAZ.
+_POINT_CLOUD_HINT = getattr(
+    QgsProcessingUtils.LayerHint, "PointCloud",
+    QgsProcessingUtils.LayerHint.UnknownType,
+)
+
+
+class _PointCloud3DPostProcessor(QgsProcessingLayerPostProcessorInterface):
+    """Runs on the main thread after Processing loaded the output layer."""
+
+    def postProcessLayer(self, layer, context, feedback):  # noqa: N802
+        try:
+            from ..utils.helpers import enable_point_cloud_3d_rendering
+            enable_point_cloud_3d_rendering(layer)
+        except Exception as exc:
+            feedback.pushWarning(
+                f"Could not attach a 3D renderer to '{layer.name()}': {exc}"
+            )
