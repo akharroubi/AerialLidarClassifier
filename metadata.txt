@@ -55,6 +55,8 @@ changelog=
         - QGIS 4.x declared compatible (Qt6-safe enum usage); tested
           on QGIS 3.44 LTR.
         - Tile size and buffer are in metres (the plugin converts).
+        - Fix: torchvision is resolved under a pin of the installed
+          torch, so it can no longer replace torch during the install.
     1.0.3
         - Fix: the plugin could not open on QGIS builds with Python
           3.9 to 3.11 (Ubuntu 22.04, Debian 12, macOS 3.34):

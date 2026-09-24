@@ -114,8 +114,9 @@ _TORCH_VERSION_CAP_BY_CUDA = {
     "cu118": "2.6",
     "cu121": "2.6",
     "cu124": "2.8",
-    # cu126 currently covers torch 2.12.x.
-    "cu126": "2.13",
+    # cu126: torch 2.14.0+cu126 exists and was verified with spconv-cu126
+    # 2.3.8 and both models on 2026-09-25.
+    "cu126": "2.15",
     # cu128: latest +cu128 wheel as of May 2026 is for torch 2.11.x.
     # Bump when newer +cu128 wheels are published.
     "cu128": "2.12",
@@ -2419,17 +2420,21 @@ def _reinstall_torch_at_cuda_index(
         # Continue: subsequent install will overwrite via --upgrade.
 
     cap = _TORCH_VERSION_CAP_BY_CUDA.get(cuda_index)
+    constraint_args: List[str] = []
     for pkg_name, lower in (("torch", "2.0.0"), ("torchvision", "0.15.0")):
-        if cap is not None:
-            spec = f"{pkg_name}>={lower},<{cap}"
+        if pkg_name == "torch":
+            spec = f"torch>={lower},<{cap}" if cap is not None else f"torch>={lower},<3.0.0"
         else:
-            spec = f"{pkg_name}>={lower},<3.0.0"
+            # Resolved under the pin of the torch just installed (see
+            # install_dependencies): no cap number, no torch replacement.
+            spec = f"torchvision>={lower}"
 
         cmd = [
             uv_path, "pip", "install",
             "--python", python_path, "--upgrade",
         ]
         cmd.extend(_get_uv_ssl_flags())
+        cmd.extend(constraint_args)
         cmd.append(spec)
         cmd.extend([
             "--index-url",
@@ -2468,6 +2473,13 @@ def _reinstall_torch_at_cuda_index(
                 Qgis.MessageLevel.Warning,
             )
             return False
+
+        installed = _get_installed_versions(
+            python_path, ("torch", "torchvision"), env, subprocess_kwargs,
+        )
+        constraints_path = _write_torch_constraints(venv_dir, installed)
+        if constraints_path:
+            constraint_args = ["--constraint", constraints_path]
 
     # spconv is built per CUDA toolkit: move it along with torch. A
     # failure here only costs the LitePT-L model, never the cascade.
@@ -2654,6 +2666,9 @@ def install_dependencies(
     # -- Phase A: CUDA packages (individual installs) -------------------------
     _force_cuda_reinstall = False
     selected_cuda_index: Optional[str] = None
+    # Set once torch is installed: every later install in this phase
+    # (torchvision, the CPU fallback) resolves under a torch pin.
+    phase_a_constraint_args: List[str] = []
     if cuda_packages:
         _precheck_env = _get_clean_env_for_venv()
         _precheck_kwargs = _get_subprocess_kwargs()
@@ -2706,22 +2721,26 @@ def install_dependencies(
             # the index publishes as a fallback. The .post-release ".0"
             # makes the upper bound exclusive of any 2.6.x prerelease.
             effective_spec = package_spec
-            if (
-                is_cuda_package
-                and package_name in ("torch", "torchvision")
-            ):
+            if is_cuda_package and package_name == "torch":
                 cap = _TORCH_VERSION_CAP_BY_CUDA.get(cuda_index)
                 if cap is not None:
-                    lower = "0.15.0" if package_name == "torchvision" else "2.0.0"
-                    effective_spec = f"{package_name}>={lower},<{cap}"
+                    effective_spec = f"torch>=2.0.0,<{cap}"
                     _log(
-                        "Capping {} to <{} for {} (PyTorch dropped this "
+                        "Capping torch to <{} for {} (PyTorch dropped this "
                         "toolkit in newer torch releases; uv would otherwise "
-                        "resolve to a +cpu wheel).".format(
-                            package_name, cap, cuda_index
-                        ),
+                        "resolve to a +cpu wheel).".format(cap, cuda_index),
                         Qgis.MessageLevel.Info,
                     )
+            elif package_name == "torchvision":
+                # torchvision pins an exact torch version. It is resolved
+                # under the constraints file written right after the torch
+                # install, so uv picks the torchvision that matches the
+                # installed torch. v1.0.x applied the torch cap number to
+                # torchvision instead (never binding: torchvision is 0.x),
+                # so uv took the newest torchvision on the index and, with
+                # --upgrade, replaced torch by whatever it wanted, a +cpu
+                # build on the older CUDA indexes.
+                effective_spec = "torchvision>=0.15.0"
 
             if progress_callback:
                 progress_callback(
@@ -2741,6 +2760,7 @@ def install_dependencies(
                     "--upgrade",
                 ]
                 pip_args.extend(_get_uv_ssl_flags())
+                pip_args.extend(phase_a_constraint_args)
                 pip_args.append(effective_spec)
             else:
                 pip_args = [
@@ -2752,6 +2772,7 @@ def install_dependencies(
                 ]
                 pip_args.extend(_get_pip_ssl_flags())
                 pip_args.extend(_get_pip_proxy_args())
+                pip_args.extend(phase_a_constraint_args)
                 pip_args.append(effective_spec)
 
             if is_cuda_package:
@@ -2963,6 +2984,7 @@ def install_dependencies(
                         "--upgrade",
                     ]
                     cpu_pip_args.extend(_get_uv_ssl_flags())
+                    cpu_pip_args.extend(phase_a_constraint_args)
                     cpu_pip_args.append(package_spec)
                     cpu_cmd = [uv_path] + cpu_pip_args
                 else:
@@ -2974,6 +2996,7 @@ def install_dependencies(
                         "--prefer-binary",
                     ]
                     cpu_pip_args.extend(_get_pip_ssl_flags())
+                    cpu_pip_args.extend(phase_a_constraint_args)
                     cpu_pip_args.append(package_spec)
                     cpu_cmd = [python_path, "-m", "pip"] + cpu_pip_args
                 try:
@@ -3059,6 +3082,16 @@ def install_dependencies(
                         package_name, install_error_msg[:1500]
                     ),
                 )
+
+            # torch is in (CUDA or CPU fallback): pin it so torchvision and
+            # every later resolution keep this exact build.
+            if package_name == "torch":
+                installed = _get_installed_versions(
+                    python_path, ("torch",), env, subprocess_kwargs,
+                )
+                constraints_path = _write_torch_constraints(venv_dir, installed)
+                if constraints_path:
+                    phase_a_constraint_args = ["--constraint", constraints_path]
 
     # -- Phase B: Batch install remaining packages ----------------------------
     if batch_packages:

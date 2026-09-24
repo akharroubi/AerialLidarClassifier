@@ -36,9 +36,22 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - QGIS 4.x declared compatible: Qt enums were already scoped, QGIS
   enums now are, with 3.34 fallbacks. Tested on QGIS 3.44 LTR only.
 
+### Fixed
+- The installer applied the torch version cap number to torchvision as
+  well (`torchvision<2.13`, which never binds since torchvision is 0.x),
+  so uv took the newest torchvision on the index and, with `--upgrade`,
+  replaced torch by the version that torchvision pins. On the cu126
+  index this silently gave torch 2.14.0+cu126 instead of the capped
+  2.12.x (a working CUDA build, verified with both models); on the
+  older indexes the pair stayed correct. torch is now pinned by a
+  constraints file the moment it is installed, and torchvision is
+  resolved under that pin, in the main install and in the CUDA cascade.
+
 ### Changed
 - Existing environments are rebuilt once on first use (install schema
   3), which also moves them from cu128 to cu126 where relevant.
+- The cu126 torch cap is raised to `<2.15` (torch 2.14.0+cu126 verified
+  with spconv 2.3.8 and both models).
 - Tile size and buffer are in metres in every UI (the plugin converts
   the file's unit, see 1.0.3).
 - The `Qgis.MessageLevel` and other QGIS enums are used in their scoped
