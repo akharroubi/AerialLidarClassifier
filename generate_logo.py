@@ -66,10 +66,49 @@ def _px(v: float, s: int) -> float:
     return v * s
 
 
+# "dots" variant: the whole logo is a 7 x 7 grid of points, each coloured by
+# class. Read the map bottom-up like a profile: G canopy, T trunk, R building,
+# B ground, . empty. Simple enough to survive 16 px as three colour masses
+# and honest about what the plugin works on: classified points.
+DOTS_MAP = [
+    ".......",
+    ".G.....",
+    "GGG.RRR",
+    "GGG.RRR",
+    ".T..RRR",
+    "BBBBBBB",
+    "BBBBBBB",
+]
+DOTS_COLOURS = {"G": CANOPY, "T": GROUND_DARK, "R": BUILDING, "B": GROUND}
+DOTS_PITCH = 0.132   # centre-to-centre spacing in unit coordinates
+DOTS_RADIUS = 0.062  # dots almost touch: solid masses at 16 px, dots at 64 px
+
+
+def _dot_centres():
+    """Centres of the used dots, with the used rows/columns centred on the canvas."""
+    used_rows = [j for j, row in enumerate(DOTS_MAP) if row.strip(".")]
+    used_cols = [i for i in range(len(DOTS_MAP[0])) if any(row[i] != "." for row in DOTS_MAP)]
+    x_off = (1.0 - (used_cols[-1] - used_cols[0]) * DOTS_PITCH) / 2 - used_cols[0] * DOTS_PITCH
+    y_off = (1.0 - (used_rows[-1] - used_rows[0]) * DOTS_PITCH) / 2 - used_rows[0] * DOTS_PITCH
+    for j, row in enumerate(DOTS_MAP):
+        for i, ch in enumerate(row):
+            if ch != ".":
+                yield x_off + i * DOTS_PITCH, y_off + j * DOTS_PITCH, DOTS_COLOURS[ch]
+
+
 def draw_png(size: int, variant: str) -> Image.Image:
     s = SUPER
     img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
+
+    if variant == "dots":
+        for cx, cy, colour in _dot_centres():
+            d.ellipse([(_px(cx - DOTS_RADIUS, s), _px(cy - DOTS_RADIUS, s)),
+                       (_px(cx + DOTS_RADIUS, s), _px(cy + DOTS_RADIUS, s))], fill=colour)
+        out = img.resize((size, size), Image.LANCZOS)
+        if size <= 32:
+            out = out.filter(ImageFilter.UnsharpMask(radius=1, percent=50, threshold=2))
+        return out
 
     if variant in ("fan", "plane"):
         fan = Image.new("RGBA", (s, s), (0, 0, 0, 0))
@@ -153,6 +192,17 @@ def draw_png(size: int, variant: str) -> Image.Image:
 def svg_text(variant: str) -> str:
     def p(v):
         return f"{v * 100:.2f}"
+    if variant == "dots":
+        circles = "\n".join(
+            f'  <circle cx="{p(cx)}" cy="{p(cy)}" r="{DOTS_RADIUS * 100:.2f}" fill="{colour}"/>'
+            for cx, cy, colour in _dot_centres()
+        )
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512">\n'
+            "  <title>Aerial LiDAR Classifier</title>\n"
+            f"{circles}\n</svg>\n"
+        )
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512">',
@@ -236,7 +286,7 @@ def contact_sheet(variant: str, out_path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--variant", choices=("plain", "fan", "plane"), default="plane")
+    parser.add_argument("--variant", choices=("dots", "plain", "fan", "plane"), default="dots")
     parser.add_argument("--out", default=str(ASSETS))
     parser.add_argument("--sheet-only", action="store_true")
     args = parser.parse_args()

@@ -409,20 +409,22 @@ alone); the reply below asks them to re-test with 1.0.3.
 
 ## 8b. Logo (added 2026-09-25 late morning)
 
-New icon replacing the grey rings: a cross-section of what the plugin
-classifies, in the plugin's own ASPRS colours: brown ground band, green
-tree, red gable-roofed building, an orange power line strung from a magenta
-cross-armed pole, all textured with a grid of pale dots (a point cloud at
-64 px and above, invisible at 16 px), under a translucent blue scan cone
-with a small aircraft at its apex. Files: `assets/logo.svg` (master),
+New icon replacing the grey rings. The user asked for something simpler
+than a first, scene-like draft (tree, house, power line, pole, scan cone,
+aircraft; still available as variants `plain`, `fan`, `plane` of the
+generator). The shipped design (`dots`) is a 7 x 7 grid of points coloured
+by class in the plugin's own ASPRS palette: two brown rows of ground
+(#A87E55), a green tree (#228B22) on one dark-brown trunk dot (#7A5A3A), a
+3 x 3 red building (#D62828). Three colours, no other element: a
+classified point cloud. Files: `assets/logo.svg` (43 circles, no filters),
 `assets/logo_{16..512}.png`, `icon.png` (128 px) at the plugin root;
 generator `v1.1/generate_logo.py` (PIL render at 2048 px downsampled with
-Lanczos, unsharp mask at 16 to 32 px). Checked: a contact sheet at 16, 24,
-32, 64 and 128 px on white and on #2b2b2b; borders transparent (icon.png
-edge alpha 5/255; the 16 px file's ground band touches the border, by
-design); SVG parses and renders in Chromium. Not checked: colour-blind
-simulation, Inkscape rendering of the mask filter, the plugins.qgis.org
-card. The critique prompt for you is the last thing the user received.
+Lanczos, unsharp mask at 16 to 32 px; the SVG is written from the same
+grid). Checked: a contact sheet at 16, 24, 32, 64 and 128 px on white and
+on #2b2b2b (three coloured masses at 16 px, individual points from 48 px);
+borders transparent; SVG parses. Not checked: colour-blind simulation (the
+red / green pair), rendering on the real QGIS toolbar next to native icons,
+the plugins.qgis.org card.
 
 ## 9. Addendum: fresh install #2 (with the torchvision pin fix)
 
