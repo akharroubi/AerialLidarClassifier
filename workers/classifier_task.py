@@ -16,6 +16,7 @@ from ..config import TILE_DEFAULT_BUFFER_M
 from ..core.backends import create_backend
 from ..core.registry import get_model
 from ..core.tiling import compute_tile_grid
+from ..utils.compat import scoped_enum
 from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_vlrs
 from ..utils.logger import LOG_TAG, log_error, log_info, log_warning
@@ -224,11 +225,8 @@ class ClassificationTask(QgsTask):
                  tile_enabled=False, tile_auto=True,
                  tile_size_m=None, tile_buffer_m=TILE_DEFAULT_BUFFER_M,
                  tile_streaming=False, units_override=None):
-        try:
-            can_cancel = QgsTask.Flag.CanCancel  # scoped (QGIS 4 / PyQt6)
-        except AttributeError:
-            can_cancel = QgsTask.CanCancel
-        super().__init__("Classifying LiDAR point clouds", can_cancel)
+        super().__init__("Classifying LiDAR point clouds",
+                         scoped_enum(QgsTask, "Flag", "CanCancel"))
         # "auto" (read the CRS), "metre", "foot" or "us_foot"; see
         # utils.las_units. The model needs metres.
         self.units_override = units_override
@@ -252,6 +250,8 @@ class ClassificationTask(QgsTask):
         self.output_files = []
         self.error_message = None
         self.current_file_name = ""
+        # Set while a stage other than a file is running (weights download).
+        self.status_text = ""
         self.files_processed = 0
 
     # ------------------------------------------------------------------
@@ -271,13 +271,6 @@ class ClassificationTask(QgsTask):
             validate_output_paths(self.files, planned_outputs)
 
             manager = ModelManager(self.spec)
-            if not manager.is_model_available():
-                self.error_message = (
-                    f"{self.spec.display_name}: weights are not downloaded. "
-                    "Use the download button next to the model selector."
-                )
-                log_error(self.error_message)
-                return False
             if not self.spec.supports_device(self.device):
                 self.error_message = (
                     f"{self.spec.display_name} does not run on '{self.device}' "
@@ -286,6 +279,36 @@ class ClassificationTask(QgsTask):
                 )
                 log_error(self.error_message)
                 return False
+            # First run of a model: fetch its weights now (no separate
+            # download step for the user). The progress bar shows the
+            # download, then restarts for the classification.
+            if not manager.is_model_available():
+                size_mb = self.spec.weights_size_mb
+
+                def download_progress(received, total):
+                    total = total if total > 0 else size_mb * 1024 * 1024
+                    self.status_text = (
+                        f"Downloading the {self.spec.short_name} weights "
+                        f"(first use): {received / 1048576:.0f} / "
+                        f"{total / 1048576:.0f} MB"
+                    )
+                    self.setProgress(min(99.0, 100.0 * received / total))
+
+                self.status_text = (
+                    f"Downloading the {self.spec.short_name} weights "
+                    f"(first use, about {size_mb:.0f} MB)...")
+                self.setProgress(0)
+                try:
+                    ok, msg = manager.ensure_available(
+                        download_progress, self.isCanceled)
+                except InterruptedError:
+                    return False
+                if not ok:
+                    self.error_message = msg
+                    log_error(msg)
+                    return False
+                self.status_text = ""
+                self.setProgress(0)
 
             # Load the network once for the whole run; every tile of every
             # file goes through the same backend.

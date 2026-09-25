@@ -10,6 +10,8 @@ def litept_dependency_status():
         return True, ""
     except Exception as exc:
         return False, (
-            "LitePT dependencies are missing or incompatible. Use Repair dependencies "
-            "and restart QGIS, or choose SegFormer 3D. " + str(exc)
+            "LitePT-L needs the spconv library, which is missing or does "
+            "not support this GPU yet (NVIDIA RTX 50 cards). Choose "
+            "SegFormer 3D, or use Plugins > Aerial LiDAR Classifier > "
+            f"Repair dependencies and restart QGIS. Details: {exc}"
         )

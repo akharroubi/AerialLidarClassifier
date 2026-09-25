@@ -121,7 +121,7 @@ class AboutDialog(QDialog):
 
         # Non-commercial notice for the model
         commercial = QLabel(
-            "<div style='text-align:center; color:palette(mid);'>"
+            "<div style='text-align:center;'>"
             "<small>Both downloaded weight sets are designated CC BY-NC 4.0 "
             "(non-commercial use only). Classifying LiDAR data for "
             "commercial purposes requires a separate licence from the "

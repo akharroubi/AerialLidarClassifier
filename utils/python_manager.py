@@ -21,6 +21,8 @@ from qgis.core import Qgis, QgsBlockingNetworkRequest, QgsMessageLog
 from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtNetwork import QNetworkRequest
 
+from .compat import scoped_enum
+
 CACHE_DIR = (
     os.environ.get("AERIAL_LIDAR_CLASSIFIER_CACHE_DIR")
     or os.environ.get("AERIAL_LIDAR_CLASSIFIER_VENV_DIR")
@@ -239,6 +241,9 @@ def _get_clean_env() -> dict:
     for var in (
         "PYTHONPATH",
         "PYTHONHOME",
+        "PYTHONEXECUTABLE",  # set by QGIS 4's launcher; see venv_manager
+        "__PYVENV_LAUNCHER__",
+        "PYTHONSTARTUP",
         "VIRTUAL_ENV",
         "QGIS_PREFIX_PATH",
         "QGIS_PLUGINPATH",
@@ -292,7 +297,7 @@ def download_python_standalone(
 
         err = request.get(QNetworkRequest(qurl))
 
-        if err != QgsBlockingNetworkRequest.NoError:
+        if err != scoped_enum(QgsBlockingNetworkRequest, "ErrorCode", "NoError"):
             error_msg = request.errorMessage()
             if "404" in error_msg or "Not Found" in error_msg:
                 error_msg = (

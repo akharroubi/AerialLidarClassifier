@@ -966,6 +966,14 @@ def _get_clean_env_for_venv() -> dict:
     for var in (
         "PYTHONPATH",
         "PYTHONHOME",
+        # QGIS 4's OSGeo4W launcher sets PYTHONEXECUTABLE to QGIS's own
+        # python3.exe. Leaked into `python -m venv` and uv, it makes both
+        # believe they run QGIS's Python: the venv then points at it and
+        # uv installs every package into the portable Python instead of
+        # the venv (seen on QGIS 4.2.2).
+        "PYTHONEXECUTABLE",
+        "__PYVENV_LAUNCHER__",
+        "PYTHONSTARTUP",
         "VIRTUAL_ENV",
         "QGIS_PREFIX_PATH",
         "QGIS_PLUGINPATH",
@@ -2337,7 +2345,7 @@ def install_dependencies(
             cuda_index = _select_cuda_index(gpu_info) if cuda_enabled else None
             selected_cuda_index = cuda_index
             if cuda_enabled and cuda_index is None:
-                return False, "No supported CUDA wheel for this driver. Update the driver or explicitly install CPU dependencies for SegFormer."
+                return False, ("The NVIDIA driver is too old for the PyTorch GPU builds. Update it from nvidia.com and click Reinstall Dependencies, or install the CPU version (button below).")
             if not cuda_enabled:
                 label = package_name + " (CPU/MPS)"
 
@@ -2925,7 +2933,7 @@ def install_dependencies(
                 cancel_check=cancel_check,
             )
             if not ok:
-                return False, f"LitePT dependency spconv failed: {detail}"
+                return False, (f"The GPU library LitePT-L needs (spconv) could not be installed: {detail}. Click Reinstall Dependencies to retry, or install the CPU version (button below).")
         elif selected_cuda_index is not None:
             _log(
                 f"No spconv wheel for {selected_cuda_index}; the LitePT-L "
@@ -3655,10 +3663,24 @@ def create_venv_and_install(
         if cancel_check and cancel_check():
             return False, "Installation cancelled"
         if not _verify_cuda_in_venv(VENV_DIR):
-            return False, "CUDA verification failed. Repair the GPU installation or explicitly select CPU for SegFormer."
+            return False, ("PyTorch was installed but its GPU (CUDA) test failed on this computer. Update the NVIDIA driver and click Reinstall Dependencies, or install the CPU version (button below).")
 
     if not is_valid:
         return False, f"Verification failed: {verify_msg}"
+
+    # The imports above prove the packages work for the venv's Python,
+    # not that they live in the venv QGIS will load them from. If they
+    # landed elsewhere (a leaked PYTHON* variable made uv target the base
+    # interpreter), QGIS could never import them: stop here instead of
+    # stamping the environment ready.
+    in_venv, where_msg = _quick_check_packages(VENV_DIR)
+    if not in_venv:
+        return False, (
+            "The packages were installed outside the plugin's environment "
+            f"({where_msg} in {get_venv_site_packages(VENV_DIR)}). Please "
+            "report this on the issue tracker with the Log Messages panel "
+            "content (Aerial LiDAR Classifier tab)."
+        )
 
     if cancel_check and cancel_check():
         return False, "Installation cancelled"

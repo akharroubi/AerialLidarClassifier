@@ -28,6 +28,7 @@ from qgis.core import (
 
 from ..config import PLUGIN_NAME, TILE_DEFAULT_BUFFER_M
 from ..core.registry import MODELS
+from ..utils.compat import scoped_enum
 from ..utils.las_units import UNIT_OVERRIDES, resolve_units
 
 # Scoped enums (QGIS >= 3.36, required by QGIS 4 / PyQt6) with the
@@ -36,11 +37,11 @@ try:
     from qgis.core import Qgis as _Qgis
     _FLAG_ADVANCED = _Qgis.ProcessingParameterFlag.Advanced
 except AttributeError:
-    _FLAG_ADVANCED = QgsProcessingParameterDefinition.FlagAdvanced
+    _FLAG_ADVANCED = scoped_enum(QgsProcessingParameterDefinition, "Flag", "FlagAdvanced")
 try:
     _NUMBER_DOUBLE = _Qgis.ProcessingNumberParameterType.Double
 except AttributeError:
-    _NUMBER_DOUBLE = QgsProcessingParameterNumber.Double
+    _NUMBER_DOUBLE = scoped_enum(QgsProcessingParameterNumber, "Type", "Double")
 
 
 class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
@@ -124,8 +125,9 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "<li><b>Input point cloud</b> - a single LAS, LAZ or "
             "<code>.copc.laz</code> file.</li>"
             "<li><b>Model</b> - LitePT-L (NVIDIA CUDA GPU required) or "
-            "SegFormer 3D (GPU or CPU). The weights must have been "
-            "downloaded once from the dock.</li>"
+            "SegFormer 3D (GPU or CPU). The weights download "
+            "automatically the first time a model is used (SHA-256 "
+            "verified).</li>"
             "<li><b>Output folder</b> - where the classified file is "
             "written.</li>"
             "<li><b>Output filename suffix</b> - appended before the "
@@ -349,14 +351,6 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             model_idx = 0
         spec = MODELS[model_idx]
         manager = ModelManager(spec)
-        if not manager.is_model_available():
-            raise QgsProcessingException(
-                self.tr(
-                    f"{spec.display_name}: weights are not downloaded yet. "
-                    f"Open '{PLUGIN_NAME}' from the Plugins menu, select the "
-                    "model and click the download icon in the panel header."
-                )
-            )
 
         input_path = Path(
             self.parameterAsFile(parameters, self.INPUT, context)
@@ -425,6 +419,27 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 f"({spec.device_requirement_text()}). Choose another model "
                 "or compute device."
             ))
+
+        # First use of a model: download its weights here (SHA-256
+        # verified), so Processing and qgis_process need no manual step.
+        if not manager.is_model_available():
+            feedback.pushInfo(self.tr(
+                f"Downloading the {spec.display_name} weights (first use, "
+                f"about {spec.weights_size_mb:.0f} MB)..."
+            ))
+
+            def download_progress(received, total):
+                if total > 0:
+                    feedback.setProgress(min(99.0, 100.0 * received / total))
+
+            try:
+                ok, msg = manager.ensure_available(
+                    download_progress, feedback.isCanceled)
+            except InterruptedError:
+                raise QgsProcessingException(self.tr("Cancelled."))
+            if not ok:
+                raise QgsProcessingException(msg)
+            feedback.setProgress(0)
 
         # Imports deferred until dependencies are confirmed
         import laspy

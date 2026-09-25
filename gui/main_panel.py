@@ -6,12 +6,13 @@ native QGIS widgets where possible (QgsFileWidget, QgsCollapsibleGroupBox,
 QgsMessageBar) and stays out of the way when unused.
 """
 
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from qgis.PyQt.QtCore import QSize, Qt, pyqtSignal
-from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtCore import QSize, Qt, QUrl, pyqtSignal
+from qgis.PyQt.QtGui import QDesktopServices, QIcon, QPalette
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QAction,
@@ -87,6 +88,34 @@ def _qgis_icon(theme_path: str, fallback) -> QIcon:
     return icon
 
 
+def _secondary_text(widget) -> str:
+    """Muted text colour derived from the theme's own text colour.
+
+    palette(mid) is nearly invisible on dark QGIS themes; the window text
+    colour at 65 % opacity reads as secondary on light and dark alike.
+    """
+    colour = widget.palette().color(QPalette.ColorRole.WindowText)
+    return (f"color: rgba({colour.red()}, {colour.green()}, "
+            f"{colour.blue()}, 0.65);")
+
+
+# Status colours readable on light and dark QGIS themes.
+_OK = "#2e7d32"
+_WARN = "#b26a00"
+_ERROR = "#c62828"
+
+
+def _format_elapsed(seconds: float) -> str:
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds} s"
+    minutes, seconds = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{minutes} min {seconds:02d} s"
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours} h {minutes:02d} min"
+
+
 # ---------------------------------------------------------------------------
 # Dock widget
 # ---------------------------------------------------------------------------
@@ -109,6 +138,9 @@ class ClassifierDockWidget(QDockWidget):
         self.files: list[Path] = []
         self.gpu_info: dict = {"available": False}
         self.task = None
+        self._running = False
+        self._run_started = 0.0
+        self._fix_action = None
         self._loaders: list[FileInfoLoader] = []
         self._auto_output_set = False
         # Weights of the selected model present on disk, and the model
@@ -337,13 +369,12 @@ class ClassifierDockWidget(QDockWidget):
 
         # Bottom: always-visible log panel
         log_panel = self._build_log_panel()
-        log_panel.setMinimumHeight(110)
         splitter.addWidget(log_panel)
 
         # Default split: parameters get ~75% of the splitter, log ~25%.
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([520, 140])
+        splitter.setSizes([640, 90])
         root_layout.addWidget(splitter, 1)
 
         # ---- Sticky footer (progress + run/cancel) -------------------------
@@ -358,53 +389,64 @@ class ClassifierDockWidget(QDockWidget):
 
     # ---- Status strip ----------------------------------------------------
     def _build_status_strip(self) -> QWidget:
+        """Two rows: the model selector with its weights actions, then a
+        one-line status (weights, device gate) with a fix button when
+        the selected model cannot run as things are."""
         strip = QFrame()
         strip.setFrameShape(QFrame.Shape.StyledPanel)
         strip.setObjectName("AerialLidarStatusStrip")
-        lay = QHBoxLayout(strip)
-        lay.setContentsMargins(8, 4, 8, 4)
-        lay.setSpacing(12)
+        outer = QVBoxLayout(strip)
+        outer.setContentsMargins(8, 6, 8, 6)
+        outer.setSpacing(4)
 
-        self.device_label = QLabel("Device: detecting...")
-
-        # Model selector: short names in the combo (the strip is narrow),
-        # the full name and description in its tooltip.
+        # Row 1: model selector (full names; the combo takes the width).
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(QLabel("Model:"))
         self.model_combo = QComboBox()
         for spec in MODELS:
-            self.model_combo.addItem(spec.short_name, spec.id)
-        self.model_label = QLabel("")
-        self.model_label.setStyleSheet("color: palette(mid);")
+            self.model_combo.addItem(spec.display_name, spec.id)
+        self.model_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.model_combo.setMinimumContentsLength(10)
+        self.model_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        row.addWidget(self.model_combo, 1)
 
-        lay.addWidget(self.device_label)
-        lay.addWidget(self._vline())
-        lay.addWidget(QLabel("Model:"))
-        lay.addWidget(self.model_combo)
-        lay.addWidget(self.model_label)
-        lay.addStretch()
-
-        # Right-side icon buttons (download / import model weights)
-        self.download_btn = QToolButton()
-        self.download_btn.setIcon(
-            _qgis_icon(
-                "mActionFileSaveAs.svg",
-                QStyle.StandardPixmap.SP_ArrowDown))
-        self.download_btn.setToolTip("Download the selected model's weights")
-        self.download_btn.setAutoRaise(True)
-        self.download_btn.clicked.connect(self._download_model)
-        lay.addWidget(self.download_btn)
-
+        # Weights download by themselves (Setup, then the first run of a
+        # model). Importing a file is only for machines without internet.
         self.import_btn = QToolButton()
         self.import_btn.setIcon(
             _qgis_icon(
                 "mActionFileOpen.svg",
                 QStyle.StandardPixmap.SP_DialogOpenButton))
         self.import_btn.setToolTip(
-            "Import a weights file you already have for the selected model "
-            "(offline machines). The file is copied and its SHA-256 verified."
+            "Offline machines only: import a weights file you already have "
+            "for the selected model. The file is copied and its SHA-256 "
+            "verified. With internet access the weights download by "
+            "themselves."
         )
         self.import_btn.setAutoRaise(True)
         self.import_btn.clicked.connect(self._import_model_file)
-        lay.addWidget(self.import_btn)
+        row.addWidget(self.import_btn)
+        outer.addLayout(row)
+
+        # Row 2: status, optional one-click fix, device.
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
+        self.model_label = QLabel("")
+        self.model_label.setTextFormat(Qt.TextFormat.RichText)
+        self.model_label.setWordWrap(True)
+        status_row.addWidget(self.model_label, 1)
+        self.fix_btn = QToolButton()
+        self.fix_btn.clicked.connect(self._on_fix_clicked)
+        self.fix_btn.hide()
+        status_row.addWidget(self.fix_btn)
+        status_row.addWidget(self._vline())
+        self.device_label = QLabel("Device: detecting...")
+        self.device_label.setStyleSheet(_secondary_text(self.device_label))
+        status_row.addWidget(self.device_label)
+        outer.addLayout(status_row)
 
         return strip
 
@@ -434,11 +476,10 @@ class ClassifierDockWidget(QDockWidget):
 
         self.layer_combo = QgsMapLayerComboBox()
         # The point-cloud filter moved to Qgis.LayerFilter (3.34+, the
-        # only spelling QGIS 4 keeps); older spellings as fallbacks.
+        # spelling QGIS 4 keeps); the scoped class enum as a fallback.
         for candidate in (
             lambda: Qgis.LayerFilter.PointCloudLayer,
             lambda: QgsMapLayerProxyModel.Filter.PointCloudLayer,
-            lambda: QgsMapLayerProxyModel.PointCloudLayer,  # type: ignore
         ):
             try:
                 self.layer_combo.setFilters(candidate())
@@ -463,7 +504,7 @@ class ClassifierDockWidget(QDockWidget):
         # File list (drag/drop)
         self.file_list = DragDropList()
         self.file_list.filesAdded.connect(self._on_files_dropped)
-        self.file_list.setMinimumHeight(120)
+        self.file_list.setMinimumHeight(96)
         self.file_list.setSelectionMode(
             QAbstractItemView.SelectionMode.ExtendedSelection
         )
@@ -530,11 +571,15 @@ class ClassifierDockWidget(QDockWidget):
         clear_action.triggered.connect(self._clear_files)
         toolbar.addAction(clear_action)
 
-        lay.addWidget(toolbar)
-
+        # Toolbar and the file count share one row (saves vertical room).
+        tool_row = QHBoxLayout()
+        tool_row.setSpacing(6)
+        tool_row.addWidget(toolbar)
+        tool_row.addStretch()
         self.file_stats = QLabel("No files")
-        self.file_stats.setStyleSheet("color: palette(mid);")
-        lay.addWidget(self.file_stats)
+        self.file_stats.setStyleSheet(_secondary_text(self.file_stats))
+        tool_row.addWidget(self.file_stats)
+        lay.addLayout(tool_row)
 
         return group
 
@@ -575,11 +620,12 @@ class ClassifierDockWidget(QDockWidget):
         self.field_edit.setToolTip(
             "LAS dimension to write the classification into.\n"
             "- 'classification' (default): the ASPRS-standard dimension. "
-            "The file is auto-upgraded to LAS 1.4 / point format 6 when "
-            "an assigned code exceeds the legacy 5-bit limit.\n"
-            "- Any other name: an extra-byte field is added to the "
-            "output (non-standard, but useful when you must preserve "
-            "the input's existing 'classification')."
+            "The file is upgraded to LAS 1.4 only when a class code needs "
+            "it.\n"
+            "- Any other name: an extra-byte field holding the raw model "
+            "class IDs (cars, trucks and fences stay distinct). The "
+            "input's own 'classification' is kept unchanged. Standard LAS "
+            "dimension names (X, intensity, red...) are refused."
         )
         form.addRow("Field:", self.field_edit)
 
@@ -619,7 +665,7 @@ class ClassifierDockWidget(QDockWidget):
 
         self.gpu_detail = QLabel("Detecting hardware...")
         self.gpu_detail.setWordWrap(True)
-        self.gpu_detail.setStyleSheet("color: palette(mid);")
+        self.gpu_detail.setStyleSheet(_secondary_text(self.gpu_detail))
         lay.addWidget(self.gpu_detail)
 
         clear_gpu_btn = QPushButton("Clear GPU memory")
@@ -660,8 +706,8 @@ class ClassifierDockWidget(QDockWidget):
         self.tile_size_spin.setSuffix(" m")
         self.tile_size_spin.setValue(self._saved_tile_size_m)
         self.tile_size_spin.setToolTip(
-            "Side length of each square tile, in CRS units. Used only "
-            "when 'Auto-size' is off."
+            "Side length of each square tile, in metres (files in feet are "
+            "converted). Used only when 'Auto-size' is off."
         )
         perf_form.addRow("Tile size:", self.tile_size_spin)
 
@@ -798,7 +844,7 @@ class ClassifierDockWidget(QDockWidget):
         self.log_text.setPlaceholderText(
             "Processing messages will appear here..."
         )
-        self.log_text.setMinimumHeight(80)
+        self.log_text.setMinimumHeight(50)
         lay.addWidget(self.log_text, 1)
         return panel
 
@@ -810,13 +856,18 @@ class ClassifierDockWidget(QDockWidget):
         lay.setContentsMargins(8, 6, 8, 8)
         lay.setSpacing(4)
 
+        # Idle: what is still missing before Run can start. Running: the
+        # file being processed.
         self.current_file_label = QLabel("Ready")
-        self.current_file_label.setStyleSheet("color: palette(mid);")
+        self.current_file_label.setWordWrap(True)
+        self.current_file_label.setStyleSheet(_secondary_text(self.current_file_label))
         lay.addWidget(self.current_file_label)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
+        # Hidden until the first run: an idle "0 %" bar only takes room.
+        self.progress_bar.hide()
         lay.addWidget(self.progress_bar)
 
         btn_row = QHBoxLayout()
@@ -863,7 +914,9 @@ class ClassifierDockWidget(QDockWidget):
                 f"Backend: {self.gpu_info.get('backend', 'cuda').upper()} - "
                 f"{self.gpu_info.get('mem', 0):.1f} GB"
             )
-            self.device_label.setText(f"Device: {truncate_name(name, 24)}")
+            short = name.replace("NVIDIA ", "").replace("GeForce ", "")
+            self.device_label.setText(f"GPU: {truncate_name(short, 22)}")
+            self.device_label.setToolTip(name)
         else:
             self.gpu_check.setEnabled(False)
             self.gpu_check.setChecked(False)
@@ -900,8 +953,15 @@ class ClassifierDockWidget(QDockWidget):
                 chosen = get_model(self._saved_model_id)
             except KeyError:
                 chosen = None
-        if chosen is None or not chosen.supports_device(device):
+        if chosen is None or not self._model_runs_here(chosen, device):
             chosen = default_model_for_device(device)
+            if not self._model_runs_here(chosen, device):
+                # e.g. an RTX 50 card: CUDA works but spconv has no build
+                # for it yet, so propose the model that does run.
+                chosen = next(
+                    (m for m in MODELS if self._model_runs_here(m, device)),
+                    chosen,
+                )
         index = self.model_combo.findData(chosen.id)
         self.model_combo.blockSignals(True)
         self.model_combo.setCurrentIndex(max(index, 0))
@@ -924,45 +984,68 @@ class ClassifierDockWidget(QDockWidget):
         )
 
         if manager.is_model_available():
-            size_mb = manager.get_model_size_mb()
             self.model_ready = True
-            status = f"ready ({size_mb:.0f} MB)"
-            self.download_btn.setEnabled(False)
-            self.download_btn.setToolTip("Weights already downloaded")
+            colour, status = _OK, "Ready"
         else:
+            # Not an error: the run downloads the weights first.
             self.model_ready = False
-            status = "not downloaded"
-            self.download_btn.setEnabled(True)
-            self.download_btn.setToolTip(
-                f"Download the {spec.display_name} weights "
-                f"(~{spec.weights_size_mb:.0f} MB)"
-            )
+            colour = _WARN
+            status = (f"Weights download on first run "
+                      f"({spec.weights_size_mb:.0f} MB)")
 
         self.model_gate_ok = spec.supports_device(device)
         dependency_message = ""
         if self.model_gate_ok and spec.family == "litept":
             from ..utils.backend_readiness import litept_dependency_status
             self.model_gate_ok, dependency_message = litept_dependency_status()
+
+        # One-click way out when the selected model cannot run: switch to
+        # a model that runs here (Repair stays in the plugin menu).
+        self._fix_action = None
         if self.model_gate_ok:
             self.model_gate_message = ""
-            self.model_label.setStyleSheet("color: palette(mid);")
         else:
-            status += " - dependencies unavailable" if dependency_message else " - needs an NVIDIA GPU"
-            self.model_gate_message = dependency_message or (
-                f"{spec.display_name} runs on NVIDIA CUDA GPUs only. Tick "
-                "'Use GPU' in Advanced parameters, or choose SegFormer 3D "
-                "which runs on CPU."
+            if dependency_message:
+                colour, status = _ERROR, "LitePT dependencies missing"
+                self.model_gate_message = dependency_message
+            else:
+                colour, status = _ERROR, "Needs an NVIDIA GPU"
+                self.model_gate_message = (
+                    f"{spec.display_name} runs on NVIDIA CUDA GPUs only. "
+                    "Tick 'Use GPU' in Advanced parameters, or choose "
+                    "SegFormer 3D which runs on CPU."
+                )
+            fallback = next(
+                (m for m in MODELS
+                 if m.id != spec.id and self._model_runs_here(m, device)),
+                None,
             )
-            self.model_label.setStyleSheet("color: #b00020;")
-        self.model_label.setText(status)
+            if fallback is not None:
+                self._fix_action = fallback.id
+                self.fix_btn.setText(f"Use {fallback.short_name}")
+                self.fix_btn.setToolTip(fallback.description)
+        self.fix_btn.setVisible(self._fix_action is not None)
+
+        self.model_label.setText(
+            f"<span style='color:{colour};'>●</span> {status}")
         self.model_label.setToolTip(self.model_gate_message)
         self._update_run_button()
 
-    def _download_model(self):
-        from ..dialogs.model_download_dialog import ModelDownloadDialog
-        dlg = ModelDownloadDialog(self._current_spec(), self)
-        if dlg.exec():
-            self._check_model()
+    def _on_fix_clicked(self):
+        if self._fix_action:
+            index = self.model_combo.findData(self._fix_action)
+            if index >= 0:
+                self.model_combo.setCurrentIndex(index)
+
+    @staticmethod
+    def _model_runs_here(spec, device) -> bool:
+        """Device supported and, for LitePT-L, its native libraries import."""
+        if not spec.supports_device(device):
+            return False
+        if spec.family == "litept":
+            from ..utils.backend_readiness import litept_dependency_status
+            return litept_dependency_status()[0]
+        return True
 
     def _import_model_file(self):
         spec = self._current_spec()
@@ -1116,7 +1199,7 @@ class ClassifierDockWidget(QDockWidget):
         layer_list.setSelectionMode(
             QAbstractItemView.SelectionMode.NoSelection)
         for name, path in candidates:
-            item = QListWidgetItem(f"{name}    —   {path.name}")
+            item = QListWidgetItem(f"{name}  -  {path.name}")
             item.setToolTip(str(path))
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(Qt.CheckState.Unchecked)
@@ -1208,21 +1291,42 @@ class ClassifierDockWidget(QDockWidget):
             f"{len(self.files)} file(s) - {total_size / (1024**2):.1f} MB"
         )
 
+    def _missing_before_run(self) -> str:
+        """First thing the user still has to do, or "" when Run can start."""
+        if not self.files:
+            return "Add LAS / LAZ / COPC files to the list above."
+        if not self.output_widget.filePath():
+            return "Choose an output folder."
+        if not self.model_gate_ok:
+            return self.model_gate_message
+        return ""
+
     def _update_run_button(self):
-        enabled = (
-            bool(self.files) and self.model_ready and self.model_gate_ok
-            and bool(self.output_widget.filePath())
-        )
-        self.run_btn.setEnabled(enabled)
-        self.run_btn.setToolTip(
-            self.model_gate_message if not self.model_gate_ok else ""
-        )
+        missing = self._missing_before_run()
+        self.run_btn.setEnabled(not missing and not self._running)
+        self.run_btn.setToolTip(missing)
+        if self._running:
+            return
+        if missing:
+            self.current_file_label.setText(missing)
+            return
+        spec = self._current_spec()
+        device = self._current_device()
+        where = "CPU" if device == "cpu" else f"GPU ({device.upper()})"
+        text = (f"Ready: {len(self.files)} file(s), {spec.short_name} "
+                f"on {where}.")
+        if not self.model_ready:
+            text += (f" Its weights ({spec.weights_size_mb:.0f} MB) download "
+                     "automatically first.")
+        self.current_file_label.setText(text)
 
     # ------------------------------------------------------------------
     # Run / cancel
     # ------------------------------------------------------------------
 
     def _run(self):
+        if self._running:
+            return
         out_dir = self.output_widget.filePath()
         if not out_dir:
             self.message_bar.pushMessage(
@@ -1230,9 +1334,12 @@ class ClassifierDockWidget(QDockWidget):
             )
             return
 
+        self._running = True
+        self._run_started = time.monotonic()
         self.run_btn.setEnabled(False)
         self.cancel_btn.setEnabled(True)
         self.progress_bar.setValue(0)
+        self.progress_bar.show()
         self.current_file_label.setText("Starting classification...")
         self._save_settings()
 
@@ -1249,8 +1356,9 @@ class ClassifierDockWidget(QDockWidget):
             self.message_bar.pushMessage(
                 self.model_gate_message, Qgis.MessageLevel.Warning, duration=8,
             )
-            self.run_btn.setEnabled(True)
+            self._running = False
             self.cancel_btn.setEnabled(False)
+            self._update_run_button()
             return
         field = self.field_edit.text().strip() or "classification"
         is_asprs = field.lower() == "classification"
@@ -1288,36 +1396,63 @@ class ClassifierDockWidget(QDockWidget):
 
     def _on_progress(self, p):
         self.progress_bar.setValue(int(p))
-        if self.task and self.task.current_file_name:
+        if self.task and getattr(self.task, "status_text", ""):
+            self.current_file_label.setText(self.task.status_text)
+        elif self.task and self.task.current_file_name:
             self.current_file_label.setText(
                 f"Processing: {self.task.current_file_name} "
                 f"({self.task.files_processed + 1}/{len(self.task.files)})"
             )
 
     def _on_task_completed(self):
-        self.run_btn.setEnabled(True)
+        self._running = False
         self.cancel_btn.setEnabled(False)
+        # Refresh the model status (the run may have fetched the weights).
+        self._check_model()
         self.progress_bar.setValue(100)
-        count = len(self.task.output_files) if self.task else 0
-        self.current_file_label.setText(
-            f"Complete - {count} file(s) processed")
-        self._log(f"Classification complete: {count} file(s) processed")
+        outputs = list(self.task.output_files) if self.task else []
+        count = len(outputs)
+        elapsed = _format_elapsed(time.monotonic() - self._run_started)
+        summary = f"Classification complete: {count} file(s) in {elapsed}"
+        self.current_file_label.setText(summary + ".")
+        self._log(summary)
 
-        if self.load_result_check.isChecked() and self.task:
-            self._load_output_layers(self.task.output_files)
+        if self.load_result_check.isChecked() and outputs:
+            self._load_output_layers(outputs)
 
-        self.iface.messageBar().pushMessage(
-            PLUGIN_NAME,
-            f"Classification complete: {count} file(s) processed",
-            level=Qgis.MessageLevel.Success, duration=8,
-        )
+        self._push_completion_message(summary, outputs)
+
+    def _push_completion_message(self, summary, outputs):
+        """Success message with 'Open folder' and, unless hidden, the course."""
+        bar = self.iface.messageBar()
+        folder = outputs[0].parent if outputs else None
+        try:
+            from ..widgets.cohort_card import cohort_hidden, open_cohort
+            item = bar.createMessage(PLUGIN_NAME, summary)
+            if folder is not None:
+                open_btn = QPushButton("Open folder")
+                open_btn.clicked.connect(
+                    lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))))
+                item.layout().addWidget(open_btn)
+            if not cohort_hidden():
+                course_btn = QPushButton("Go further: live course ↗")
+                course_btn.setToolTip(
+                    "Optional paid cohort taught by the plugin author. "
+                    "Opens Maven in your browser.")
+                course_btn.clicked.connect(lambda: open_cohort("success"))
+                item.layout().addWidget(course_btn)
+            bar.pushWidget(item, Qgis.MessageLevel.Success, 15)
+        except Exception:
+            bar.pushMessage(PLUGIN_NAME, summary,
+                            level=Qgis.MessageLevel.Success, duration=8)
 
     def _on_task_terminated(self):
-        self.run_btn.setEnabled(True)
+        self._running = False
         self.cancel_btn.setEnabled(False)
+        self._check_model()
 
         if self.task and self.task.error_message:
-            self.current_file_label.setText("Error - see Log")
+            self.current_file_label.setText("Error - see the Log below.")
             self._log(f"ERROR: {self.task.error_message}")
             self.iface.messageBar().pushMessage(
                 PLUGIN_NAME,
@@ -1325,7 +1460,8 @@ class ClassifierDockWidget(QDockWidget):
                 level=Qgis.MessageLevel.Critical, duration=0,
             )
         else:
-            self.current_file_label.setText("Cancelled")
+            self.current_file_label.setText(
+                "Cancelled. Existing output files were left unchanged.")
             self._log("Classification cancelled by user.")
 
     def _cancel(self):

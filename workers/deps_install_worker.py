@@ -58,13 +58,21 @@ class DepsInstallWorker(QThread):
             import os
             import sys
 
-            from ..utils.venv_manager import VENV_DIR, create_venv_and_install
+            from ..utils.venv_manager import (
+                CACHE_DIR, VENV_DIR, create_venv_and_install,
+            )
 
             if self._cancelled:
                 self.completed.emit(False, "Installation cancelled")
                 return
-            if "torch" in sys.modules:
-                self.completed.emit(False, "Restart QGIS, then open Repair dependencies before opening the classifier. Loaded AI libraries cannot be safely replaced in this session.")
+            if _plugin_torch_loaded(CACHE_DIR):
+                self.completed.emit(False, (
+                    "The classifier's AI libraries are already loaded in "
+                    "this QGIS session and cannot be replaced while it runs. "
+                    "Restart QGIS, then choose Plugins > Aerial LiDAR "
+                    "Classifier > Repair dependencies before opening the "
+                    "classifier."
+                ))
                 return
 
             if os.path.exists(VENV_DIR):
@@ -115,7 +123,82 @@ class DepsInstallWorker(QThread):
                 cancel_check=lambda: self._cancelled,
                 cuda_enabled=self._cuda_enabled,
             )
+            if success and not self._cancelled:
+                message = self._download_weights(message)
             self.completed.emit(success, message)
         except Exception as e:
             error_msg = f"{str(e)}\n{traceback.format_exc()}"
             self.completed.emit(False, error_msg)
+
+    def _download_weights(self, message: str) -> str:
+        """Fetch the weights of every model that can run here.
+
+        Part of the one-time setup so the first classification starts
+        straight away. A failure here does not fail the setup: the first
+        run of a model downloads whatever is still missing.
+        """
+        from ..core.registry import MODELS
+        from ..utils.model_manager import ModelManager
+        from ..utils.venv_manager import _read_install_marker
+
+        marker = _read_install_marker() or {}
+        device = "cuda" if self._cuda_enabled else "cpu"
+        wanted = [
+            spec for spec in MODELS
+            if spec.supports_device(device)
+            and (spec.family != "litept" or marker.get("spconv_version"))
+        ]
+        failed = []
+        for spec in wanted:
+            if self._cancelled:
+                break
+            manager = ModelManager(spec)
+            if manager.is_model_available():
+                continue
+            label = f"Downloading the {spec.short_name} weights"
+            self.progress.emit(100, f"{label} ({spec.weights_size_mb:.0f} MB)...")
+
+            def progress(received, total, _label=label):
+                if total > 0:
+                    self.progress.emit(
+                        100, f"{_label}: {received / 1048576:.0f} / "
+                             f"{total / 1048576:.0f} MB")
+
+            try:
+                ok, _msg = manager.ensure_available(
+                    progress, lambda: self._cancelled)
+            except InterruptedError:
+                break
+            if not ok:
+                failed.append(spec.short_name)
+        if failed:
+            return (
+                f"{message}. The {', '.join(failed)} weights could not be "
+                "downloaded now; they will be downloaded when you first run "
+                "the classifier."
+            )
+        return message
+
+
+def _plugin_torch_loaded(cache_dir: str) -> bool:
+    """True when this session imported torch from the plugin's own venv.
+
+    Only then are its DLLs locked and the environment impossible to
+    replace; a torch loaded by another plugin from elsewhere is no
+    obstacle.
+    """
+    import os
+    import sys
+
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return False
+    location = getattr(torch, "__file__", None) or ""
+    if not location:
+        return True  # unknown origin: be safe
+    try:
+        location = os.path.normcase(os.path.realpath(location))
+        cache = os.path.normcase(os.path.realpath(cache_dir))
+        return location.startswith(cache + os.sep)
+    except Exception:
+        return True

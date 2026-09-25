@@ -58,11 +58,13 @@ class DepsInstallDockWidget(QDockWidget):
         welcome_text = QLabel(
             "Aerial LiDAR Classifier needs to install its AI "
             "dependencies before you can run it.\n\n"
-            "This is a one-time setup that will:\n"
+            "This is a one-time setup, with nothing to configure. It will:\n"
             "  \u2022 Download a Python runtime (~50 MB)\n"
             "  \u2022 Download a fast package installer (~15 MB)\n"
             "  \u2022 Install PyTorch + LiDAR packages "
-            "(~1\u20133 GB depending on CUDA)"
+            "(~1\u20133 GB depending on CUDA)\n"
+            "  \u2022 Download the model weights (~20\u2013190 MB)\n\n"
+            "QGIS stays usable while it runs (usually 5 to 15 minutes)."
         )
         welcome_text.setWordWrap(True)
         welcome_layout.addWidget(welcome_text)
@@ -92,7 +94,12 @@ class DepsInstallDockWidget(QDockWidget):
         gpu_layout.addWidget(self.gpu_label)
 
         layout.addWidget(self.gpu_group)
-        self.cpu_only = QCheckBox("Install CPU only (SegFormer; LitePT requires NVIDIA CUDA)")
+        self.cpu_only = QCheckBox(
+            "Install the CPU version only (SegFormer 3D; LitePT-L needs "
+            "an NVIDIA GPU)")
+        self.cpu_only.setToolTip(
+            "Leave unticked on a machine with an NVIDIA GPU. Tick it to "
+            "keep the GPU free, or if the GPU installation failed.")
         layout.addWidget(self.cpu_only)
 
         # Action buttons
@@ -145,6 +152,20 @@ class DepsInstallDockWidget(QDockWidget):
         self.reinstall_button.hide()
         layout.addWidget(self.reinstall_button)
 
+        # After a failed GPU install: one click to the CPU version, which
+        # runs everywhere (SegFormer 3D). Never chosen silently.
+        self.cpu_retry_button = QPushButton(
+            "Install the CPU version instead (SegFormer 3D)")
+        self.cpu_retry_button.setMinimumHeight(32)
+        self.cpu_retry_button.setToolTip(
+            "Installs PyTorch for the CPU. LitePT-L will not be available; "
+            "SegFormer 3D runs on the CPU. You can retry the GPU version "
+            "later with Plugins > Aerial LiDAR Classifier > Repair "
+            "dependencies.")
+        self.cpu_retry_button.clicked.connect(self._on_cpu_retry_clicked)
+        self.cpu_retry_button.hide()
+        layout.addWidget(self.cpu_retry_button)
+
         # Help links
         help_label = QLabel(
             "<small>"
@@ -166,17 +187,22 @@ class DepsInstallDockWidget(QDockWidget):
 
     def _detect_gpu(self):
         """Detect GPU and update the GPU info label."""
+        self._gpu_detected = False
         try:
             from ..utils.venv_manager import detect_nvidia_gpu
 
             has_gpu, gpu_info = detect_nvidia_gpu()
+            self._gpu_detected = bool(has_gpu)
+            # The CPU-only choice only means something next to a GPU.
+            self.cpu_only.setVisible(self._gpu_detected)
             if has_gpu:
                 name = gpu_info.get("name", "Unknown GPU")
                 memory_mb = gpu_info.get("memory_mb")
                 memory_str = f" ({memory_mb} MB)" if memory_mb else ""
                 self.gpu_label.setText(
-                    f"GPU Detected: {name}{memory_str}\n"
-                    "CUDA acceleration will be enabled."
+                    f"GPU detected: {name}{memory_str}\n"
+                    "The GPU (CUDA) version will be installed: LitePT-L "
+                    "and SegFormer 3D will both be available."
                 )
                 self.gpu_group.setStyleSheet(
                     "QGroupBox { border: 1px solid #4CAF50; "
@@ -197,7 +223,8 @@ class DepsInstallDockWidget(QDockWidget):
                 else:
                     msg = (
                         "No NVIDIA GPU detected.\n"
-                        "CPU mode will be used (slower but functional)."
+                        "The CPU version will be installed: SegFormer 3D "
+                        "runs on the CPU (slower, but works on any computer)."
                     )
                 self.gpu_label.setText(msg)
                 self.gpu_group.setStyleSheet(
@@ -218,7 +245,12 @@ class DepsInstallDockWidget(QDockWidget):
     def _on_reinstall_clicked(self):
         """Cleanup runs in the background worker, never on the GUI thread."""
         self.reinstall_button.hide()
+        self.cpu_retry_button.hide()
         self.install_requested.emit()
+
+    def _on_cpu_retry_clicked(self):
+        self.cpu_only.setChecked(True)
+        self._on_reinstall_clicked()
 
     def show_install_ui(self):
         """Show the install button, hide progress and status."""
@@ -227,6 +259,7 @@ class DepsInstallDockWidget(QDockWidget):
         self.progress_frame.hide()
         self.status_label.hide()
         self.reinstall_button.hide()
+        self.cpu_retry_button.hide()
 
     def show_progress_ui(self):
         """Show progress bar and cancel button, hide install button."""
@@ -237,6 +270,8 @@ class DepsInstallDockWidget(QDockWidget):
         self.progress_label.setText("Starting installation...")
         self.status_label.hide()
         self.reinstall_button.hide()
+        self.cpu_retry_button.hide()
+        self.cpu_only.setEnabled(False)
 
     def set_progress(self, percent: int, message: str):
         """Update the progress bar and label.
@@ -274,6 +309,7 @@ class DepsInstallDockWidget(QDockWidget):
             message: Completion message.
         """
         self.cancel_button.hide()
+        self.cpu_only.setEnabled(True)
 
         if success:
             self.progress_bar.setValue(100)
@@ -281,8 +317,13 @@ class DepsInstallDockWidget(QDockWidget):
             self.set_status(True, message)
             self.install_button.hide()
             self.reinstall_button.hide()
+            self.cpu_retry_button.hide()
         else:
             self.progress_frame.hide()
             self.set_status(False, message)
             self.install_button.hide()
             self.reinstall_button.show()
+            cancelled = "cancel" in (message or "").lower()
+            self.cpu_retry_button.setVisible(
+                not self.cpu_only.isChecked() and not cancelled
+                and self._gpu_detected)

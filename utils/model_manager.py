@@ -18,6 +18,7 @@ from typing import Callable, Iterable, Optional
 from qgis.core import (
     QgsApplication,
     QgsBlockingNetworkRequest,
+    QgsFeedback,
     QgsSettings,
 )
 from qgis.PyQt.QtCore import QUrl
@@ -25,6 +26,7 @@ from qgis.PyQt.QtNetwork import QNetworkRequest
 
 from ..config import SETTINGS_PREFIX
 from ..core.registry import ModelSpec, get_model
+from .compat import scoped_enum
 from .logger import log_error, log_info, log_warning
 from .weights import is_verified
 
@@ -160,10 +162,56 @@ class ModelManager:
         log_info(f"{self.spec.short_name}: weights ready ({size_mb:.1f} MB) from {origin}")
         return True, ""
 
+    def ensure_available(
+        self,
+        progress_callback: Callable[[int, int], None] = None,
+        cancel_callback: Callable[[], bool] = None,
+    ):
+        """Download the weights when they are not on disk yet.
+
+        This is what every run calls: users never have to fetch weights
+        by hand. Returns ``(success, error_message)``; raises
+        ``InterruptedError`` when ``cancel_callback`` asks to stop.
+        """
+        if self.is_model_available():
+            return True, ""
+        log_info(
+            f"{self.spec.display_name}: weights not found locally; "
+            f"downloading them now (about {self.spec.weights_size_mb:.0f} MB, "
+            "once)."
+        )
+        ok, msg = self.download_model(
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
+        )
+        if cancel_callback is not None and cancel_callback():
+            raise InterruptedError("Weights download cancelled.")
+        if not ok:
+            if msg.startswith("Cannot replace the model file"):
+                # Downloaded and verified, but the file could not be put in
+                # place: a folder problem, not a network one.
+                advice = (
+                    f"Check that {self.model_dir()} is writable and, on "
+                    "Windows, that its full path stays under 260 characters."
+                )
+            else:
+                advice = (
+                    "Check the internet connection or the proxy in Settings > "
+                    "Options > Network, then run again. On an offline "
+                    "machine, import the weights file with the folder icon "
+                    "next to the model selector."
+                )
+            return False, (
+                f"Could not get the {self.spec.display_name} weights: "
+                f"{msg.rstrip('.')}. {advice}"
+            )
+        return True, ""
+
     def download_model(
         self,
         url: Optional[str] = None,
         progress_callback: Callable[[int, int], None] = None,
+        cancel_callback: Callable[[], bool] = None,
     ):
         """Download the weights, trying every candidate URL in turn.
 
@@ -180,33 +228,29 @@ class ModelManager:
         import os
         os.close(fd)
         tmp_path = Path(name)
-        if tmp_path.exists():
-            try:
-                tmp_path.unlink()
-            except OSError as exc:
-                log_warning(f"Could not delete stale partial download: {exc}")
 
         last_error = ""
-        for idx, current_url in enumerate(urls, start=1):
-            log_info(
-                f"Downloading {self.spec.short_name} weights, candidate "
-                f"{idx}/{len(urls)}: {current_url}"
-            )
-            ok, msg = self._download_one(current_url, tmp_path, progress_callback)
-            if not ok:
+        try:
+            for idx, current_url in enumerate(urls, start=1):
+                if cancel_callback is not None and cancel_callback():
+                    return False, "Download cancelled."
+                log_info(
+                    f"Downloading {self.spec.short_name} weights, candidate "
+                    f"{idx}/{len(urls)}: {current_url}"
+                )
+                ok, msg = self._download_one(
+                    current_url, tmp_path, progress_callback, cancel_callback)
+                if not ok:
+                    last_error = msg
+                    log_warning(f"Candidate {idx} failed: {msg}")
+                    continue
+                ok, msg = self._verify_and_promote(tmp_path, current_url)
+                if ok:
+                    return True, ""
                 last_error = msg
-                log_warning(f"Candidate {idx} failed: {msg}")
-                if tmp_path.exists():
-                    try:
-                        tmp_path.unlink()
-                    except OSError:
-                        pass
-                continue
-            ok, msg = self._verify_and_promote(tmp_path, current_url)
-            if ok:
-                return True, ""
-            last_error = msg
-            log_warning(f"Candidate {idx}: {msg}")
+                log_warning(f"Candidate {idx}: {msg}")
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
         return False, last_error or "All download URLs failed."
 
@@ -215,16 +259,28 @@ class ModelManager:
         url: str,
         tmp_path: Path,
         progress_callback: Callable[[int, int], None] = None,
+        cancel_callback: Callable[[], bool] = None,
     ):
         """Download a single URL to ``tmp_path`` via the QGIS network stack."""
         try:
             request = QgsBlockingNetworkRequest()
-            err = request.get(QNetworkRequest(QUrl(url)))
+            feedback = QgsFeedback()
+
+            def on_progress(received, total):
+                # Also the place where a cancel request aborts the transfer.
+                if cancel_callback is not None and cancel_callback():
+                    feedback.cancel()
+                if progress_callback and received >= 0:
+                    progress_callback(int(received), int(total))
+
             try:
-                no_error = QgsBlockingNetworkRequest.ErrorCode.NoError
-            except AttributeError:
-                no_error = QgsBlockingNetworkRequest.NoError
-            if err != no_error:
+                request.downloadProgress.connect(on_progress)
+            except Exception:
+                pass
+            err = request.get(QNetworkRequest(QUrl(url)), False, feedback)
+            if feedback.isCanceled():
+                return False, "Download cancelled."
+            if err != scoped_enum(QgsBlockingNetworkRequest, "ErrorCode", "NoError"):
                 return False, f"Network error: {request.errorMessage() or err}"
 
             reply = request.reply()
@@ -232,8 +288,6 @@ class ModelManager:
             total = len(content)
             if total == 0:
                 return False, "Downloaded file is empty"
-
-            # QgsBlockingNetworkRequest returns the whole body at once.
             if progress_callback:
                 progress_callback(total, total)
 

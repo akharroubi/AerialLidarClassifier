@@ -103,7 +103,11 @@ class AerialLidarClassifierPlugin:
         )
         self.iface.addPluginToMenu(MENU_LABEL, about_action)
 
-        self.initProcessing()
+        # The dock must stay usable even if the provider cannot register.
+        try:
+            self.initProcessing()
+        except Exception as exc:
+            log_warning(f"Could not register the Processing provider: {exc}")
 
     def initProcessing(self):  # noqa: N802 - QGIS headless entry point
         if self.provider is not None:
@@ -404,11 +408,8 @@ class AerialLidarClassifierPlugin:
         # to the application menu).
         try:
             action.setMenuRole(QAction.MenuRole.NoRole)
-        except AttributeError:
-            try:
-                action.setMenuRole(QAction.NoRole)
-            except Exception:
-                pass
+        except Exception:
+            pass
         if add_to_toolbar and self.toolbar:
             self.toolbar.addAction(action)
         self.actions.append(action)

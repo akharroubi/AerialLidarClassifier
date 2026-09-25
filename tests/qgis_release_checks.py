@@ -1,24 +1,30 @@
-"""Run with python-qgis-ltr.bat; no network, live settings, or GPU required."""
-import importlib
-import io
+"""Run with QGIS's Python (python-qgis-ltr.bat on QGIS 3, python-qgis.bat on
+QGIS 4); no network, live settings, or GPU required."""
 import os
-from pathlib import Path
-import subprocess
 import sys
-import tarfile
-import tempfile
-import types
-import unittest
-from unittest.mock import patch
-from contextlib import ExitStack
+from pathlib import Path
 
 os.environ['QT_QPA_PLATFORM'] = 'offscreen'
+# QGIS first: on QGIS 4 (OSGeo4W) a module that imports ssl before
+# qgis._core (unittest.mock does) loads Python's own OpenSSL, and Qt's
+# network stack then fails to load. Inside QGIS this cannot happen.
+from qgis.core import QgsApplication  # noqa: E402
+app = QgsApplication([], False)
+app.initQgis()
+
+import importlib  # noqa: E402
+import io  # noqa: E402
+import subprocess  # noqa: E402,F401
+import tarfile  # noqa: E402
+import tempfile  # noqa: E402
+import types  # noqa: E402
+import unittest  # noqa: E402
+from contextlib import ExitStack  # noqa: E402
+from unittest.mock import patch  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT.parent))
 sys.path.append(str(Path.home() / '.qgis_aerial_lidar_classifier/venv_py3.12/Lib/site-packages'))
-from qgis.core import QgsApplication
-app = QgsApplication([], False)
-app.initQgis()
 import laspy
 import numpy as np
 
@@ -95,22 +101,83 @@ class ReleaseChecks(unittest.TestCase):
             self.assertEqual(final.read_bytes(), b'old good model')
             self.assertFalse(temporary.exists())
 
-    def test_download_survives_parent_destruction(self):
-        import time
-        from qgis.PyQt import sip
+    def test_missing_weights_download_automatically_before_the_run(self):
+        seg = module('core.registry').SEGFORMER3D_URBANFILTERING
         manager_module = module('utils.model_manager')
-        dialogs = module('dialogs.model_download_dialog')
-        def download(*args, **kw):
-            time.sleep(.1)
-            return False, 'simulated failure'
-        with patch.object(manager_module.ModelManager, 'download_model', side_effect=download), \
-             patch.object(manager_module.ModelManager, 'set_model_url'):
-            dialog = dialogs.ModelDownloadDialog(spec)
-            dialog._start_download()
-            worker = dialog.worker
-            sip.delete(dialog)
-            self.assertTrue(worker.wait(5000))
-            app.processEvents()
+        calls = []
+
+        class Backend:
+            def load(self, device): calls.append(('load', device))
+            def predict(self, xyz, cb=None, cancel=None):
+                return np.ones(len(xyz), dtype=np.int32)
+            def unload(self): pass
+
+        def ensure(self, progress=None, cancel=None):
+            calls.append('download')
+            progress(50, 100)
+            return True, ''
+
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'in.las'
+            h = laspy.LasHeader(point_format=6, version='1.4')
+            d = laspy.LasData(h); d.points = laspy.ScaleAwarePointRecord.zeros(20, header=h)
+            d.X = np.arange(20) * 100; d.write(source)
+            task = tasks.ClassificationTask([source], Path(folder) / 'out', '_c', seg.id, 'cpu', 'classification')
+            with patch.object(tasks, '_get_torch'), \
+                 patch.object(tasks, 'create_backend', return_value=Backend()), \
+                 patch.object(manager_module.ModelManager, 'is_model_available', return_value=False), \
+                 patch.object(manager_module.ModelManager, 'ensure_available', ensure):
+                self.assertTrue(task.run(), task.error_message)
+            self.assertEqual(calls[:2], ['download', ('load', 'cpu')])
+            self.assertEqual(len(task.output_files), 1)
+            self.assertEqual(task.status_text, '')
+
+    def test_weights_download_cancel_and_offline_message(self):
+        seg = module('core.registry').SEGFORMER3D_URBANFILTERING
+        manager_module = module('utils.model_manager')
+        manager = manager_module.ModelManager(seg)
+        with patch.object(manager_module.ModelManager, 'is_model_available', return_value=False), \
+             patch.object(manager_module.ModelManager, 'download_model', return_value=(False, 'Download cancelled.')):
+            with self.assertRaises(InterruptedError):
+                manager.ensure_available(None, lambda: True)
+        with patch.object(manager_module.ModelManager, 'is_model_available', return_value=False), \
+             patch.object(manager_module.ModelManager, 'download_model', return_value=(False, 'Network error: offline')):
+            ok, msg = manager.ensure_available(None, lambda: False)
+        self.assertFalse(ok)
+        self.assertIn('Network error: offline', msg)
+        self.assertIn('import the weights file', msg)
+        # Downloaded fine but could not be moved into place: folder advice.
+        with patch.object(manager_module.ModelManager, 'is_model_available', return_value=False), \
+             patch.object(manager_module.ModelManager, 'download_model',
+                          return_value=(False, 'Cannot replace the model file; the previous weights were retained: x')):
+            ok, msg = manager.ensure_available(None, lambda: False)
+        self.assertFalse(ok)
+        self.assertIn('writable', msg)
+        self.assertNotIn('internet', msg)
+        with patch.object(manager_module.ModelManager, 'is_model_available', return_value=True), \
+             patch.object(manager_module.ModelManager, 'download_model') as download:
+            self.assertEqual(manager.ensure_available(), (True, ''))
+            download.assert_not_called()
+
+    def test_installer_subprocesses_do_not_inherit_qgis_python_identity(self):
+        # QGIS 4's launcher sets PYTHONEXECUTABLE; leaked into `python -m
+        # venv` and uv it sent every package into the portable Python.
+        leaked = {'PYTHONEXECUTABLE': r'C:\QGIS\bin\python3.exe', 'PYTHONHOME': r'C:\QGIS\apps\Python312',
+                  'PYTHONPATH': r'C:\QGIS\apps\qgis\python', '__PYVENV_LAUNCHER__': 'x', 'PYTHONSTARTUP': 'y'}
+        with patch.dict(os.environ, leaked):
+            for env in (v._get_clean_env_for_venv(), pm._get_clean_env()):
+                for name in leaked:
+                    self.assertNotIn(name, env)
+
+    def test_setup_guard_only_blocks_the_plugins_own_torch(self):
+        worker = module('workers.deps_install_worker')
+        with tempfile.TemporaryDirectory() as cache:
+            own = types.SimpleNamespace(__file__=str(Path(cache) / 'venv' / 'torch' / '__init__.py'))
+            other = types.SimpleNamespace(__file__=str(Path(cache).parent / 'elsewhere' / 'torch' / '__init__.py'))
+            with patch.dict(sys.modules, {'torch': own}):
+                self.assertTrue(worker._plugin_torch_loaded(cache))
+            with patch.dict(sys.modules, {'torch': other}):
+                self.assertFalse(worker._plugin_torch_loaded(cache))
 
     def test_installer_commands_require_wheels_and_fail_without_fallback(self):
         commands = []

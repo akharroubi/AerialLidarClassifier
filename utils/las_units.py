@@ -300,10 +300,7 @@ def _epsg_crs_unit_factor(code: int) -> Optional[float]:
         if not crs.isValid() or crs.isGeographic():
             return None
         unit = crs.mapUnits()
-        try:
-            metres = Qgis.DistanceUnit.Meters
-        except AttributeError:
-            metres = QgsUnitTypes.DistanceMeters
+        metres = Qgis.DistanceUnit.Meters  # QGIS 3.30+
         factor = float(QgsUnitTypes.fromUnitToUnitFactor(unit, metres))
         return factor if factor > 0 else None
     except Exception:

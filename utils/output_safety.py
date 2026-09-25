@@ -164,6 +164,18 @@ def add_label_metadata(header, spec, field):
             "field": field, "encoding": "ASPRS" if field == "classification" else "raw_model_ids",
             "classes": {str(k): {"name": v.name, "asprs": v.asprs_code}
                         for k, v in spec.class_mapping.items()}}
+    # Re-classifying a file replaces the record of the same field instead
+    # of stacking stale ones; records of other fields stay.
+    for index in range(len(header.vlrs) - 1, -1, -1):
+        vlr = header.vlrs[index]
+        if getattr(vlr, "user_id", "") != "AerialLiDAR" or vlr.record_id != 1:
+            continue
+        try:
+            previous = json.loads(bytes(vlr.record_data).decode("utf-8"))
+        except Exception:
+            previous = {}
+        if previous.get("field", field) == field:
+            del header.vlrs[index]
     header.vlrs.append(laspy.VLR(user_id="AerialLiDAR", record_id=1,
                                description="Classification provenance",
                                record_data=json.dumps(data, ensure_ascii=True).encode("utf-8")))

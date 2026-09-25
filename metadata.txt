@@ -1,7 +1,7 @@
 [general]
 name=Aerial LiDAR Classifier
 qgisMinimumVersion=3.34
-qgisMaximumVersion=3.99
+qgisMaximumVersion=4.99
 description=Deep-learning semantic segmentation of aerial LiDAR point clouds with LitePT-L (default on NVIDIA GPUs) or the 3D SegFormer (GPU or CPU).
 version=1.1.0
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
@@ -9,17 +9,19 @@ email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
 
 about=Classifies aerial LiDAR point clouds (LAS / LAZ / COPC) into
-    Ground, Vegetation, Building, Power lines and Poles (standard
-    ASPRS codes) with two deep-learning models: LitePT-L, a point
-    transformer trained on DALES at 10 cm (default on NVIDIA GPUs),
-    and the UrbanFiltering 3D SegFormer from NRCan's TreeAIBox (GPU
-    or CPU). Feet are converted automatically from the file's CRS.
-    Spatial tiling and streaming handle files larger than RAM. A
-    one-click installer sets up an isolated Python venv on first use,
-    while inference uses the QGIS Python process. Model weights are CC BY-NC
-    4.0; documentation, the GPU driver table and the CLI / Processing
-    usage are on the homepage:
+    ground, vegetation, buildings, power lines and poles, written as
+    standard ASPRS codes. Two deep-learning models: LitePT-L, a point
+    transformer trained on DALES at 10 cm (default on NVIDIA GPUs), and
+    the UrbanFiltering 3D SegFormer from NRCan's TreeAIBox (GPU or CPU).
+    External dependencies: PyTorch, laspy, lazrs, timm, scipy and, on
+    NVIDIA GPUs, spconv. A one-click setup installs them into a separate
+    per-user folder on first use (no admin rights, nothing to
+    configure), and the model weights download automatically. Files in
+    feet are converted from their CRS; tiling and streaming handle files
+    larger than RAM. Model weights are CC BY-NC 4.0. Documentation:
     https://github.com/akharroubi/AerialLidarClassifier
+    The plugin author teaches a live cohort, LiDAR Point Clouds
+    Processing in QGIS: https://maven.com/geomatics/qgis3d?utm_source=plugins.qgis.org&utm_medium=listing&utm_campaign=qgis3d
 
 tracker=https://github.com/akharroubi/AerialLidarClassifier/issues
 repository=https://github.com/akharroubi/AerialLidarClassifier
@@ -37,31 +39,34 @@ server=False
 
 changelog=
     1.1.0
-        - Release hardening: atomic output, raw extra-byte and EVLR
-          preservation, source collision protection, raw custom labels,
-          strict corrupt-input rejection and headless Processing entry.
-        - Secure wheel-only setup; no TLS downgrade or silent CPU
-          fallback. Cached weights verified before loading.
-        - New default model on NVIDIA GPUs: LitePT-L, a point
-          transformer (85.8 M parameters) trained on the DALES aerial
-          LiDAR dataset at 10 cm. Eight classes: ground, vegetation,
-          cars, trucks, power lines, fences, poles, buildings. Custom
-          four-tile DALES test: mIoU 0.824, overall accuracy 97.9 %.
-          The 3D SegFormer stays available and remains the model on
-          CPU and Apple Silicon.
-        - Model selector in the dock and a MODEL parameter in the
-          Processing algorithm; per-model download or import of a
-          weights file (offline machines); a model that cannot run on
-          the current device says so instead of failing at run time.
-        - The installer adds scipy and, on CUDA installs, spconv
-          (LitePT-L's sparse convolutions). Existing environments are
-          rebuilt once. cu126 is now preferred over cu128 on non-
-          Blackwell GPUs because spconv publishes no cu128 wheel yet.
-        - Validated on Windows QGIS 3.44 LTR. QGIS 4 is not declared
-          compatible without a separate Qt6/runtime validation.
-        - Tile size and buffer are in metres (the plugin converts).
-        - Fix: torchvision is resolved under a pin of the installed
-          torch, so it can no longer replace torch during the install.
+        - New default model on NVIDIA GPUs: LitePT-L, a point transformer
+          trained on DALES at 10 cm (8 classes, test mIoU 0.824). The 3D
+          SegFormer stays available and is the model on CPU and Apple
+          Silicon. Model selector in the dock, MODEL parameter in
+          Processing.
+        - Model weights download automatically, during setup or on the
+          first run of a model, and are SHA-256 verified before every use.
+        - QGIS 4 support, tested on QGIS 4.2 (Qt 6) and 3.44 LTR,
+          including the first-run setup. (GitHub #6)
+        - Redesigned dock: model status with a one-click switch when a
+          model cannot run on the computer, a hint saying what is missing
+          before Run, and the elapsed time with an Open folder button
+          when a run ends.
+        - Safer output: results are written atomically, a batch can no
+          longer overwrite one of its own inputs, every attribute, VLR and
+          EVLR is kept, truncated files are refused instead of producing
+          a shorter output, and a custom label field keeps the raw model
+          classes (cars, trucks and fences stay distinct).
+        - Installer: prebuilt packages only, certificate checks always
+          on, no silent switch from GPU to CPU (a failed GPU setup offers
+          a one-click CPU install), and Plugins > Aerial LiDAR Classifier
+          > Repair dependencies. Existing environments are rebuilt once.
+        - Units: vertical units from GeoTIFF vertical CRS codes;
+          geographic (degree) files are refused even with a units
+          override.
+        - The algorithm is available from qgis_process (command line).
+        - Optional link to the author's live LiDAR course in the panel,
+          About and the plugin menu; it can be hidden.
     1.0.3
         - Fix: the plugin could not open on QGIS builds with Python
           3.9 to 3.11 (Ubuntu 22.04, Debian 12, macOS 3.34):

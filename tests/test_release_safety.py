@@ -91,6 +91,31 @@ class ReleaseSafety(unittest.TestCase):
             if source in (3, 5):
                 np.testing.assert_array_equal(converted.red, d.red)
 
+    def test_scoped_enum_prefers_scoped_then_legacy(self):
+        compat = load_plugin_module('utils.compat')
+
+        class Scoped:
+            class Flag:
+                CanCancel = 1
+            CanCancel = 2
+
+        class Legacy:
+            CanCancel = 3
+
+        self.assertEqual(compat.scoped_enum(Scoped, 'Flag', 'CanCancel'), 1)
+        self.assertEqual(compat.scoped_enum(Legacy, 'Flag', 'CanCancel'), 3)
+
+    def test_provenance_record_replaced_per_field(self):
+        import json
+        spec = registry.LITEPT_L_DALES
+        h = laspy.LasHeader(point_format=6, version='1.4')
+        safety.add_label_metadata(h, spec, 'classification')
+        safety.add_label_metadata(h, spec, 'ai_label')
+        safety.add_label_metadata(h, spec, 'classification')  # re-run
+        records = [json.loads(bytes(v.record_data).decode()) for v in h.vlrs
+                   if v.user_id == 'AerialLiDAR']
+        self.assertEqual(sorted(r['field'] for r in records), ['ai_label', 'classification'])
+
     def test_corrupted_cached_weights_rejected_before_deserialization(self):
         with tempfile.TemporaryDirectory() as folder:
             p = Path(folder) / 'weights.pth'

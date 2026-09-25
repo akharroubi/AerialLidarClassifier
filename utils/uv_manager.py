@@ -20,6 +20,8 @@ from qgis.core import Qgis, QgsBlockingNetworkRequest, QgsMessageLog
 from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtNetwork import QNetworkRequest
 
+from .compat import scoped_enum
+
 CACHE_DIR = (
     os.environ.get("AERIAL_LIDAR_CLASSIFIER_CACHE_DIR")
     or os.environ.get("AERIAL_LIDAR_CLASSIFIER_VENV_DIR")
@@ -134,7 +136,7 @@ def download_uv(progress_callback=None, cancel_check=None):
 
         err = request.get(QNetworkRequest(qurl))
 
-        if err != QgsBlockingNetworkRequest.NoError:
+        if err != scoped_enum(QgsBlockingNetworkRequest, "ErrorCode", "NoError"):
             error_msg = request.errorMessage()
             if "404" in error_msg or "Not Found" in error_msg:
                 error_msg = (
@@ -265,8 +267,9 @@ def verify_uv():
 
     try:
         env = os.environ.copy()
-        env.pop("PYTHONPATH", None)
-        env.pop("PYTHONHOME", None)
+        for var in ("PYTHONPATH", "PYTHONHOME", "PYTHONEXECUTABLE",
+                    "__PYVENV_LAUNCHER__", "PYTHONSTARTUP"):
+            env.pop(var, None)
 
         kwargs = {}
         if sys.platform == "win32":
