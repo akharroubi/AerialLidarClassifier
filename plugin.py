@@ -77,6 +77,11 @@ class AerialLidarClassifierPlugin:
             tooltip=tr("Release cached GPU memory (CUDA only)"),
         )
         self.iface.addPluginToMenu(MENU_LABEL, clear_gpu)
+        repair = self._add_action(
+            QIcon(":/images/themes/default/mActionRefresh.svg"),
+            tr("Repair dependencies"), self._show_deps_dock,
+        )
+        self.iface.addPluginToMenu(MENU_LABEL, repair)
 
         help_action = self._add_action(
             QIcon(":/images/themes/default/mActionHelpContents.svg"),
@@ -84,6 +89,12 @@ class AerialLidarClassifierPlugin:
             self._open_docs,
         )
         self.iface.addPluginToMenu(MENU_LABEL, help_action)
+        from .widgets.cohort_card import open_cohort
+        training = self._add_action(
+            QIcon(":/images/themes/default/mActionHelpContents.svg"),
+            tr("Live LiDAR course with the plugin author"), lambda: open_cohort("menu"),
+        )
+        self.iface.addPluginToMenu(MENU_LABEL, training)
 
         about_action = self._add_action(
             QIcon(":/images/themes/default/mActionPropertiesWidget.svg"),
@@ -92,22 +103,24 @@ class AerialLidarClassifierPlugin:
         )
         self.iface.addPluginToMenu(MENU_LABEL, about_action)
 
-        # Processing provider
-        try:
-            from .processing.provider import AerialLidarProvider
-            self.provider = AerialLidarProvider()
-            QgsApplication.processingRegistry().addProvider(self.provider)
-        except Exception as exc:
-            log_warning(f"Could not register Processing provider: {exc}")
-            self.provider = None
+        self.initProcessing()
+
+    def initProcessing(self):  # noqa: N802 - QGIS headless entry point
+        if self.provider is not None:
+            return
+        from .processing.provider import AerialLidarProvider
+        provider = AerialLidarProvider()
+        if not QgsApplication.processingRegistry().addProvider(provider):
+            raise RuntimeError("Could not register Aerial LiDAR Processing provider.")
+        self.provider = provider
 
     def unload(self):
         # Stop any in-flight install worker
         if self._deps_worker and self._deps_worker.isRunning():
             try:
                 self._deps_worker.cancel()
-                self._deps_worker.terminate()
-                self._deps_worker.wait(5000)
+                self._deps_worker.progress.disconnect(self._on_install_progress)
+                self._deps_worker.completed.disconnect(self._on_install_finished)
             except Exception:
                 pass
         self._deps_worker = None
@@ -259,9 +272,11 @@ class AerialLidarClassifierPlugin:
         from .workers.deps_install_worker import DepsInstallWorker
 
         has_gpu, _ = detect_nvidia_gpu()
-        self._deps_worker = DepsInstallWorker(cuda_enabled=has_gpu)
+        from .utils.thread_lifetime import retain_thread
+        self._deps_worker = retain_thread(DepsInstallWorker(
+            cuda_enabled=has_gpu and not self._deps_dock.cpu_only.isChecked()))
         self._deps_worker.progress.connect(self._on_install_progress)
-        self._deps_worker.finished.connect(self._on_install_finished)
+        self._deps_worker.completed.connect(self._on_install_finished)
         if self._deps_dock:
             self._deps_dock.show_progress_ui()
         self._deps_worker.start()

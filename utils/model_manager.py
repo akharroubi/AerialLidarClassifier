@@ -11,6 +11,7 @@ already has (an offline machine, or a release that is not published yet).
 
 import hashlib
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Callable, Iterable, Optional
 
@@ -25,6 +26,7 @@ from qgis.PyQt.QtNetwork import QNetworkRequest
 from ..config import SETTINGS_PREFIX
 from ..core.registry import ModelSpec, get_model
 from .logger import log_error, log_info, log_warning
+from .weights import is_verified
 
 
 _CHUNK = 1024 * 256
@@ -71,7 +73,7 @@ class ModelManager:
         if not path.exists():
             # v1.0 kept the single model directly under models/; adopt it.
             legacy = self.models_root() / self.spec.weights_filename
-            if legacy.exists():
+            if legacy.exists() and is_verified(legacy, self.spec.weights_sha256):
                 try:
                     legacy.replace(path)
                     log_info(f"Moved {legacy.name} into models/{self.spec.id}/")
@@ -85,7 +87,7 @@ class ModelManager:
         return self.spec.config_path
 
     def is_model_available(self) -> bool:
-        return self.get_model_path().exists() and self.get_config_path().exists()
+        return self.get_config_path().exists() and is_verified(self.get_model_path(), self.spec.weights_sha256)
 
     def get_model_size_mb(self) -> float:
         path = self.get_model_path()
@@ -133,6 +135,8 @@ class ModelManager:
     def _verify_and_promote(self, tmp_path: Path, origin: str):
         """SHA-256 check then atomic rename onto the final path."""
         expected = (self.spec.weights_sha256 or "").lower().strip()
+        if not expected:
+            return False, "No released SHA-256 configured for this model."
         if expected:
             got = _sha256_of(tmp_path)
             if got != expected:
@@ -147,9 +151,11 @@ class ModelManager:
                 )
             log_info(f"{self.spec.short_name}: SHA-256 verified.")
         final_path = self.get_model_path()
-        if final_path.exists():
-            final_path.unlink()
-        tmp_path.replace(final_path)
+        try:
+            tmp_path.replace(final_path)
+        except OSError as exc:
+            tmp_path.unlink(missing_ok=True)
+            return False, f"Cannot replace the model file; the previous weights were retained: {exc}"
         size_mb = final_path.stat().st_size / (1024 * 1024)
         log_info(f"{self.spec.short_name}: weights ready ({size_mb:.1f} MB) from {origin}")
         return True, ""
@@ -170,7 +176,10 @@ class ModelManager:
             return False, "No model URL configured."
 
         final_path = self.get_model_path()
-        tmp_path = final_path.with_suffix(final_path.suffix + ".part")
+        fd, name = tempfile.mkstemp(prefix="weights-", suffix=".part", dir=str(final_path.parent))
+        import os
+        os.close(fd)
+        tmp_path = Path(name)
         if tmp_path.exists():
             try:
                 tmp_path.unlink()
@@ -245,10 +254,14 @@ class ModelManager:
         if not source.is_file():
             return False, f"File not found: {source}"
         final_path = self.get_model_path()
-        tmp_path = final_path.with_suffix(final_path.suffix + ".part")
+        fd, name = tempfile.mkstemp(prefix="weights-", suffix=".part", dir=str(final_path.parent))
+        import os
+        os.close(fd)
+        tmp_path = Path(name)
         try:
             shutil.copyfile(str(source), str(tmp_path))
         except OSError as exc:
+            tmp_path.unlink(missing_ok=True)
             return False, f"Could not copy the file: {exc}"
         return self._verify_and_promote(tmp_path, source.name)
 

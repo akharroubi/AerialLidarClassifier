@@ -322,7 +322,7 @@ class ClassifierDockWidget(QDockWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setMinimumHeight(470)
+        scroll.setMinimumHeight(350)
 
         body = QWidget()
         body_layout = QVBoxLayout(body)
@@ -839,6 +839,9 @@ class ClassifierDockWidget(QDockWidget):
         btn_row.addWidget(self.run_btn)
 
         lay.addLayout(btn_row)
+        from ..widgets.cohort_card import CohortCard
+        self.cohort_card = CohortCard(parent=bar)
+        lay.addWidget(self.cohort_card)
         return bar
 
     # ------------------------------------------------------------------
@@ -936,12 +939,16 @@ class ClassifierDockWidget(QDockWidget):
             )
 
         self.model_gate_ok = spec.supports_device(device)
+        dependency_message = ""
+        if self.model_gate_ok and spec.family == "litept":
+            from ..utils.backend_readiness import litept_dependency_status
+            self.model_gate_ok, dependency_message = litept_dependency_status()
         if self.model_gate_ok:
             self.model_gate_message = ""
             self.model_label.setStyleSheet("color: palette(mid);")
         else:
-            status += " - needs an NVIDIA GPU"
-            self.model_gate_message = (
+            status += " - dependencies unavailable" if dependency_message else " - needs an NVIDIA GPU"
+            self.model_gate_message = dependency_message or (
                 f"{spec.display_name} runs on NVIDIA CUDA GPUs only. Tick "
                 "'Use GPU' in Advanced parameters, or choose SegFormer 3D "
                 "which runs on CPU."

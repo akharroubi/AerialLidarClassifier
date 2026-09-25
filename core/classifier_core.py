@@ -201,11 +201,10 @@ def load_segformer(config_file, model_path, device):
     # Weights are always read onto the CPU first, then the whole model
     # moves to the requested device: the one code path that works for
     # CUDA, Apple MPS and CPU alike.
-    state_dict = torch.load(
-        model_path,
-        map_location=torch.device("cpu"),
-        weights_only=True,
-    )
+    from ..utils.weights import verified_weights
+    with verified_weights(model_path, "segformer3d_urbanfiltering") as weights:
+        state_dict = torch.load(weights, map_location=torch.device("cpu"), weights_only=True)
+
 
     model.max_accu = state_dict.get('max_accu', 0.0)
     if 'max_accu' in state_dict:

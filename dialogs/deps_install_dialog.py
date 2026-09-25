@@ -12,6 +12,7 @@ import sys
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
+    QCheckBox,
     QFrame,
     QGroupBox,
     QHBoxLayout,
@@ -91,6 +92,8 @@ class DepsInstallDockWidget(QDockWidget):
         gpu_layout.addWidget(self.gpu_label)
 
         layout.addWidget(self.gpu_group)
+        self.cpu_only = QCheckBox("Install CPU only (SegFormer; LitePT requires NVIDIA CUDA)")
+        layout.addWidget(self.cpu_only)
 
         # Action buttons
         button_layout = QHBoxLayout()
@@ -213,13 +216,7 @@ class DepsInstallDockWidget(QDockWidget):
                     "Could not detect GPU.\nCPU mode will be used.")
 
     def _on_reinstall_clicked(self):
-        """Handle reinstall button click by removing existing venv first."""
-        try:
-            from ..utils.venv_manager import remove_venv
-
-            remove_venv()
-        except Exception:
-            pass
+        """Cleanup runs in the background worker, never on the GUI thread."""
         self.reinstall_button.hide()
         self.install_requested.emit()
 

@@ -116,7 +116,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "<h4>ASPRS compliance</h4>"
             "<p>By default the classification is written to the standard "
             "LAS <code>classification</code> dimension. The file is "
-            "automatically promoted to <b>LAS 1.4 / point format 6</b> "
+            "automatically promoted to <b>LAS 1.4 / a compatible point format</b> "
             "when an assigned code exceeds the 5-bit legacy limit of point "
             "formats 0-5, so any ASPRS code 0-255 is encoded losslessly.</p>"
             "<h4>Parameters</h4>"
@@ -132,7 +132,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "extension. Default <code>_classified</code>.</li>"
             "<li><b>Classification field</b> - the dimension to write "
             "predictions into. Default <code>classification</code> "
-            "(ASPRS standard). Use any other name to add an extra-byte "
+            "(ASPRS standard). Use a new name to store raw model IDs in an extra-byte "
             "field instead.</li>"
             "<li><b>Compute device</b> - <i>Auto</i> uses CUDA when "
             "PyTorch reports it, then Apple MPS, otherwise the CPU. "
@@ -152,10 +152,10 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "an N x N tile grid with a buffer halo, runs inference per "
             "tile and merges core predictions back. Recommended for files "
             "with many millions of points.</li>"
-            "<li><b>Tile size in CRS units</b> - <code>0</code> means "
+            "<li><b>Tile size in metres</b> - <code>0</code> means "
             "auto-size to ~10 M points per tile; positive value forces "
             "a square tile side.</li>"
-            "<li><b>Tile buffer in CRS units</b> - context halo around "
+            "<li><b>Tile buffer in metres</b> - context halo around "
             "each tile (50 m default). Predictions inside the buffer "
             "are discarded so points near tile edges still benefit from "
             "context.</li>"
@@ -163,7 +163,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "Reads the input chunk-by-chunk via <code>laspy</code>, stores "
             "per-tile points in disk-backed sidecars, runs per-tile "
             "inference one tile at a time and streams the output writer. "
-            "Memory footprint is roughly 4 bytes/point + one tile + one "
+            "Predictions and coverage use about 2 bytes/point during inference, plus tile/model workspace and one "
             "chunk. Requires tiling to be enabled.</li>"
             "<li><b>Input units</b> - the model works in metres. By "
             "default the unit is read from the file's CRS (WKT or GeoTIFF "
@@ -174,7 +174,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "<h4>Notes</h4>"
             "<ul>"
             "<li>The class mapping is internal and not user-editable - the "
-            "output is always ASPRS-compliant by construction. The five "
+            "standard classification field uses ASPRS codes. Custom fields retain raw model IDs. The five "
             "primary classes map to their standard ASPRS codes; Vehicles "
             "and Fences map to <i>Unclassified</i> (ASPRS 1).</li>"
             "</ul>")
@@ -309,15 +309,11 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             input_path: Path,
             output_path: Path) -> None:
         """Raise if writing would overwrite the input file in place."""
+        from ..utils.output_safety import validate_output_paths
         try:
-            same = input_path.resolve() == output_path.resolve()
-        except Exception:
-            same = False
-        if same:
-            raise QgsProcessingException(self.tr(
-                "Refusing to overwrite the input file. Choose a different "
-                "output folder or filename suffix."
-            ))
+            validate_output_paths([input_path], [output_path])
+        except ValueError as exc:
+            raise QgsProcessingException(str(exc)) from exc
 
     # ------------------------------------------------------------------
     def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
@@ -442,6 +438,13 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             _write_las,
         )
 
+        from ..utils.output_safety import (validate_label_field, read_complete, checked_predictions,
+                                           label_values, assign_labels, add_label_metadata, add_extra_dim_preserving_raw)
+        with laspy.open(str(input_path)) as reader:
+            field_name = validate_label_field(reader.header.point_format, field_name, laspy)
+        output_path = _resolve_output_path(input_path, output_folder, suffix)
+        self._guard_input_output_collision(input_path, output_path)
+
         # The class mapping is internal-only: it tells the inference
         # post-processor how to translate the model's class ids into the
         # standard ASPRS codes.
@@ -451,12 +454,12 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             spec, manager.get_model_path(), log=feedback.pushWarning,
         )
         feedback.pushInfo(self.tr(f"Model: {spec.display_name}"))
-        try:
-            backend.load(device)
-        except Exception as exc:
-            raise QgsProcessingException(self.tr(str(exc)))
-
+        backend_loaded = False
         def predict_fn(xyz_m, progress_cb):
+            nonlocal backend_loaded
+            if not backend_loaded:
+                backend.load(device)
+                backend_loaded = True
             return backend.predict(xyz_m, progress_cb, feedback.isCanceled)
 
         # ---- Streaming dispatch (writes the output directly) ----------------
@@ -490,6 +493,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                     device=device,
                     class_mapping=class_mapping,
                     field_description=f"AI classification ({spec.display_name})",
+                    model_spec=spec,
                     laspy_module=laspy,
                     progress_callback=stream_progress,
                     cancel_callback=feedback.isCanceled,
@@ -521,7 +525,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
 
         feedback.pushInfo(self.tr(f"Loading {input_path.name}..."))
         with laspy.open(str(input_path), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
-            las = reader.read()
+            las = read_complete(reader)
 
         if len(las.x) == 0:
             raise QgsProcessingException(
@@ -576,21 +580,10 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 self.tr("Classifier returned no results.")
             )
 
-        asprs = np.zeros_like(preds, dtype=np.int32)
-        for mid, info in class_mapping.items():
-            asprs[preds == mid] = info.asprs_code
+        preds = checked_predictions(preds, len(las.points))
+        is_asprs_field = field_name == ASPRS_CLASSIFICATION_FIELD
+        asprs = label_values(preds, class_mapping, raw_ids=not is_asprs_field)
 
-        mapped_ids = list(class_mapping.keys())
-        unmapped_mask = ~np.isin(preds, mapped_ids)
-        unmapped_count = int(unmapped_mask.sum())
-        if unmapped_count:
-            missing_ids = sorted(np.unique(preds[unmapped_mask]).tolist())
-            feedback.pushWarning(self.tr(
-                f"{unmapped_count:,} prediction(s) had model IDs not in "
-                f"the class mapping (IDs {missing_ids}); set to ASPRS 0."
-            ))
-
-        is_asprs_field = field_name.lower() == ASPRS_CLASSIFICATION_FIELD
         if is_asprs_field:
             try:
                 max_code = int(asprs.max())
@@ -607,13 +600,13 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             )
         else:
             if field_name in las.point_format.dimension_names:
-                setattr(las, field_name, asprs)
+                assign_labels(las, field_name, asprs)
             else:
-                las.add_extra_dim(laspy.ExtraBytesParams(
+                add_extra_dim_preserving_raw(las, laspy.ExtraBytesParams(
                     name=field_name, type="int32",
                     description=f"AI classification ({spec.display_name})"[:32],
                 ))
-                setattr(las, field_name, asprs)
+                assign_labels(las, field_name, asprs)
             feedback.pushInfo(
                 self.tr(
                     f"Writing to extra-byte field '{field_name}' "
@@ -621,6 +614,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 )
             )
 
+        add_label_metadata(las.header, spec, field_name)
         _strip_copc_vlrs(las)
 
         output_path = _resolve_output_path(input_path, output_folder, suffix)

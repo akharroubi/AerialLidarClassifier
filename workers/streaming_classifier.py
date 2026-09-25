@@ -24,14 +24,13 @@ Algorithm (4 passes):
         classifier, keep predictions only for points whose XY falls
         in the tile *core* (not the buffer), and write those
         predictions into a global ASPRS-code array indexed by the
-        point's original position in the input file. The array is
-        ``int32`` (not ``uint8``) so codes > 255 are representable
-        during arithmetic; we cast at write time.
+        point's original position in the input file. The array is uint8; a boolean coverage array detects missing points.
+        Custom fields receive raw model IDs.
 
   4. Streaming output write:
         Open the input again as a reader and the output via
         ``laspy.open(..., mode='w')`` with a fully resolved output
-        header (point format upgraded to LAS 1.4 / PRF 6 when needed,
+        header (point format upgraded to LAS 1.4 / a compatible point format when needed,
         custom extra-byte field added when requested, COPC VLRs
         stripped). For each input chunk we construct a fresh point
         record matching the *output* schema, copy every common
@@ -43,10 +42,10 @@ This implementation supports:
 
   * ASPRS-standard ``classification`` field **or** a custom
     extra-byte field (declared on the output header before write).
-  * Automatic point-format upgrade to LAS 1.4 / PRF 6 when an ASPRS
+  * Automatic point-format upgrade to LAS 1.4 / a compatible point format when an ASPRS
     code exceeds the legacy 5-bit limit of PRF 0-5.
 
-Memory footprint is roughly *(global predictions = 4 bytes / point) +
+Memory footprint is roughly *(predictions + inference coverage = 2 bytes / point) +
 (largest single tile in RAM) + (one chunk in the writer)*.
 """
 
@@ -65,6 +64,9 @@ from ..core.tiling import compute_tile_grid
 from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_from_header
 from ..utils.logger import log_info, log_warning
+from ..utils.output_safety import (atomic_output_path, validate_output_paths, validate_label_field, validate_waveform_storage,
+                                   checked_predictions, label_values, assign_labels, add_label_metadata,
+                                   upgrade_header_preserving_fields, convert_points_preserving_fields)
 
 
 # Chunk size used both for partitioning and for the output writer.
@@ -72,148 +74,22 @@ DEFAULT_CHUNK_SIZE = 5_000_000
 
 
 def _safe_chunk_iterator(reader, chunk_size, declared_n_points):
-    """Yield successive ``ScaleAwarePointRecord`` chunks from ``reader``.
-
-    This used to wrap ``laspy.LasReader.chunk_iterator`` but that
-    iterator fails with ``ValueError: buffer size must be a multiple
-    of element size`` at the very last chunk of LAS files where the
-    on-disk byte length is not exactly ``header.point_count *
-    point_size``: laspy asks numpy to interpret the final read as
-    ``chunk_size`` points, but the underlying read returns fewer
-    bytes than that, so ``np.frombuffer`` rejects the buffer. In
-    v1.0.1 we caught that error and silently dropped the trailing
-    partial chunk so the rest of the pipeline could continue. The
-    cost was that the streaming output had slightly fewer points
-    than the input - a silent data loss the plugin must not have.
-
-    The fix used here:
-      1. Iterate via ``LasReader.read_points(n)`` directly. The
-         ``read_points`` API decides for itself how many points are
-         actually available, so we never ask for more than the file
-         can give and the alignment-mismatch path simply does not
-         trigger on well-formed files.
-      2. If ``read_points`` still fails at the tail (genuinely
-         malformed file or a laspy edge case), drop down to the
-         lowest-level ``point_source.source`` byte stream, read what
-         is left, trim it to the largest whole-point-record-aligned
-         buffer, and decode it via ``PackedPointRecord.from_buffer``.
-         This recovers every byte-aligned point still present on
-         disk. Only a final truly partial record (not a whole point)
-         can be missed at this stage - i.e. the file is corrupt at
-         that byte and there is nothing meaningful to read there.
-      3. If even the raw-byte path fails or yields zero points, the
-         exception is re-raised with a clear message so the user
-         knows the file is corrupted and can re-export it.
-    """
+    """Require complete decoded records and exactly the declared point count."""
+    if chunk_size <= 0:
+        raise ValueError("Chunk size must be positive.")
     seen = 0
-    target = declared_n_points or 0
-    while target == 0 or seen < target:
-        n_remaining = (target - seen) if target else chunk_size
-        n_this = min(chunk_size, n_remaining) if n_remaining > 0 else chunk_size
+    target = int(declared_n_points)
+    while seen < target:
+        requested = min(chunk_size, target - seen)
         try:
-            record = reader.read_points(n_this)
-        except ValueError as exc:
-            msg = str(exc).lower()
-            looks_like_partial_eof = (
-                "buffer size" in msg
-                and "multiple of element" in msg
-            )
-            if not looks_like_partial_eof:
-                raise
-            # Tail-recovery: read whatever raw bytes are left and
-            # decode the largest aligned prefix as a real chunk.
-            recovered = _recover_partial_eof_chunk(reader, seen, target, exc)
-            if recovered is not None and len(recovered) > 0:
-                seen += len(recovered)
-                yield recovered
-            return
-        n = 0
-        try:
-            n = len(record)
-        except Exception:
-            try:
-                n = len(record.x)
-            except Exception:
-                n = 0
-        if n == 0:
-            # Clean EOF (file shorter than header advertised).
-            return
-        seen += n
+            record = reader.read_points(requested)
+        except Exception as exc:
+            raise ValueError(f"Cannot decode LAS/LAZ at point {seen:,}/{target:,}; re-export the source. {exc}") from exc
+        if len(record) != requested:
+            raise ValueError(f"Truncated LAS/LAZ: expected {target:,} points, read {seen + len(record):,}.")
+        seen += len(record)
         yield record
 
-
-def _recover_partial_eof_chunk(reader, seen, declared_n_points, original_exc):
-    """Salvage the trailing partial chunk after a laspy alignment error.
-
-    Reads raw bytes from the underlying source, trims to the largest
-    whole-point-record-aligned slice, and decodes that slice into a
-    proper ``ScaleAwarePointRecord``. Returns ``None`` if no bytes
-    could be recovered (in which case the caller re-raises with
-    context, because the file is genuinely truncated).
-    """
-    try:
-        from laspy.point.record import (
-            PackedPointRecord, ScaleAwarePointRecord
-        )
-        point_format = reader.header.point_format
-        point_size = point_format.size
-        # The underlying byte stream lives on point_source.source.
-        # We don't know how many bytes laspy already pulled into the
-        # numpy frombuffer that failed, but Python file-like objects
-        # only advance the cursor by whatever was actually returned
-        # to the caller, so the unread tail is still on disk after
-        # the chunk boundary. Read everything left.
-        stream = reader.point_source.source
-        raw = stream.read()
-        n_complete = len(raw) // point_size
-        if n_complete <= 0:
-            log_warning(
-                "LAS file truncated at point {:,}/{:,}: {}. "
-                "The trailing bytes do not contain a complete point "
-                "record and cannot be recovered. Re-export the file "
-                "from your source software."
-                .format(seen, declared_n_points, original_exc)
-            )
-            return None
-        trimmed = raw[: n_complete * point_size]
-        packed = PackedPointRecord.from_buffer(
-            trimmed, point_format, count=n_complete
-        )
-        record = ScaleAwarePointRecord(
-            packed.array,
-            point_format,
-            reader.header.scales,
-            reader.header.offsets,
-        )
-        n_total = seen + n_complete
-        if n_total < declared_n_points:
-            log_warning(
-                "Recovered {:,} extra points after the laspy alignment "
-                "stall, but the file is still {:,} point(s) short of "
-                "its header count ({:,}/{:,}). The plugin output will "
-                "match what was actually readable on disk."
-                .format(
-                    n_complete,
-                    declared_n_points - n_total,
-                    n_total,
-                    declared_n_points,
-                )
-            )
-        else:
-            log_info(
-                "Recovered the trailing {:,} points via raw-byte read "
-                "after the laspy alignment stall. Total points: {:,}."
-                .format(n_complete, n_total)
-            )
-        return record
-    except Exception as exc:
-        log_warning(
-            "Tail-chunk recovery failed at point {:,}/{:,}: {}. "
-            "Re-raising the original laspy error so the issue is "
-            "visible to the user."
-            .format(seen, declared_n_points, exc)
-        )
-        return None
 
 # ASPRS spec: PRF >= 6 (LAS 1.4) carries an 8-bit classification field
 # and a separate classification-flags byte. Earlier PRFs pack a 5-bit
@@ -262,6 +138,7 @@ def streaming_tiled_classify(
     warning_callback: Callable[[str], None] | None = None,
     units_override: str | None = None,
     field_description: str = "AI classification",
+    model_spec=None,
 ) -> Path | None:
     """Run a streaming tiled classification of ``input_path`` to ``output_path``.
 
@@ -271,9 +148,10 @@ def streaming_tiled_classify(
 
     Supports the standard ASPRS ``classification`` field, a custom
     extra-byte field, and automatic point-format upgrade to
-    LAS 1.4 / PRF 6 when needed.
+    LAS 1.4 / a compatible point format when needed.
     """
-    field = (field_name or ASPRS_CLASSIFICATION_FIELD).strip()
+    validate_output_paths([input_path], [output_path])
+    field = (field_name or ASPRS_CLASSIFICATION_FIELD).strip() or ASPRS_CLASSIFICATION_FIELD
     is_asprs_field = field.lower() == ASPRS_CLASSIFICATION_FIELD
 
     # Convenience wrappers: always log to QgsMessageLog, AND surface to
@@ -303,6 +181,8 @@ def streaming_tiled_classify(
     # ---- Pass 1: header scan ----------------------------------------------
     with laspy_module.open(str(input_path)) as reader:
         header = reader.header
+        validate_waveform_storage(header)
+        field = validate_label_field(header.point_format, field, laspy_module)
         n_points = int(header.point_count)
         input_pf_id = int(header.point_format.id)
         # The model works in metres; the tile grid and every point handed
@@ -359,6 +239,7 @@ def streaming_tiled_classify(
             tiles, tile_dirs, predictions, class_mapping,
             predict_fn, progress_callback, cancel_callback,
             emit_warning=emit_warning,
+            raw_ids=not is_asprs_field,
         ):
             return None
 
@@ -379,6 +260,7 @@ def streaming_tiled_classify(
             emit_info=emit_info,
             emit_warning=emit_warning,
             field_description=field_description,
+            model_spec=model_spec,
         ):
             return None
 
@@ -484,9 +366,11 @@ def _pass3_inference(
     tiles, tile_dirs, predictions, class_mapping,
     predict_fn, progress_callback, cancel_callback,
     emit_warning=log_warning,
+    raw_ids=False,
 ) -> bool:
     log_info("Streaming pass 3/4: running per-tile inference")
     n_tiles = len(tiles)
+    assigned = np.zeros(len(predictions), dtype=bool)
 
     for tile_idx, (tx0, ty0, tx1, ty1) in enumerate(tiles):
         if cancel_callback():
@@ -527,6 +411,7 @@ def _pass3_inference(
         tile_z = np.concatenate(zs)
         tile_idx_arr = np.concatenate(idxs)
         tile_pcd = np.column_stack([tile_x, tile_y, tile_z])
+        del xs, ys, zs, idxs
 
         def tile_progress(p, _i=tile_idx):
             overall = 40.0 + ((_i + p / 100.0) / n_tiles) * 50.0
@@ -538,10 +423,8 @@ def _pass3_inference(
             return False
 
         if tile_preds is None:
-            emit_warning(
-                f"Streaming tile {tile_idx + 1}/{n_tiles} "
-                "returned no predictions.")
-            continue
+            raise ValueError(f"Streaming tile {tile_idx + 1}/{n_tiles} returned no predictions.")
+        tile_preds = checked_predictions(tile_preds, len(tile_pcd))
 
         in_core = (
             (tile_x >= tx0) & (tile_x < tx1)
@@ -550,28 +433,11 @@ def _pass3_inference(
         core_preds = tile_preds[in_core]
         core_indices = tile_idx_arr[in_core]
 
-        asprs = np.zeros_like(core_preds, dtype=np.int32)
-        for mid, info in class_mapping.items():
-            asprs[core_preds == mid] = int(info.asprs_code)
+        predictions[core_indices] = label_values(core_preds, class_mapping, raw_ids=raw_ids)
+        assigned[core_indices] = True
 
-        mapped_ids = list(class_mapping.keys())
-        unmapped_mask = ~np.isin(core_preds, mapped_ids)
-        if unmapped_mask.any():
-            missing = sorted(np.unique(core_preds[unmapped_mask]).tolist())
-            emit_warning(
-                f"Tile {tile_idx + 1}/{n_tiles}: "
-                f"{int(unmapped_mask.sum()):,} prediction(s) had model IDs "
-                f"not in the class mapping (IDs {missing}); "
-                "set to ASPRS 0."
-            )
-
-        if asprs.size and int(asprs.max()) > 255:
-            raise RuntimeError(
-                "The class mapping produced an ASPRS code above 255 "
-                f"({int(asprs.max())}), which no LAS classification field "
-                "can hold. Fix the mapping."
-            )
-        predictions[core_indices] = asprs
+    if not assigned.all():
+        raise ValueError(f"{int((~assigned).sum()):,} points were not covered; no output published.")
 
     return True
 
@@ -600,47 +466,10 @@ def _build_output_header(
     _strip_copc_from_header(header)
 
     if needs_pf_upgrade:
-        # Use laspy.convert on an empty LasData to get a header upgraded
-        # to LAS 1.4 / PRF 6 with all CRS VLRs and other metadata
-        # preserved. We discard the (empty) point records and keep only
-        # the resulting header.
-        try:
-            stub = laspy_module.LasData(header=header)
-            upgraded = laspy_module.convert(
-                stub, point_format_id=ASPRS_PF6, file_version="1.4",
-            )
-            header = upgraded.header
-            log_info(
-                f"Streaming: output upgraded to PRF {header.point_format.id} "
-                f"/ LAS {header.version}"
-            )
-        except Exception as exc:
-            # Bubble up: pass 4 will inspect the actual point format and
-            # raise a clear RuntimeError describing what to do (disable
-            # streaming, change the mapping). Do not silently degrade.
-            log_warning(
-                f"Streaming: header upgrade to PRF 6 / LAS 1.4 failed ({exc})."
-            )
-
-    # Add the custom extra-byte dimension when needed.
-    if not is_asprs_field:
-        existing = set(header.point_format.dimension_names)
-        if field_name not in existing:
-            try:
-                header.add_extra_dim(laspy_module.ExtraBytesParams(
-                    name=field_name, type="int32",
-                    description=str(field_description)[:32],
-                ))
-                log_info(
-                    f"Streaming: added extra-byte dimension '{field_name}' "
-                    "to the output schema."
-                )
-            except Exception as exc:
-                log_warning(
-                    f"Could not add extra-byte field '{field_name}' "
-                    f"to output header: {exc}. Falling back to standard "
-                    "ASPRS classification."
-                )
+        header = upgrade_header_preserving_fields(header, laspy_module)
+    if not is_asprs_field and field_name not in header.point_format.dimension_names:
+        header.add_extra_dim(laspy_module.ExtraBytesParams(
+            name=field_name, type="int32", description=str(field_description)[:32]))
 
     return header
 
@@ -663,14 +492,13 @@ def _build_chunk_for_writer(
         offsets=out_offsets,
     )
 
-    in_dims = set(in_chunk.point_format.dimension_names)
-    out_dims = set(out_pf.dimension_names)
-    for dim in in_dims & out_dims:
-        try:
-            out_chunk[dim] = np.asarray(in_chunk[dim])
-        except Exception as exc:
-            # Some derived dims (X/Y/Z scaled vs. raw) can be touchy.
-            log_warning(f"Streaming: could not copy '{dim}' to output: {exc}")
+    # Raw structured fields preserve scaled uint64 extras without float conversion.
+    if in_chunk.point_format.id != out_pf.id:
+        return convert_points_preserving_fields(in_chunk, out_pf, out_scales, out_offsets, laspy_module)
+    for name in in_chunk.array.dtype.names:
+        if name not in out_chunk.array.dtype.names:
+            raise ValueError(f"Output schema would lose raw field '{name}'.")
+        out_chunk.array[name] = in_chunk.array[name]
     return out_chunk
 
 
@@ -689,6 +517,7 @@ def _pass4_write(
     emit_info=log_info,
     emit_warning=log_warning,
     field_description: str = "AI classification",
+    model_spec=None,
 ) -> bool:
     emit_info(f"Streaming pass 4/4: writing {output_path.name}")
 
@@ -710,6 +539,8 @@ def _pass4_write(
             needs_pf_upgrade=needs_pf_upgrade,
             field_description=field_description,
         )
+        if model_spec is not None:
+            add_label_metadata(out_header, model_spec, field_name)
         out_pf = out_header.point_format
         out_scales = out_header.scales
         out_offsets = out_header.offsets
@@ -736,7 +567,7 @@ def _pass4_write(
             raise RuntimeError(
                 f"Streaming: max ASPRS code {max_code} does not fit the "
                 f"5-bit classification of point format {input_pf_id} and "
-                "the LAS 1.4 / PRF 6 upgrade could not be applied to the "
+                "the LAS 1.4 / a compatible point format upgrade could not be applied to the "
                 "output header. Disable streaming mode (the in-memory "
                 "tiling path can upgrade the format) or change the class "
                 "mapping so all codes are <= 31."
@@ -757,13 +588,13 @@ def _pass4_write(
         if is_laz:
             kw["laz_backend"] = laspy_module.LazBackend.LazrsParallel
 
-        with laspy_module.open(str(output_path), **kw) as writer:
+        with atomic_output_path(output_path) as temporary, laspy_module.open(str(temporary), **kw) as writer:
             n_points = int(reader.header.point_count)
             global_offset = 0
 
             for chunk in _safe_chunk_iterator(reader, chunk_size, n_points):
                 if cancel_callback():
-                    return False
+                    raise InterruptedError("Classification cancelled; previous output retained.")
                 n = len(chunk)
 
                 # Build a fresh chunk with the output schema and copy
@@ -772,12 +603,19 @@ def _pass4_write(
                     chunk, out_pf, out_scales, out_offsets, laspy_module,
                 )
                 chunk_preds = predictions[global_offset:global_offset + n]
-                out_chunk[target_field] = chunk_preds.astype(cls_dtype)
+                assign_labels(out_chunk, target_field, chunk_preds.astype(cls_dtype))
 
                 writer.write_points(out_chunk)
                 global_offset += n
                 progress_callback(
                     min(99.0, 90.0 + (global_offset / max(n_points, 1)) * 9.0))
+            if global_offset != len(predictions) or global_offset != n_points:
+                raise ValueError("Output point count does not match predictions and input.")
+            if cancel_callback():
+                raise InterruptedError("Classification cancelled; previous output retained.")
+            if out_header.evlrs:
+                writer.write_evlrs(out_header.evlrs)
+
 
     return True
 

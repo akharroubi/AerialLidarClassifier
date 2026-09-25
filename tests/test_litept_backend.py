@@ -101,6 +101,30 @@ def test_backend_predicts_synthetic_cloud():
     assert (ids[:n] == 1).mean() > 0.9, f"ground share {(ids[:n] == 1).mean():.2%}"
 
 
+def test_oom_retry_reaches_5000_point_floor():
+    import torch
+    import types
+    litept = load_plugin_module("core.backends.litept")
+    backend = litept.LitePTBackend(PLUGIN_ROOT / "core/litept_l_dales_10cm.json", "unused.pth")
+    calls = []
+    class Backbone:
+        def __call__(self, batch):
+            n = len(batch['coord'])
+            calls.append(n)
+            if n > 5000:
+                raise torch.cuda.OutOfMemoryError('injected OOM')
+            return types.SimpleNamespace(feat=torch.ones(n, 8))
+    backend.model = (Backbone(), lambda x: x)
+    backend.device = 'cpu'
+    backend.amp = False
+    cloud = np.random.default_rng(143).uniform(0, 12, (72000, 3))
+    ids = backend.predict(cloud)
+    assert len(ids) == len(cloud)
+    assert backend.points_per_crop == 5000
+    assert any(n > 5000 for n in calls) and any(n <= 5000 for n in calls)
+    backend.unload()
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

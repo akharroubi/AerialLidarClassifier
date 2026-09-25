@@ -107,7 +107,9 @@ class LitePTBackend:
         out_channels = int(architecture["dec_channels"][0])
         head = torch.nn.Linear(out_channels, self.num_classes)
 
-        state = torch.load(self.weights_path, map_location="cpu", weights_only=True)
+        from ...utils.weights import verified_weights
+        with verified_weights(self.weights_path, self.card["id"]) as weights:
+            state = torch.load(weights, map_location="cpu", weights_only=True)
         backbone_state = {
             key[len("backbone."):]: value for key, value in state.items()
             if key.startswith("backbone.")
@@ -251,7 +253,7 @@ class LitePTBackend:
             if cancel_callback is not None and cancel_callback():
                 raise InterruptedError()
             center = cloud[index]
-            for attempt in range(4):
+            while True:
                 distances, indices = tree.query(center, k=k)
                 distances = np.atleast_1d(distances)
                 indices = np.atleast_1d(indices)
@@ -267,7 +269,7 @@ class LitePTBackend:
                     # Halve the crop for the rest of the run rather than
                     # dying: less context per crop, same coverage.
                     torch.cuda.empty_cache()
-                    if k <= 5_000 or attempt == 3:
+                    if k <= 5_000:
                         raise RuntimeError(
                             "LitePT-L ran out of GPU memory even with "
                             f"{k:,}-point crops. Close other GPU applications "

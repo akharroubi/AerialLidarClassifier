@@ -10,7 +10,7 @@ from qgis.PyQt.QtWidgets import (
 class DownloadWorker(QThread):
     """Background thread for one model download."""
     progress = pyqtSignal(int, int)  # bytes_downloaded, total_bytes
-    finished = pyqtSignal(bool, str)
+    completed = pyqtSignal(bool, str)
 
     def __init__(self, spec, url, parent=None):
         super().__init__(parent)
@@ -23,7 +23,7 @@ class DownloadWorker(QThread):
             self.url,
             progress_callback=lambda dl, total: self.progress.emit(dl, total),
         )
-        self.finished.emit(success, error)
+        self.completed.emit(success, error)
 
 
 class ModelDownloadDialog(QDialog):
@@ -62,7 +62,8 @@ class ModelDownloadDialog(QDialog):
         url_layout.addWidget(QLabel("URL:"))
         self.url_edit = QLineEdit()
         from ..utils.model_manager import ModelManager
-        self.url_edit.setText(ModelManager(self.spec).get_model_url())
+        self._initial_url = ModelManager(self.spec).get_model_url()
+        self.url_edit.setText(self._initial_url)
         url_layout.addWidget(self.url_edit)
         layout.addLayout(url_layout)
 
@@ -105,9 +106,10 @@ class ModelDownloadDialog(QDialog):
         self.status_label.setText("Downloading...")
         self.progress_bar.setRange(0, 0)
 
-        self.worker = DownloadWorker(self.spec, url, parent=self)
+        from ..utils.thread_lifetime import retain_thread
+        self.worker = retain_thread(DownloadWorker(self.spec, None if url == self._initial_url else url))
         self.worker.progress.connect(self._on_progress)
-        self.worker.finished.connect(self._on_finished)
+        self.worker.completed.connect(self._on_finished)
         self.worker.start()
 
     def _on_progress(self, downloaded, total):
@@ -142,7 +144,8 @@ class ModelDownloadDialog(QDialog):
 
     def closeEvent(self, event):  # noqa: N802 - Qt API
         if self.worker is not None and self.worker.isRunning():
-            self.worker.wait()
+            event.ignore()
+            return
         super().closeEvent(event)
 
     def reject(self):

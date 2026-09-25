@@ -1,7 +1,7 @@
 [general]
 name=Aerial LiDAR Classifier
 qgisMinimumVersion=3.34
-qgisMaximumVersion=4.99
+qgisMaximumVersion=3.99
 description=Deep-learning semantic segmentation of aerial LiDAR point clouds with LitePT-L (default on NVIDIA GPUs) or the 3D SegFormer (GPU or CPU).
 version=1.1.0
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
@@ -16,7 +16,7 @@ about=Classifies aerial LiDAR point clouds (LAS / LAZ / COPC) into
     or CPU). Feet are converted automatically from the file's CRS.
     Spatial tiling and streaming handle files larger than RAM. A
     one-click installer sets up an isolated Python venv on first use,
-    with no impact on QGIS's own Python. Model weights are CC BY-NC
+    while inference uses the QGIS Python process. Model weights are CC BY-NC
     4.0; documentation, the GPU driver table and the CLI / Processing
     usage are on the homepage:
     https://github.com/akharroubi/AerialLidarClassifier
@@ -37,6 +37,11 @@ server=False
 
 changelog=
     1.1.0
+        - Release hardening: atomic output, raw extra-byte and EVLR
+          preservation, source collision protection, raw custom labels,
+          strict corrupt-input rejection and headless Processing entry.
+        - Secure wheel-only setup; no TLS downgrade or silent CPU
+          fallback. Cached weights verified before loading.
         - New default model on NVIDIA GPUs: LitePT-L, a point
           transformer (85.8 M parameters) trained on the DALES aerial
           LiDAR dataset at 10 cm. Eight classes: ground, vegetation,
@@ -52,8 +57,8 @@ changelog=
           (LitePT-L's sparse convolutions). Existing environments are
           rebuilt once. cu126 is now preferred over cu128 on non-
           Blackwell GPUs because spconv publishes no cu128 wheel yet.
-        - QGIS 4.x declared compatible (Qt6-safe enum usage); tested
-          on QGIS 3.44 LTR.
+        - Validated on Windows QGIS 3.44 LTR. QGIS 4 is not declared
+          compatible without a separate Qt6/runtime validation.
         - Tile size and buffer are in metres (the plugin converts).
         - Fix: torchvision is resolved under a pin of the installed
           torch, so it can no longer replace torch during the install.

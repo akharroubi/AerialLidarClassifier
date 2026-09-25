@@ -339,9 +339,15 @@ def units_from_geokeys(keys: dict) -> Optional[LinearUnits]:
     if keys.get(4099) in _EPSG_LINEAR_UNIT_FACTORS:
         z = _EPSG_LINEAR_UNIT_FACTORS[keys[4099]]
         parts.append(f"VerticalUnitsGeoKey {keys[4099]} ({unit_label(z)})")
+    vertical_code = keys.get(4096)
+    if z is None and vertical_code not in (None, 0, 32767):
+        z = _epsg_crs_unit_factor(vertical_code)
+        if z is None:
+            raise ValueError(f"Cannot resolve units of vertical EPSG:{vertical_code}; select explicit input units.")
+        parts.append(f"vertical EPSG:{vertical_code} ({unit_label(z)})")
     if z is None:
         z = xy
-        parts.append("no vertical unit key, Z assumed in the same unit")
+        parts.append("no vertical CRS/unit key, Z assumed in the same unit")
     return LinearUnits(xy, z, "GeoTIFF keys: " + ", ".join(parts))
 
 
@@ -421,9 +427,19 @@ def detect_linear_units(header) -> LinearUnits:
 def resolve_units(header, override: Optional[str] = None) -> LinearUnits:
     """Units to use for ``header``: the user's override, else detection."""
     key = (override or "auto").strip().lower()
+    try:
+        detected = detect_linear_units(header)
+    except ValueError:
+        if key not in _OVERRIDE_FACTORS:
+            raise
+        # GeoTIFF angular checks precede vertical-unit resolution. An explicit
+        # linear override can therefore repair unknown vertical units safely.
+        detected = None
+    if detected is not None and detected.angular:
+        return detected
     if key in _OVERRIDE_FACTORS:
         factor = _OVERRIDE_FACTORS[key]
         return LinearUnits(
             factor, factor, f"user override: {unit_label(factor)}",
         )
-    return detect_linear_units(header)
+    return detected

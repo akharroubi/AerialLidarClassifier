@@ -1,3 +1,9 @@
+"""SegFormer architecture adapted from NRCan's TreeAIBox UrbanFiltering.
+
+Zhouxin Xi / Natural Resources Canada; Crown Copyright, Government of Canada.
+Maintainer-confirmed author permission and model terms: THIRD_PARTY_NOTICES.md.
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

@@ -7,6 +7,7 @@ not depend on a system / OSGeo4W / Flatpak Python being writable.
 """
 
 import os
+import copy
 import platform
 import shutil
 import subprocess
@@ -62,23 +63,42 @@ def _safe_extract_tar(tar: tarfile.TarFile, dest_dir: str) -> None:
         ValueError: If path traversal is detected.
     """
     dest_dir = os.path.realpath(dest_dir)
-    use_filter = sys.version_info >= (3, 12)
+    use_filter = hasattr(tarfile, "data_filter")
     for member in tar.getmembers():
         member_path = os.path.realpath(os.path.join(dest_dir, member.name))
         if not member_path.startswith(
                 dest_dir + os.sep) and member_path != dest_dir:
             raise ValueError(
                 f"Attempted path traversal in tar archive: {member.name}")
-        # On Python <3.12 the ``filter="data"`` safety mechanism is not
-        # available, so explicitly reject symlinks and hardlinks that
-        # could escape the destination directory.
-        if not use_filter and (member.issym() or member.islnk()):
-            raise ValueError(
-                f"Refusing symlink/hardlink in tar archive: {member.name}")
+        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+            raise ValueError(f"Unsupported tar entry: {member.name}")
+        if member.issym() or member.islnk():
+            if os.path.isabs(member.linkname):
+                raise ValueError(f"Absolute archive link: {member.name}")
+            base = os.path.dirname(member_path) if member.issym() else dest_dir
+            target = os.path.realpath(os.path.join(base, member.linkname))
+            if os.path.commonpath([dest_dir, target]) != dest_dir:
+                raise ValueError(f"Link escapes archive directory: {member.name}")
         if use_filter:
-            tar.extract(member, dest_dir, filter="data")
+            if member.issym():
+                # Some distro backports of data_filter resolve symlink targets
+                # against the archive root instead of the link's parent. The
+                # correct parent-relative target was validated above. Retain
+                # tar_filter's path checks and strip ownership metadata here.
+                def symlink_filter(info, destination):
+                    clean = tarfile.tar_filter(info, destination)
+                    clean = copy.copy(clean)
+                    clean.uid = clean.gid = clean.uname = clean.gname = None
+                    clean.mode = None
+                    return clean
+                tar.extract(member, dest_dir, filter=symlink_filter)
+            else:
+                tar.extract(member, dest_dir, filter="data")
         else:
-            tar.extract(member, dest_dir)
+            clean = copy.copy(member)
+            clean.mode &= 0o755
+            clean.uid = clean.gid = clean.uname = clean.gname = None
+            tar.extract(clean, dest_dir)
 
 
 def _safe_extract_zip(zip_file: zipfile.ZipFile, dest_dir: str) -> None:
@@ -151,7 +171,7 @@ def standalone_python_exists() -> bool:
         True if the standalone Python executable exists.
     """
     python_path = get_standalone_python_path()
-    return os.path.exists(python_path)
+    return os.path.exists(python_path) and verify_standalone_python()[0]
 
 
 def _get_platform_info() -> Tuple[str, str]:
@@ -257,6 +277,8 @@ def download_python_standalone(
 
     fd, temp_path = tempfile.mkstemp(suffix=".tar.gz")
     os.close(fd)
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    staging = tempfile.mkdtemp(prefix="python-staging-", dir=CACHE_DIR)
 
     try:
         if cancel_check and cancel_check():
@@ -303,24 +325,35 @@ def download_python_standalone(
         if progress_callback:
             progress_callback(6, "Extracting Python...")
 
-        if os.path.exists(STANDALONE_DIR):
-            shutil.rmtree(STANDALONE_DIR)
-
-        os.makedirs(STANDALONE_DIR, exist_ok=True)
-
         if temp_path.endswith(".tar.gz") or temp_path.endswith(".tgz"):
             with tarfile.open(temp_path, "r:gz") as tar:
-                _safe_extract_tar(tar, STANDALONE_DIR)
+                _safe_extract_tar(tar, staging)
         else:
             with zipfile.ZipFile(temp_path, "r") as z:
-                _safe_extract_zip(z, STANDALONE_DIR)
+                _safe_extract_zip(z, staging)
 
         if progress_callback:
             progress_callback(9, "Verifying Python installation...")
 
-        success, verify_msg = verify_standalone_python()
+        relative_python = os.path.relpath(get_standalone_python_path(), STANDALONE_DIR)
+        success, verify_msg = verify_standalone_python(os.path.join(staging, relative_python))
 
         if success:
+            if cancel_check and cancel_check():
+                return False, "Download cancelled"
+            # Keep the old runtime until the replacement has passed verification.
+            if os.path.exists(STANDALONE_DIR):
+                backup = tempfile.mkdtemp(prefix="python-backup-", dir=CACHE_DIR)
+                os.rmdir(backup)
+                os.replace(STANDALONE_DIR, backup)
+                try:
+                    os.replace(staging, STANDALONE_DIR)
+                except Exception:
+                    os.replace(backup, STANDALONE_DIR)
+                    raise
+                shutil.rmtree(backup, ignore_errors=True)
+            else:
+                os.replace(staging, STANDALONE_DIR)
             if progress_callback:
                 progress_callback(10, f"Python {python_version} installed")
             _log("Python standalone installed successfully", Qgis.MessageLevel.Success)
@@ -353,6 +386,8 @@ def download_python_standalone(
 
         return False, error_msg
     finally:
+        if os.path.isdir(staging):
+            shutil.rmtree(staging)
         if os.path.exists(temp_path):
             try:
                 os.remove(temp_path)
@@ -360,13 +395,13 @@ def download_python_standalone(
                 pass
 
 
-def verify_standalone_python() -> Tuple[bool, str]:
+def verify_standalone_python(python_path=None) -> Tuple[bool, str]:
     """Verify that the standalone Python installation works.
 
     Returns:
         Tuple of (success, message).
     """
-    python_path = get_standalone_python_path()
+    python_path = python_path or get_standalone_python_path()
 
     if not os.path.exists(python_path):
         return False, f"Python executable not found at {python_path}"
@@ -391,7 +426,7 @@ def verify_standalone_python() -> Tuple[bool, str]:
         subprocess_kwargs = _get_subprocess_kwargs()
 
         result = subprocess.run(
-            [python_path, "-c", "import sys; print(sys.version)"],
+            [python_path, "-c", "import sys, ssl, venv, encodings; print(sys.version)"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -402,9 +437,7 @@ def verify_standalone_python() -> Tuple[bool, str]:
         if result.returncode == 0:
             version_output = result.stdout.strip().split()[0]
 
-            if not version_output.startswith(
-                f"{sys.version_info.major}.{sys.version_info.minor}"
-            ):
+            if tuple(map(int, version_output.split('.')[:2])) != get_qgis_python_version():
                 _log(
                     f"Python version mismatch: got {version_output}, "
                     f"expected {get_python_full_version()}",

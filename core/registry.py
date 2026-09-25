@@ -97,7 +97,7 @@ LITEPT_L_DALES = ModelSpec(
     ),
     supported_devices=("cuda",),
     extra_packages=("spconv", "scipy"),
-    licence="Code MIT (prs-eth/LitePT); weights CC BY-NC 4.0 (trained on DALES, non-commercial)",
+    licence="Code MIT (prs-eth/LitePT); weights CC BY-NC 4.0 (maintainer-trained model)",
     attribution="LitePT: Photogrammetry and Remote Sensing Lab, ETH Zurich. Trained by GeoScITY Lab, University of Liege.",
     homepage="https://github.com/prs-eth/LitePT",
     training_data="DALES (Dayton Annotated LiDAR Earth Scan), 32 tiles",

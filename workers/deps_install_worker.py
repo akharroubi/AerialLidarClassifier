@@ -18,7 +18,7 @@ class DepsInstallWorker(QThread):
     """
 
     progress = pyqtSignal(int, str)
-    finished = pyqtSignal(bool, str)
+    completed = pyqtSignal(bool, str)
 
     def __init__(self, cuda_enabled: bool = False, parent=None):
         """Initialize the worker.
@@ -60,6 +60,13 @@ class DepsInstallWorker(QThread):
 
             from ..utils.venv_manager import VENV_DIR, create_venv_and_install
 
+            if self._cancelled:
+                self.completed.emit(False, "Installation cancelled")
+                return
+            if "torch" in sys.modules:
+                self.completed.emit(False, "Restart QGIS, then open Repair dependencies before opening the classifier. Loaded AI libraries cannot be safely replaced in this session.")
+                return
+
             if os.path.exists(VENV_DIR):
                 self.progress.emit(
                     1,
@@ -87,7 +94,7 @@ class DepsInstallWorker(QThread):
                             "venv can be rebuilt cleanly. Underlying "
                             "error: {}".format(exc)
                         )
-                        self.finished.emit(False, msg)
+                        self.completed.emit(False, msg)
                         return
                     # Non-Windows: continue and let the install layer
                     # surface a clear error if anything goes wrong.
@@ -108,7 +115,7 @@ class DepsInstallWorker(QThread):
                 cancel_check=lambda: self._cancelled,
                 cuda_enabled=self._cuda_enabled,
             )
-            self.finished.emit(success, message)
+            self.completed.emit(success, message)
         except Exception as e:
             error_msg = f"{str(e)}\n{traceback.format_exc()}"
-            self.finished.emit(False, error_msg)
+            self.completed.emit(False, error_msg)

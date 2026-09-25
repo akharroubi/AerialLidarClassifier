@@ -65,6 +65,9 @@ class AboutDialog(QDialog):
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(desc)
 
+        from ..widgets.cohort_card import CohortCard
+        layout.addWidget(CohortCard(placement="about", dismissible=False, parent=body))
+
         layout.addSpacing(12)
 
         # Model credit blocks, from the registry so they never go stale.
@@ -119,7 +122,7 @@ class AboutDialog(QDialog):
         # Non-commercial notice for the model
         commercial = QLabel(
             "<div style='text-align:center; color:palette(mid);'>"
-            "<small>Both models are licensed under CC BY-NC 4.0 "
+            "<small>Both downloaded weight sets are designated CC BY-NC 4.0 "
             "(non-commercial use only). Classifying LiDAR data for "
             "commercial purposes requires a separate licence from the "
             "model authors or a different model.</small>"

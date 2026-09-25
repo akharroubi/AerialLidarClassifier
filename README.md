@@ -61,7 +61,7 @@ PDAL provider) read the result with no special handling.
 - **Automatic CUDA wheel selection.** NVIDIA driver and compute-capability are
   detected via `nvidia-smi`; the matching PyTorch wheel
   (`cu118` / `cu121` / `cu124` / `cu126` / `cu128`, cu126 preferred) is
-  installed, plus `spconv` for LitePT-L. CPU fallback on unsupported hardware.
+  installed, plus `spconv` for LitePT-L. Explicit CPU installation is available for SegFormer; failed CUDA installs do not silently fall back.
   Apple Silicon uses MPS (SegFormer 3D only).
 - **Units handled.** Feet are converted from the file's CRS before inference;
   see [Coordinate units](#coordinate-units).
@@ -127,8 +127,11 @@ without affecting QGIS.
 3. Choose an output folder.
 4. Click **Run**.
 
-The output preserves the input format, point format, scaling, CRS, and all
-extra dimensions; only the `classification` dimension is rewritten.
+The output is LAS or LAZ (COPC input becomes ordinary LAZ, without a COPC
+index). Point order, coordinates, scaling, CRS, VLRs/EVLRs and unselected
+attributes are retained. Standard `classification` uses ASPRS codes; a custom
+integer label field retains the raw model IDs. A model-provenance VLR is added.
+Legacy point formats are upgraded only when a class code requires it.
 
 ---
 
@@ -145,7 +148,8 @@ The dock is organised as two stacked groups:
 
 Advanced parameters (collapsible) expose:
 
-- **Compute device** &mdash; auto / CUDA / MPS / CPU.
+- **Compute device** &mdash; Use GPU checkbox (CUDA/MPS when available);
+  Processing additionally exposes Auto, GPU and CPU choices.
 - **Tiling** &mdash; enable, tile size (m), buffer (m), streaming I/O.
 
 The bottom pane is always-visible log output with timestamps and severity
@@ -179,25 +183,25 @@ dialog's *Advanced parameters* group.
 
 ## Hardware and platform support
 
-| Backend            | OS                          | Tested |
-|--------------------|-----------------------------|--------|
-| NVIDIA CUDA 12.1   | Windows 10/11, Linux        | yes    |
-| NVIDIA CUDA 12.4   | Windows 10/11, Linux        | yes    |
-| NVIDIA CUDA 12.6   | Windows 10/11, Linux        | yes    |
-| NVIDIA CUDA 12.8   | Windows 10/11, Linux        | yes    |
-| Apple Silicon MPS  | macOS 13+                   | code path present, not tested by the author; reports welcome |
-| CPU only           | Windows / Linux / macOS     | yes    |
+| Environment | Validation scope |
+|-------------|------------------|
+| Windows 10, QGIS 3.44.10, Python 3.12, RTX 3090 | QGIS I/O, CPU and CUDA inference, installer and regression tests |
+| Linux x86_64, Ubuntu under WSL, Python 3.10 | Installer/runtime tests; QGIS download/settings shim, not Linux QGIS GUI |
+| macOS / Apple MPS | Implementation present; not validated for this release |
+| QGIS 4 / Qt6 | Not declared supported in this release |
+| Other GPU generations, small physical GPUs, Python 3.13 | Not validated on hardware/runtime combinations in this release |
 
-**LitePT-L runs on NVIDIA CUDA GPUs only**: its sparse convolutions come from
-`spconv`, which has no CPU or macOS build, and no cu128 wheel yet (RTX 50
-cards therefore keep SegFormer 3D until spconv ships one). Peak GPU memory is
-about 4.5&nbsp;GB with the validated 70&nbsp;000-point crops; cards under 8&nbsp;GB
-automatically use 35&nbsp;000-point crops, and an out-of-memory crop halves the
-crop size and retries. On an RTX 3090 it processes about 60&nbsp;000 points/s.
+**LitePT-L requires NVIDIA CUDA and compatible spconv.** This installer's
+supported spconv indexes are cu118, cu121, cu124 and cu126; LitePT remains
+unavailable on a cu128 installation. Default crops contain up to 70,000 points.
+The small-card path uses 35,000-point / 20 m crops; OOM retries reduce the point
+budget down to 5,000. These changes can affect labels. Neither crop size nor
+streaming is a hard total VRAM limit: native library workspaces and the QGIS
+renderer also use memory. Rates and memory measurements are dataset-specific.
 
-**SegFormer 3D** runs everywhere: an NVIDIA GPU with **&ge; 3&nbsp;GB** VRAM is
-recommended (about 110&nbsp;000 points/s on an RTX 3090); CPU inference works
-but is roughly 50&ndash;100&times; slower than a mid-range GPU.
+**SegFormer 3D** supports CPU and CUDA; an Apple MPS path is present but was
+not tested for this release. CPU mode keeps inference off CUDA but can take
+substantially longer and still uses CPU and RAM.
 
 The right CUDA wheel is selected automatically from `nvidia-smi`'s reported
 compute capability *and* driver version; you do not need to install CUDA
@@ -507,7 +511,7 @@ with the folder icon next to the model selector).
 | SHA-256       | `849ba5089e629785fd64f5166cc35f999b758c68754573bf18122a277b09592b` |
 | URL           | [this repo, release v1.1.0 (tag v1.1)](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.1) |
 | Training data | DALES (Dayton Annotated LiDAR Earth Scan), 32 tiles; validated on 4, tested on 4 held-out tiles |
-| License       | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) (the training data is licensed for non-commercial use) |
+| License       | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) (maintainer-selected licence for the trained weights) |
 
 **SegFormer 3D (UrbanFiltering, 30 cm)**
 
@@ -580,8 +584,11 @@ And, optionally, the plugin itself:
   LitePT model code (`core/litept/`) is MIT, &copy; Photogrammetry and Remote
   Sensing Lab, ETH Zurich (see `core/litept/LICENSE.upstream`).
 - **Model weights** &mdash; [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
-  LitePT-L was trained on DALES, whose licence is non-commercial; the SegFormer
-  weights are distributed unchanged from the upstream TreeAIBox release.
+  LitePT-L weights were trained by the plugin maintainer on DALES; this
+  weight licence is not inferred automatically from the dataset licence.
+  SegFormer weights are distributed unchanged from TreeAIBox. The maintainer
+  confirmed author permission for SegFormer integration. See
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for provenance and scope.
   Commercial users must obtain a separate licence from the model authors.
 
 ---
@@ -609,3 +616,66 @@ Government of Canada.
 **Author.** Abderrazzaq Kharroubi &mdash; GeoScITY Lab, University of Liege.
 Bug reports and pull requests welcome on the
 [issue tracker](https://github.com/akharroubi/AerialLidarClassifier/issues).
+
+
+## Release setup and safety
+
+Use **Plugins > Aerial LiDAR Classifier > Repair dependencies** to open setup.
+Restart QGIS before replacing libraries already loaded by the classifier.
+Setup accepts only prebuilt wheels and keeps TLS certificate verification
+active throughout. Corporate certificates must be configured in the trust
+store; certificate failures are not bypassed. Choose **Install CPU only** to
+keep SegFormer off the GPU. LitePT always requires compatible NVIDIA CUDA
+and spconv. A missing/incompatible spconv disables LitePT's Run button.
+
+An environment is marked ready only after verification and a final cancellation
+check. The new installation schema requests one rebuild of older environments.
+Dependencies are stored separately, but inference still imports them into the
+QGIS process: QGIS's already loaded NumPy and native libraries also matter.
+
+All model files, including cached and imported weights, are checked against
+release SHA-256 pins before deserialization. Custom URLs must serve the exact
+released weights. Failed writes keep the previous output intact; outputs may
+not alias any input in a batch. Truncated files must be repaired/re-exported
+before classification. Geographic coordinates must be reprojected before use;
+a units override is not a reprojection.
+
+## Large data and resource use
+
+Ordinary LAS/LAZ already use spatial tiling. Enable **streaming** when the full
+point records do not fit in RAM; ordinary tiling alone still loads the full
+input. Streaming stages tile data on disk and reads one buffered tile at a
+time. It is not a fixed memory budget: dense tiles, buffers and model workspaces
+still consume memory, and predictions/coverage still scale with total points.
+Use a local SSD with sufficient temporary space and run one job at a time.
+
+COPC indexing can accelerate spatial selection, but this release still uses
+the verified sequential streaming path. A future indexed reader must query
+full resolution, preserve original point identity/order, include buffer context
+and write every point once. COPC level-of-detail queries would change the
+inference inputs and cannot be advertised as equivalent full-resolution output.
+
+Smaller tiles/crops/buffers may reduce peak memory but can change labels and
+increase repeated work. LitePT retries GPU out-of-memory crops down to 5,000
+points, then fails clearly if memory is still insufficient; retries can change
+predictions. No GPU utilisation/energy cap or pause/resume is implemented.
+To keep the GPU free, choose SegFormer and uncheck Use GPU (CPU work remains).
+Disable automatic result loading during large batches to avoid simultaneous
+QGIS rendering/indexing work. Clearing unused GPU cache does not free tensors
+held by an active model.
+
+Build the distributable with `python build_zip.py`. The ZIP contains one
+`AerialLidarClassifier` folder, excludes environments/tests/weights/evidence,
+and has a SHA-256 sidecar. Existing published tags are not rewritten by this tool.
+
+Waveform packet payloads are explicitly refused because their relocation is
+not implemented; export a point-only copy first.
+
+## Learn with the plugin author
+
+[LiDAR Point Clouds Processing in QGIS](https://maven.com/geomatics/qgis3d) is
+Abderrazzaq Kharroubi's optional paid live cohort covering classification,
+terrain models, COPC and 3D editing. View the syllabus and current dates on Maven.
+The plugin panel, About dialog and plugin menu link to the course. The panel
+invitation can be hidden. Links include only fixed campaign tags; no background
+tracking or point-cloud data is sent.

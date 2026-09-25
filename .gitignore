@@ -7,3 +7,5 @@ Thumbs.db
 .idea/
 .vscode/
 *.zip
+release_evidence/
+dist/

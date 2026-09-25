@@ -25,7 +25,10 @@ PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _plugin_sources():
-    return sorted(p for p in PLUGIN_ROOT.rglob("*.py") if "__pycache__" not in p.parts)
+    roots = [PLUGIN_ROOT / name for name in
+             ("core", "utils", "workers", "processing", "gui", "dialogs", "widgets")]
+    return sorted(list(PLUGIN_ROOT.glob("*.py")) + [
+        p for root in roots for p in root.rglob("*.py") if "__pycache__" not in p.parts])
 
 
 def _multiline_fstrings(source: str):

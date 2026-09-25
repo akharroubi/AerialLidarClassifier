@@ -20,6 +20,10 @@ from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_vlrs
 from ..utils.logger import LOG_TAG, log_error, log_info, log_warning
 from ..utils.model_manager import ModelManager
+from ..utils.output_safety import (add_extra_dim_preserving_raw, atomic_output_path, validate_output_paths, validate_label_field,
+                                   read_complete, checked_predictions, label_values, assign_labels,
+                                   add_label_metadata, upgrade_header_preserving_fields,
+                                   convert_points_preserving_fields)
 
 
 # Lazy torch import (so module import is cheap)
@@ -62,13 +66,11 @@ def _ensure_asprs_classification_capacity(las, laspy_module, max_code: int):
         return las
     if pf_id >= ASPRS_PF6:
         return las
-    log_info(
-        f"Upgrading point format {pf_id} -> {ASPRS_PF6} (LAS 1.4) "
-        f"to encode ASPRS class code {max_code} per the LAS standard."
-    )
-    return laspy_module.convert(
-        las, point_format_id=ASPRS_PF6, file_version="1.4"
-    )
+    header = upgrade_header_preserving_fields(las.header, laspy_module)
+    points = convert_points_preserving_fields(las.points, header.point_format,
+                                               header.scales, header.offsets, laspy_module)
+    return laspy_module.LasData(header, points)
+
 
 
 # ---------------------------------------------------------------------------
@@ -92,12 +94,14 @@ def _resolve_output_path(
 
 def _write_las(las, out_path: Path, laspy_module) -> None:
     """Write a LasData object as plain LAS or LAZ based on extension."""
-    if out_path.suffix.lower() == ".laz":
-        las.write(
-            str(out_path), laz_backend=laspy_module.LazBackend.LazrsParallel
-        )
-    else:
-        las.write(str(out_path))
+    with atomic_output_path(out_path) as temporary:
+        kwargs = {}
+        if out_path.suffix.lower() == ".laz":
+            kwargs["laz_backend"] = laspy_module.LazBackend.LazrsParallel
+        las.write(str(temporary), **kwargs)
+        with laspy_module.open(str(temporary)) as check:
+            if check.header.point_count != len(las.points):
+                raise ValueError("Output point-count verification failed.")
 
 
 # ---------------------------------------------------------------------------
@@ -180,8 +184,8 @@ def _classify_tiled(
             return None
 
         if tile_preds is None:
-            log_warning(f"Tile {i + 1}/{n_tiles} returned no predictions.")
-            continue
+            raise ValueError(f"Tile {i + 1}/{n_tiles} returned no predictions.")
+        tile_preds = checked_predictions(tile_preds, len(buffer_idx))
 
         core_global_idx = buffer_idx[in_core_local]
         predictions[core_global_idx] = tile_preds[in_core_local]
@@ -196,11 +200,7 @@ def _classify_tiled(
     # points keep model id 0, which the caller reports as "unmapped ->
     # ASPRS 0" together with a count.
     if not assigned.all():
-        log_warning(
-            f"{int((~assigned).sum()):,} point(s) were not covered by any "
-            "tile core and have no prediction (written as ASPRS 0)."
-        )
-        predictions[~assigned] = 0
+        raise ValueError(f"{int((~assigned).sum()):,} points were not covered by tile cores; no output published.")
 
     return predictions
 
@@ -246,7 +246,7 @@ class ClassificationTask(QgsTask):
         self.tile_enabled = bool(tile_enabled)
         self.tile_auto = bool(tile_auto)
         self.tile_size_m = tile_size_m
-        self.tile_buffer_m = float(tile_buffer_m or TILE_DEFAULT_BUFFER_M)
+        self.tile_buffer_m = float(TILE_DEFAULT_BUFFER_M if tile_buffer_m is None else tile_buffer_m)
         self.tile_streaming = bool(tile_streaming)
 
         self.output_files = []
@@ -266,6 +266,9 @@ class ClassificationTask(QgsTask):
             total = len(self.files)
             if total == 0:
                 return True
+
+            planned_outputs = [_resolve_output_path(fp, self.out_dir, self.suffix) for fp in self.files]
+            validate_output_paths(self.files, planned_outputs)
 
             manager = ModelManager(self.spec)
             if not manager.is_model_available():
@@ -402,6 +405,7 @@ class ClassificationTask(QgsTask):
                 device=self.device,
                 class_mapping=self.class_mapping,
                 field_description=f"AI classification ({self.spec.display_name})",
+                model_spec=self.spec,
                 laspy_module=laspy,
                 progress_callback=stream_progress,
                 cancel_callback=self.isCanceled,
@@ -427,8 +431,10 @@ class ClassificationTask(QgsTask):
             )
 
         # In-memory path -----------------------------------------------------
+        validate_output_paths([fp], [out_path])
         with laspy.open(str(fp), laz_backend=laspy.LazBackend.LazrsParallel) as reader:
-            las = reader.read()
+            field = validate_label_field(reader.header.point_format, self.field_name, laspy)
+            las = read_complete(reader)
 
         if len(las.x) == 0:
             log_warning(f"Skipping {fp.name}: input has zero points.")
@@ -463,33 +469,13 @@ class ClassificationTask(QgsTask):
             preds = predict_fn(pcd, progress_cb)
 
         if preds is None:
-            log_warning(f"Classifier returned no results for {fp.name}")
-            return None
+            raise ValueError(f"Classifier returned no results for {fp.name}; no output published.")
 
         self.setProgress(file_base + file_span * 0.92)
 
-        asprs_p = np.zeros_like(preds, dtype=np.int32)
-        for mid, info in self.class_mapping.items():
-            asprs_p[preds == mid] = info.asprs_code
-
-        # Surface predictions that fall outside the configured mapping
-        # rather than silently sending them to ASPRS 0.
-        mapped_ids = list(self.class_mapping.keys())
-        if mapped_ids:
-            unmapped = ~np.isin(preds, mapped_ids)
-            unmapped_count = int(unmapped.sum())
-            if unmapped_count:
-                missing_ids = sorted(np.unique(preds[unmapped]).tolist())
-                log_warning(
-                    f"{unmapped_count:,} prediction(s) had model IDs not "
-                    f"present in the class mapping (IDs: {missing_ids}); "
-                    "they were set to ASPRS 0."
-                )
-
-        self.setProgress(file_base + file_span * 0.96)
-
-        field = (self.field_name or "").strip() or ASPRS_CLASSIFICATION_FIELD
-        is_asprs_field = field.lower() == ASPRS_CLASSIFICATION_FIELD
+        preds = checked_predictions(preds, len(las.points))
+        is_asprs_field = field == ASPRS_CLASSIFICATION_FIELD
+        asprs_p = label_values(preds, self.class_mapping, raw_ids=not is_asprs_field)
 
         if is_asprs_field:
             try:
@@ -499,14 +485,15 @@ class ClassificationTask(QgsTask):
             las = _ensure_asprs_classification_capacity(las, laspy, max_code)
             las.classification = asprs_p.astype(np.uint8)
         elif field in las.point_format.dimension_names:
-            setattr(las, field, asprs_p)
+            assign_labels(las, field, asprs_p)
         else:
-            las.add_extra_dim(laspy.ExtraBytesParams(
+            add_extra_dim_preserving_raw(las, laspy.ExtraBytesParams(
                 name=field, type="int32",
                 description=f"AI classification ({self.spec.display_name})"[:32],
             ))
-            setattr(las, field, asprs_p)
+            assign_labels(las, field, asprs_p)
 
+        add_label_metadata(las.header, self.spec, field)
         _strip_copc_vlrs(las)
         _write_las(las, out_path, laspy)
         return out_path
