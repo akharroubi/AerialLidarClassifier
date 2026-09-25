@@ -84,7 +84,8 @@ LITEPT_L_DALES = ModelSpec(
     resolution="10 cm",
     weights_filename="litept_l_dales_10cm_ema_fp16.pth",
     weights_urls=(
-        f"{_GITHUB_RELEASES}/v1.1.0/litept_l_dales_10cm_ema_fp16.pth",
+        # GitHub release "v1.1.0" is tagged v1.1.
+        f"{_GITHUB_RELEASES}/v1.1/litept_l_dales_10cm_ema_fp16.pth",
     ),
     weights_sha256="849ba5089e629785fd64f5166cc35f999b758c68754573bf18122a277b09592b",  # noqa: E501  # pragma: allowlist secret
     weights_size_mb=171.8,

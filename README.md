@@ -503,7 +503,7 @@ with the folder icon next to the model selector).
 | File          | `litept_l_dales_10cm_ema_fp16.pth` (EMA weights of the validation-selected checkpoint, stored as float16) |
 | Size          | ~172&nbsp;MB |
 | SHA-256       | `849ba5089e629785fd64f5166cc35f999b758c68754573bf18122a277b09592b` |
-| URL           | [this repo, release v1.1.0](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.1.0) |
+| URL           | [this repo, release v1.1.0 (tag v1.1)](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.1) |
 | Training data | DALES (Dayton Annotated LiDAR Earth Scan), 32 tiles; validated on 4, tested on 4 held-out tiles |
 | License       | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) (the training data is licensed for non-commercial use) |
 

@@ -319,12 +319,12 @@ alone); the reply below asks them to re-test with 1.0.3.
 
 ## 7. What is NOT done, decisions I took alone, open questions
 
-1. **GitHub release with the weights.** The registry points LitePT-L at
-   `https://github.com/akharroubi/AerialLidarClassifier/releases/download/v1.1.0/litept_l_dales_10cm_ema_fp16.pth`.
-   That release does not exist; I cannot create it (no `gh`, no GitHub
-   session). Until the user creates release `v1.1.0` and uploads the file
-   from `v1.1\model_release\`, users must use the dock's "import weights
-   file" button. The SHA-256 is in the registry and in `SHA256SUMS.txt`.
+1. **GitHub release with the weights: done by the user on 2026-09-25
+   morning** (release "v1.1.0", tag `v1.1`, asset
+   `litept_l_dales_10cm_ema_fp16.pth`, 171.8 MB). The registry URL was
+   updated to that tag and the plugin's own download path
+   (`ModelManager.download_model`, QgsBlockingNetworkRequest, SHA-256
+   check) was run against it; see section 9.
 2. **Upload order.** My recommendation: upload 1.0.3 to plugins.qgis.org in
    the morning (patch, one model, tested install path is a superset), and
    1.1.0 only after your review and after the release with the weights
@@ -400,9 +400,9 @@ alone); the reply below asks them to re-test with 1.0.3.
    all `torch.load` calls use `weights_only=True`, hashes carry the
    allowlist pragma, the bundled JSON card carries no hash).
 3. Post the four GitHub replies from section 6 (edit freely).
-4. When ready for 1.1.0: create GitHub release `v1.1.0`, upload
-   `v1.1\model_release\litept_l_dales_10cm_ema_fp16.pth`, merge `v1.1-dev`
-   into `main`, upload `v1.1\aerial_lidar_classifier_v1.1.0.zip`.
+4. When ready for 1.1.0 (the release with the weights already exists at
+   tag `v1.1`): merge `v1.1-dev` into `main`, upload
+   `v1.1\aerial_lidar_classifier_v1.1.0.zip`.
 5. Tell me the outcome of Astra's review and I will work through section 7.
 
 ---
