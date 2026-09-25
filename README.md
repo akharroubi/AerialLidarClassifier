@@ -1,5 +1,7 @@
 # Aerial LiDAR Classifier
 
+<p align="center"><img src="assets/logo_128.png" alt="Aerial LiDAR Classifier logo" width="128" height="128"></p>
+
 Deep-learning semantic segmentation of aerial LiDAR point clouds (LAS / LAZ / COPC)
 inside QGIS, with two models:
 
