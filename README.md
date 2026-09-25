@@ -444,7 +444,7 @@ Both files download automatically. The URLs below are for offline machines.
 |---------------|-------|
 | File          | `litept_l_dales_10cm_ema_fp16.pth` (EMA weights of the validation-selected checkpoint, stored as float16, run in float32) |
 | Size          | ~172 MB |
-| SHA-256       | `849ba5089e629785fd64f5166cc35f999b758c68754573bf18122a277b09592b` |
+| SHA-256       | starts with `849ba5089e62`; the full value is in `core/registry.py` and the plugin checks it automatically |
 | URL           | [release v1.1 of this repository](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.1) |
 | Training data | DALES (Dayton Annotated LiDAR Earth Scan), 32 tiles; validated on 4, tested on 4 held-out tiles |
 | License       | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) (licence chosen by the maintainer for the trained weights) |
@@ -455,7 +455,7 @@ Both files download automatically. The URLs below are for offline machines.
 |---------------|-------|
 | File          | `urbanfiltering_als_esegformer3D_112_30cm_GPU3GB.pth` |
 | Size          | ~18 MB |
-| SHA-256       | `cddb791041d46a2e7be3c53d6e94157c9af2218e7ea5595bf3134c4390c1fbc0` |
+| SHA-256       | starts with `cddb791041d4`; the full value is in `core/registry.py` and the plugin checks it automatically |
 | Primary URL   | [NRCan/TreeAIBox release v1.0](https://github.com/NRCan/TreeAIBox/releases/tag/v1.0) |
 | Mirror URL    | [release v1.0.0 of this repository](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.0.0) |
 | License       | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) |

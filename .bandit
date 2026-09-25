@@ -1,0 +1,14 @@
+[bandit]
+# Aerial LiDAR Classifier: Bandit findings reviewed for 1.1.0.
+# Every finding left is one of these low-severity patterns, each marked
+# "Can be skipped by developer" in the plugins.qgis.org rules reference:
+#   B101 assert: argument checks inside the vendored LitePT model
+#        (core/litept, MIT, kept identical to upstream).
+#   B110 / B112 try/except/pass or continue: best-effort cleanup that
+#        must never interrupt QGIS (closing files, disconnecting Qt
+#        signals, releasing GPU cache, optional log callbacks).
+#   B404 / B603 subprocess: the installer runs the plugin's own portable
+#        Python, uv and nvidia-smi with argument lists, never shell=True
+#        and never with user-supplied command text.
+#   B607 partial path: `sysctl` on macOS, only to detect Rosetta.
+skips = B101,B110,B112,B404,B603,B607

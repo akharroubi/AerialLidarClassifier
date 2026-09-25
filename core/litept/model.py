@@ -3,7 +3,7 @@ LitePT model
 standalone implementation
 
 Vendored into Aerial LiDAR Classifier from https://github.com/prs-eth/LitePT
-(MIT licence, commit 436d04801c8151faebe66a1b2d368a9711e7e6aa, see LICENSE.upstream).
+(MIT licence, commit 436d04801c81, see LICENSE.upstream).
 Only the four import lines marked "(plugin)" differ from upstream: the compiled
 flash_attn / torch_scatter / PointROPE helpers are replaced by pure-PyTorch
 equivalents so the plugin needs no compiler. spconv remains required.

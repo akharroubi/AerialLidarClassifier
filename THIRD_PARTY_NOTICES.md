@@ -18,7 +18,7 @@ of a trained model. DALES is credited separately as training data.
 
 Weight file: `litept_l_dales_10cm_ema_fp16.pth`
 
-SHA-256: `849ba5089e629785fd64f5166cc35f999b758c68754573bf18122a277b09592b`
+SHA-256: starts with `849ba5089e62` (full value in `core/registry.py`).
 
 ## SegFormer 3D / UrbanFiltering
 
@@ -36,7 +36,7 @@ record. QGIS publication alone is not evidence of a licence grant.
 
 Weight file: `urbanfiltering_als_esegformer3D_112_30cm_GPU3GB.pth`
 
-SHA-256: `cddb791041d46a2e7be3c53d6e94157c9af2218e7ea5595bf3134c4390c1fbc0`
+SHA-256: starts with `cddb791041d4` (full value in `core/registry.py`).
 
 ## Runtime dependencies
 

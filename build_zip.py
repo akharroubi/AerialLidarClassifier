@@ -13,6 +13,7 @@ use LF, so the same source always gives the same bytes; a SHA-256
 sidecar is written next to the ZIP.
 """
 import argparse
+import re
 import hashlib
 import zipfile
 from pathlib import Path
@@ -22,9 +23,11 @@ PACKAGE = "Aerial_LiDAR_Classifier"
 DIRS = ("core", "dialogs", "gui", "processing", "utils", "widgets",
         "workers", "assets", "i18n")
 FILES = ("__init__.py", "plugin.py", "config.py", "metadata.txt", "icon.png",
-         "LICENSE", "README.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md")
+         "LICENSE", "README.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md",
+         # Read by the plugins.qgis.org scanner: reviewed Bandit skips.
+         ".bandit")
 SKIP_SUFFIXES = (".pyc", ".pyo", ".pth", ".pt", ".log", ".zip", ".bak")
-TEXT_SUFFIXES = (".py", ".md", ".txt", ".json", ".svg", ".ts", ".ui", ".cfg")
+TEXT_SUFFIXES = (".py", ".md", ".txt", ".json", ".svg", ".ts", ".ui", ".cfg", ".bandit")
 FIXED_TIME = (2026, 9, 25, 0, 0, 0)
 
 
@@ -49,8 +52,33 @@ def collect():
     return sorted(files)
 
 
+_HEX_RUN = re.compile(rb"[0-9a-fA-F]{32,}")
+
+
+def check_secrets_scanner(files) -> None:
+    """Refuse to build when plugins.qgis.org's scanner would block the ZIP.
+
+    Its secrets check flags any run of 32 or more hex characters (a
+    SHA-256 checksum or a git commit id counts) unless the same line
+    carries ``pragma: allowlist secret``. Version 1.1.0 was blocked on
+    upload for checksums left in README.md and THIRD_PARTY_NOTICES.md.
+    """
+    problems = []
+    for path in files:
+        if path.suffix.lower() in (".png", ".jpg", ".ico"):
+            continue
+        for number, line in enumerate(path.read_bytes().splitlines(), 1):
+            if _HEX_RUN.search(line) and b"pragma: allowlist secret" not in line:
+                problems.append(f"{path.relative_to(ROOT)}:{number}")
+    if problems:
+        raise SystemExit(
+            "Long hex strings would block the upload (shorten them or add "
+            "'# pragma: allowlist secret' on the line):\n  " + "\n  ".join(problems))
+
+
 def build(destination: Path) -> str:
     files = collect()
+    check_secrets_scanner(files)
     destination.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in files:
