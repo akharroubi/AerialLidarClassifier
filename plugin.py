@@ -22,6 +22,9 @@ from qgis.core import QgsApplication, Qgis
 from . import tr
 from .config import PLUGIN_NAME
 from .utils.logger import log_info, log_warning
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 
 MENU_LABEL = "&Aerial LiDAR Classifier"
@@ -126,7 +129,7 @@ class AerialLidarClassifierPlugin:
                 self._deps_worker.progress.disconnect(self._on_install_progress)
                 self._deps_worker.completed.disconnect(self._on_install_finished)
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
         self._deps_worker = None
 
         # Tear down the deps dock if it's still open
@@ -135,7 +138,7 @@ class AerialLidarClassifierPlugin:
                 self.iface.removeDockWidget(self._deps_dock)
                 self._deps_dock.deleteLater()
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
             self._deps_dock = None
 
         # Tear down the main dock (it owns running tasks)
@@ -144,7 +147,7 @@ class AerialLidarClassifierPlugin:
                 self.iface.removeDockWidget(self.dock)
                 self.dock.deleteLater()
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
             self.dock = None
 
         # Remove menu / toolbar items
@@ -152,7 +155,7 @@ class AerialLidarClassifierPlugin:
             try:
                 self.iface.removePluginMenu(MENU_LABEL, action)
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
             if self.toolbar:
                 self.toolbar.removeAction(action)
 
@@ -165,7 +168,7 @@ class AerialLidarClassifierPlugin:
             try:
                 QgsApplication.processingRegistry().removeProvider(self.provider)
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
             self.provider = None
 
         self.actions = []
@@ -246,7 +249,7 @@ class AerialLidarClassifierPlugin:
             self.iface.removeDockWidget(self._deps_dock)
             self._deps_dock.deleteLater()
         except Exception:
-            pass
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
         self._deps_dock = None
 
     def _show_deps_dock(self) -> None:
@@ -409,7 +412,7 @@ class AerialLidarClassifierPlugin:
         try:
             action.setMenuRole(QAction.MenuRole.NoRole)
         except Exception:
-            pass
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
         if add_to_toolbar and self.toolbar:
             self.toolbar.addAction(action)
         self.actions.append(action)

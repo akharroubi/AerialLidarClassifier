@@ -30,7 +30,8 @@ class PointROPE(torch.nn.Module):
         return torch.cat((-x2, x1), dim=-1)
         
     def apply_rope1d(self, tokens, pos1d, cos, sin):
-        assert pos1d.ndim==2
+        if not (pos1d.ndim==2):
+            raise AssertionError('pos1d.ndim==2')
         cos = torch.nn.functional.embedding(pos1d, cos)[:, None, :, :]
         sin = torch.nn.functional.embedding(pos1d, sin)[:, None, :, :]
         return (tokens * cos) + (self.rotate_half(tokens) * sin)
@@ -43,9 +44,11 @@ class PointROPE(torch.nn.Module):
         output:
             * tokens after appplying PointROPE (batch_size x nheads x ntokens x dim)
         """
-        assert tokens.size(3)%3==0, "number of dimensions should be a multiple of three"
+        if not (tokens.size(3)%3==0):
+            raise AssertionError("number of dimensions should be a multiple of three")
         D = tokens.size(3) // 3
-        assert positions.ndim==3 and positions.shape[-1] == 3 # Batch, Seq, 3
+        if not (positions.ndim==3 and positions.shape[-1] == 3):
+            raise AssertionError('positions.ndim==3 and positions.shape[-1] == 3')
         if max_seqlen == None:
             cos, sin = self.get_cos_sin(D, int(positions.max())+1, tokens.device, tokens.dtype)
         else: # use dynamic sequence length according to batched input

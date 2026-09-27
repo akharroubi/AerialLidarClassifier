@@ -4,6 +4,22 @@ All notable changes to **Aerial LiDAR Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] - 2026-09-27
+
+### Changed
+- Stable release: the plugin is no longer marked experimental.
+- The dependency installer starts its helper programs (the portable
+  Python, uv and nvidia-smi) through Qt's `QProcess` instead of the
+  `subprocess` module. Arguments are passed as a list, as before; no
+  shell is involved.
+- Errors that are safe to ignore (closing files, disconnecting signals,
+  freeing GPU memory) are logged at debug level instead of being
+  silently dropped, and internal consistency checks raise explicit
+  errors instead of using `assert`.
+- The plugins.qgis.org security scan now passes with no configuration
+  file: the `.bandit` file is removed, and `build_zip.py` refuses to
+  build when Bandit reports any finding.
+
 ## [1.1.0] - 2026-09-25
 
 ### Added

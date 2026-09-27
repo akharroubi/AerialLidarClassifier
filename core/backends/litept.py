@@ -29,6 +29,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 # Class ids as written by the reference pipeline (DALES source values).
 LITEPT_CLASS_NAMES = (
@@ -149,7 +152,7 @@ class LitePTBackend:
         try:
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         except Exception:
-            pass
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
 
         # Crop budget by VRAM. 70 000 points / 30 m is the validated recipe
         # (about 4.5 GB peak); cards under 8 GB get the profile recipe the
@@ -178,7 +181,7 @@ class LitePTBackend:
             if self.device == "cuda" and torch.cuda.is_available():
                 torch.cuda.empty_cache()
         except Exception:
-            pass
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
         self.device = None
 
     # ------------------------------------------------------------------

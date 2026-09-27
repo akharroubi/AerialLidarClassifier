@@ -5,6 +5,9 @@ Configuration constants, data classes, and mappings for Aerial LiDAR Classifier.
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 
 # =============================================================================
@@ -29,7 +32,7 @@ def _read_plugin_version() -> str:
             if line.strip().startswith("version="):
                 return line.split("=", 1)[1].strip()
     except Exception:
-        pass
+        _LOG.debug("Ignored non-fatal error", exc_info=True)
     return "unknown"
 
 

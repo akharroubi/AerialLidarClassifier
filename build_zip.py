@@ -14,6 +14,7 @@ sidecar is written next to the ZIP.
 """
 import argparse
 import re
+import sys
 import hashlib
 import zipfile
 from pathlib import Path
@@ -23,11 +24,9 @@ PACKAGE = "Aerial_LiDAR_Classifier"
 DIRS = ("core", "dialogs", "gui", "processing", "utils", "widgets",
         "workers", "assets", "i18n")
 FILES = ("__init__.py", "plugin.py", "config.py", "metadata.txt", "icon.png",
-         "LICENSE", "README.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md",
-         # Read by the plugins.qgis.org scanner: reviewed Bandit skips.
-         ".bandit")
+         "LICENSE", "README.md", "CHANGELOG.md", "THIRD_PARTY_NOTICES.md")
 SKIP_SUFFIXES = (".pyc", ".pyo", ".pth", ".pt", ".log", ".zip", ".bak")
-TEXT_SUFFIXES = (".py", ".md", ".txt", ".json", ".svg", ".ts", ".ui", ".cfg", ".bandit")
+TEXT_SUFFIXES = (".py", ".md", ".txt", ".json", ".svg", ".ts", ".ui", ".cfg")
 FIXED_TIME = (2026, 9, 25, 0, 0, 0)
 
 
@@ -76,9 +75,39 @@ def check_secrets_scanner(files) -> None:
             "'# pragma: allowlist secret' on the line):\n  " + "\n  ".join(problems))
 
 
+def check_bandit() -> None:
+    """Refuse to build unless Bandit reports nothing, with no config file.
+
+    plugins.qgis.org runs Bandit on every upload. A clean scan without a
+    developer-supplied config (.bandit) keeps the version "Validated"
+    rather than "Validated (configured)", which needs an admin review.
+    """
+    import json
+    import subprocess  # nosec B404 - build tool only, never shipped
+    targets = [str(ROOT / name) for name in DIRS if (ROOT / name).is_dir()]
+    targets += [str(ROOT / name) for name in FILES if name.endswith(".py")]
+    try:
+        result = subprocess.run(  # nosec B603 - fixed argument list
+            [sys.executable, "-m", "bandit", "-q", "-f", "json", "-r", *targets],
+            capture_output=True, text=True, check=False)
+    except OSError as exc:
+        raise SystemExit(f"Could not run Bandit: {exc}")
+    if "No module named bandit" in result.stderr:
+        raise SystemExit("Bandit is required to build: python -m pip install bandit")
+    findings = json.loads(result.stdout or "{}").get("results", [])
+    if findings:
+        listed = [f"{f['test_id']} {Path(f['filename']).relative_to(ROOT)}:{f['line_number']}"
+                  for f in findings]
+        raise SystemExit("Bandit findings would send the upload to manual review:\n  "
+                         + "\n  ".join(listed))
+    if (ROOT / ".bandit").exists():
+        raise SystemExit("Remove .bandit: the scan must pass without a config file.")
+
+
 def build(destination: Path) -> str:
     files = collect()
     check_secrets_scanner(files)
+    check_bandit()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in files:

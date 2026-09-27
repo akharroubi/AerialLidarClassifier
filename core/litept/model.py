@@ -82,13 +82,15 @@ class Point(Dict):
         relay on ["grid_coord" or "coord" + "grid_size", "batch", "feat"]
         """
         self["order"] = order
-        assert "batch" in self.keys()
+        if not ("batch" in self.keys()):
+            raise AssertionError('"batch" in self.keys()')
         if "grid_coord" not in self.keys():
             # if you don't want to operate GridSampling in data augmentation,
             # please add the following augmentation into your pipline:
             # dict(type="Copy", keys_dict={"grid_size": 0.01}),
             # (adjust `grid_size` to what your want)
-            assert {"grid_size", "coord"}.issubset(self.keys())
+            if not ({"grid_size", "coord"}.issubset(self.keys())):
+                raise AssertionError('{"grid_size", "coord"}.issubset(self.keys())')
 
             self["grid_coord"] = torch.div(
                 self.coord - self.coord.min(0)[0], self.grid_size, rounding_mode="trunc"
@@ -99,12 +101,14 @@ class Point(Dict):
             depth = int(self.grid_coord.max() + 1).bit_length()
         self["serialized_depth"] = depth
         # Maximum bit length for serialization code is 63 (int64)
-        assert depth * 3 + len(self.offset).bit_length() <= 63
+        if not (depth * 3 + len(self.offset).bit_length() <= 63):
+            raise AssertionError('depth * 3 + len(self.offset).bit_length() <= 63')
         # Here we follow OCNN and set the depth limitation to 16 (48bit) for the point position.
         # Although depth is limited to less than 16, we can encode a 655.36^3 (2^16 * 0.01) meter^3
         # cube with a grid size of 0.01 meter. We consider it is enough for the current stage.
         # We can unlock the limitation by optimizing the z-order encoding function if necessary.
-        assert depth <= 16
+        if not (depth <= 16):
+            raise AssertionError('depth <= 16')
 
         # The serialization codes are arranged as following structures:
         # [Order1 ([n]),
@@ -145,13 +149,15 @@ class Point(Dict):
 
         pad: padding sparse for sparse shape.
         """
-        assert {"feat", "batch"}.issubset(self.keys())
+        if not ({"feat", "batch"}.issubset(self.keys())):
+            raise AssertionError('{"feat", "batch"}.issubset(self.keys())')
         if "grid_coord" not in self.keys():
             # if you don't want to operate GridSampling in data augmentation,
             # please add the following augmentation into your pipline:
             # dict(type="Copy", keys_dict={"grid_size": 0.01}),
             # (adjust `grid_size` to what your want)
-            assert {"grid_size", "coord"}.issubset(self.keys())
+            if not ({"grid_size", "coord"}.issubset(self.keys())):
+                raise AssertionError('{"grid_size", "coord"}.issubset(self.keys())')
             self["grid_coord"] = torch.div(
                 self.coord - self.coord.min(0)[0], self.grid_size, rounding_mode="trunc"
             ).int()
@@ -325,7 +331,8 @@ class PointROPEAttention(PointModule):
         order_index=0,
     ):
         super().__init__()
-        assert channels % num_heads == 0
+        if not (channels % num_heads == 0):
+            raise AssertionError('channels % num_heads == 0')
         self.channels = channels
         self.num_heads = num_heads
         self.scale = qk_scale or (channels // num_heads) ** -0.5
@@ -412,7 +419,8 @@ class GridPooling(PointModule):
         self.out_channels = out_channels
 
         self.stride = stride
-        assert reduce in ["sum", "mean", "min", "max"]
+        if not (reduce in ["sum", "mean", "min", "max"]):
+            raise AssertionError('reduce in ["sum", "mean", "min", "max"]')
         self.reduce = reduce
         self.shuffle_orders = shuffle_orders
         self.traceable = traceable
@@ -528,8 +536,10 @@ class GridUnpooling(PointModule):
         self.traceable = traceable
 
     def forward(self, point):
-        assert "pooling_parent" in point.keys()
-        assert "pooling_inverse" in point.keys()
+        if not ("pooling_parent" in point.keys()):
+            raise AssertionError('"pooling_parent" in point.keys()')
+        if not ("pooling_inverse" in point.keys()):
+            raise AssertionError('"pooling_inverse" in point.keys()')
         parent = point.pop("pooling_parent")
         inverse = point.pooling_inverse
         feat = point.feat
@@ -746,15 +756,24 @@ class LitePT(PointModule):
         self.dec_conv = dec_conv
         self.dec_attn = dec_attn
 
-        assert self.num_stages == len(stride) + 1
-        assert self.num_stages == len(enc_depths)
-        assert self.num_stages == len(enc_channels)
-        assert self.num_stages == len(enc_num_head)
-        assert self.num_stages == len(enc_patch_size)
-        assert self.enc_mode or self.num_stages == len(dec_depths) + 1
-        assert self.enc_mode or self.num_stages == len(dec_channels) + 1
-        assert self.enc_mode or self.num_stages == len(dec_num_head) + 1
-        assert self.enc_mode or self.num_stages == len(dec_patch_size) + 1
+        if not (self.num_stages == len(stride) + 1):
+            raise AssertionError('self.num_stages == len(stride) + 1')
+        if not (self.num_stages == len(enc_depths)):
+            raise AssertionError('self.num_stages == len(enc_depths)')
+        if not (self.num_stages == len(enc_channels)):
+            raise AssertionError('self.num_stages == len(enc_channels)')
+        if not (self.num_stages == len(enc_num_head)):
+            raise AssertionError('self.num_stages == len(enc_num_head)')
+        if not (self.num_stages == len(enc_patch_size)):
+            raise AssertionError('self.num_stages == len(enc_patch_size)')
+        if not (self.enc_mode or self.num_stages == len(dec_depths) + 1):
+            raise AssertionError('self.enc_mode or self.num_stages == len(dec_depths) + 1')
+        if not (self.enc_mode or self.num_stages == len(dec_channels) + 1):
+            raise AssertionError('self.enc_mode or self.num_stages == len(dec_channels) + 1')
+        if not (self.enc_mode or self.num_stages == len(dec_num_head) + 1):
+            raise AssertionError('self.enc_mode or self.num_stages == len(dec_num_head) + 1')
+        if not (self.enc_mode or self.num_stages == len(dec_patch_size) + 1):
+            raise AssertionError('self.enc_mode or self.num_stages == len(dec_patch_size) + 1')
 
         # norm layers
         bn_layer = partial(nn.BatchNorm1d, eps=1e-3, momentum=0.01)

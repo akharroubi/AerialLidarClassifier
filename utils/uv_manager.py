@@ -10,7 +10,6 @@ import os
 import platform
 import shutil
 import stat
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -20,6 +19,7 @@ from qgis.core import Qgis, QgsBlockingNetworkRequest, QgsMessageLog
 from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtNetwork import QNetworkRequest
 
+from . import proc
 from .compat import scoped_enum
 
 CACHE_DIR = (
@@ -271,18 +271,7 @@ def verify_uv():
                     "__PYVENV_LAUNCHER__", "PYTHONSTARTUP"):
             env.pop(var, None)
 
-        kwargs = {}
-        if sys.platform == "win32":
-            kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-
-        result = subprocess.run(
-            [uv_path, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=env,
-            **kwargs,
-        )
+        result = proc.run([uv_path, "--version"], timeout=30, env=env)
 
         if result.returncode == 0:
             version_output = result.stdout.strip()
@@ -293,7 +282,7 @@ def verify_uv():
             _log(f"uv verification failed: {error}", Qgis.MessageLevel.Warning)
             return False, f"Verification failed: {error[:100]}"
 
-    except subprocess.TimeoutExpired:
+    except proc.TimeoutExpired:
         return False, "uv verification timed out"
     except Exception as e:
         return False, f"Verification error: {str(e)[:100]}"

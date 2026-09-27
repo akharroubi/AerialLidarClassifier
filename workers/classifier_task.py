@@ -25,6 +25,9 @@ from ..utils.output_safety import (add_extra_dim_preserving_raw, atomic_output_p
                                    read_complete, checked_predictions, label_values, assign_labels,
                                    add_label_metadata, upgrade_header_preserving_fields,
                                    convert_points_preserving_fields)
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 
 # Lazy torch import (so module import is cheap)
@@ -215,7 +218,7 @@ def _empty_gpu_cache_safe():
         if mps is not None and mps.is_available() and hasattr(t, "mps"):
             t.mps.empty_cache()
     except Exception:
-        pass
+        _LOG.debug("Ignored non-fatal error", exc_info=True)
 
 
 class ClassificationTask(QgsTask):
@@ -392,7 +395,7 @@ class ClassificationTask(QgsTask):
                 try:
                     backend.unload()
                 except Exception:
-                    pass
+                    _LOG.debug("Ignored non-fatal error", exc_info=True)
 
     # ------------------------------------------------------------------
     def _can_stream(self) -> bool:

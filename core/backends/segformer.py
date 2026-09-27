@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import numpy as np
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 
 class SegFormerBackend:
@@ -42,7 +45,7 @@ class SegFormerBackend:
             elif self.device == "mps" and hasattr(torch, "mps"):
                 torch.mps.empty_cache()
         except Exception:
-            pass
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
         self.device = None
 
     def predict(

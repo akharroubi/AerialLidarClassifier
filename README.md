@@ -86,8 +86,7 @@ without any special handling.
 ### From the QGIS plugin repository (recommended)
 
 1. *Plugins > Manage and Install Plugins...*
-2. Search for **Aerial LiDAR Classifier**. While the plugin is marked
-   experimental, tick *Show also experimental plugins* in the *Settings* tab.
+2. Search for **Aerial LiDAR Classifier**.
 3. Click **Install Plugin**.
 
 ### From source
@@ -503,7 +502,7 @@ And, optionally, the plugin itself:
                   semantic segmentation of aerial LiDAR point clouds},
   year         = {2026},
   url          = {https://github.com/akharroubi/AerialLidarClassifier},
-  version      = {1.1.0},
+  version      = {1.1.1},
   note         = {GPL-3.0-or-later}
 }
 ```

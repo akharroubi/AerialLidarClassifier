@@ -37,7 +37,8 @@ class EfficientAttention(nn.Module):
             proj_drop=0.,
             sr_ratio=1):
         super().__init__()
-        assert dim % num_heads == 0
+        if not (dim % num_heads == 0):
+            raise AssertionError('dim % num_heads == 0')
         self.dim = dim
         self.num_heads = num_heads
         head_dim = dim // num_heads

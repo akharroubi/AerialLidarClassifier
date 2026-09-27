@@ -1,6 +1,9 @@
 """Helper utilities for the plugin."""
 
 from .logger import log_info, log_warning
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 
 def enable_point_cloud_3d_rendering(layer) -> bool:
@@ -42,7 +45,7 @@ def enable_point_cloud_3d_rendering(layer) -> bool:
         symbol = QgsClassificationPointCloud3DSymbol()
         symbol.setAttribute("Classification")
     except (ImportError, AttributeError):
-        pass
+        _LOG.debug("Ignored non-fatal error", exc_info=True)
 
     # Fallback 1: colour ramp keyed on Classification.
     if symbol is None:
@@ -51,7 +54,7 @@ def enable_point_cloud_3d_rendering(layer) -> bool:
             symbol = QgsColorRampPointCloud3DSymbol()
             symbol.setAttribute("Classification")
         except (ImportError, AttributeError):
-            pass
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
 
     # Fallback 2: single colour - at least the points show up in 3D.
     if symbol is None:
@@ -69,7 +72,7 @@ def enable_point_cloud_3d_rendering(layer) -> bool:
     try:
         symbol.setPointSize(2.0)
     except (AttributeError, TypeError):
-        pass
+        _LOG.debug("Ignored non-fatal error", exc_info=True)
 
     renderer3d = QgsPointCloudLayer3DRenderer()
     renderer3d.setSymbol(symbol)
@@ -133,7 +136,7 @@ def get_gpu_info() -> dict:
                 "mem": 0.0,
             }
     except Exception:
-        pass
+        _LOG.debug("Ignored non-fatal error", exc_info=True)
 
     cuda_built = hasattr(t.version, "cuda") and t.version.cuda is not None
     return {

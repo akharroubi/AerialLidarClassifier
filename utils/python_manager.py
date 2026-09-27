@@ -10,7 +10,6 @@ import os
 import copy
 import platform
 import shutil
-import subprocess
 import sys
 import tarfile
 import tempfile
@@ -21,6 +20,7 @@ from qgis.core import Qgis, QgsBlockingNetworkRequest, QgsMessageLog
 from qgis.PyQt.QtCore import QUrl
 from qgis.PyQt.QtNetwork import QNetworkRequest
 
+from . import proc
 from .compat import scoped_enum
 
 CACHE_DIR = (
@@ -218,16 +218,11 @@ def get_download_url() -> str:
 
 
 def _get_subprocess_kwargs() -> dict:
-    """Get platform-specific subprocess kwargs for hiding console windows.
+    """Extra keyword arguments for ``proc.run`` (none are needed).
 
-    Returns:
-        Dict with startupinfo for Windows, empty dict otherwise.
+    QProcess already starts console programs without a window when
+    QGIS (a GUI application) launches them on Windows.
     """
-    if sys.platform == "win32":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-        return {"startupinfo": startupinfo}
     return {}
 
 
@@ -430,10 +425,8 @@ def verify_standalone_python(python_path=None) -> Tuple[bool, str]:
         env = _get_clean_env()
         subprocess_kwargs = _get_subprocess_kwargs()
 
-        result = subprocess.run(
+        result = proc.run(
             [python_path, "-c", "import sys, ssl, venv, encodings; print(sys.version)"],
-            capture_output=True,
-            text=True,
             timeout=30,
             env=env,
             **subprocess_kwargs,
@@ -461,7 +454,7 @@ def verify_standalone_python(python_path=None) -> Tuple[bool, str]:
             _log(f"Python verification failed: {error}", Qgis.MessageLevel.Warning)
             return False, f"Verification failed: {error[:100]}"
 
-    except subprocess.TimeoutExpired:
+    except proc.TimeoutExpired:
         return False, "Python verification timed out"
     except Exception as e:
         return False, f"Verification error: {str(e)[:100]}"

@@ -6,18 +6,23 @@ Python dependencies (PyTorch, laspy, ...). Keeping them out of
 QGIS's own Python avoids version conflicts.
 """
 
+import contextlib
 import hashlib
 import os
 import platform
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import time
 from typing import Callable, List, Optional, Tuple
 
 from qgis.core import Qgis, QgsMessageLog
+
+from . import proc
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 PYTHON_VERSION = f"py{sys.version_info.major}.{sys.version_info.minor}"
 CACHE_DIR = (
@@ -185,10 +190,8 @@ def _check_rosetta_warning() -> Optional[str]:
     machine = platform.machine()
     if machine == "x86_64":
         try:
-            result = subprocess.run(
-                ["sysctl", "-n", "machdep.cpu.brand_string"],
-                capture_output=True,
-                text=True,
+            result = proc.run(
+                ["/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"],
                 timeout=5,
             )
             if "Apple" in result.stdout:
@@ -197,7 +200,7 @@ def _check_rosetta_warning() -> Optional[str]:
                     "on Apple Silicon. This may cause compatibility issues. "
                     "Consider using the native ARM64 version of QGIS.")
         except Exception:
-            pass
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
     return None
 
 
@@ -237,7 +240,7 @@ def _read_cuda_flag() -> Optional[str]:
         if base in ("cuda", "cpu", "cuda_fallback"):
             return base
     except (OSError, IOError):
-        pass
+        _LOG.debug("Ignored non-fatal error", exc_info=True)
     return None
 
 
@@ -372,14 +375,12 @@ def detect_nvidia_gpu() -> Tuple[bool, dict]:
 
     try:
         subprocess_kwargs = _get_subprocess_kwargs()
-        result = subprocess.run(
+        result = proc.run(
             [
                 smi_path,
                 "--query-gpu=name,compute_cap,driver_version,memory.total",
                 "--format=csv,noheader,nounits",
             ],
-            capture_output=True,
-            text=True,
             timeout=5,
             **subprocess_kwargs,
         )
@@ -421,14 +422,14 @@ def detect_nvidia_gpu() -> Tuple[bool, dict]:
                 try:
                     gpu_info["compute_cap"] = float(parts[1])
                 except ValueError:
-                    pass
+                    _LOG.debug("Ignored non-fatal error", exc_info=True)
             if len(parts) >= 3 and parts[2]:
                 gpu_info["driver_version"] = parts[2]
             if len(parts) >= 4 and parts[3]:
                 try:
                     gpu_info["memory_mb"] = int(float(parts[3]))
                 except ValueError:
-                    pass
+                    _LOG.debug("Ignored non-fatal error", exc_info=True)
 
             cc = gpu_info.get("compute_cap", 0.0)
             if cc > best_compute_cap:
@@ -453,7 +454,7 @@ def detect_nvidia_gpu() -> Tuple[bool, dict]:
         _gpu_detect_cache = (True, best_gpu)
         return _gpu_detect_cache
 
-    except subprocess.TimeoutExpired:
+    except proc.TimeoutExpired:
         _log("nvidia-smi timed out after 5s", Qgis.MessageLevel.Warning)
     except Exception as e:
         _log(f"nvidia-smi check failed: {e}", Qgis.MessageLevel.Warning)
@@ -848,10 +849,8 @@ def _verify_venv_python_runs(venv_dir: str) -> Tuple[bool, str]:
 
     try:
         subprocess_kwargs = _get_subprocess_kwargs()
-        result = subprocess.run(
+        result = proc.run(
             [python_path, "--version"],
-            capture_output=True,
-            text=True,
             timeout=10,
             **subprocess_kwargs,
         )
@@ -862,7 +861,7 @@ def _verify_venv_python_runs(venv_dir: str) -> Tuple[bool, str]:
             "pattern). Exclude {cache} from your AV and reinstall."
             .format(path=python_path, cache=CACHE_DIR)
         )
-    except subprocess.TimeoutExpired:
+    except proc.TimeoutExpired:
         return False, (
             "Virtual environment Python at {path} hung on a simple "
             "--version call. This usually means a missing Visual C++ "
@@ -1015,24 +1014,19 @@ def _get_clean_env_for_venv() -> dict:
 
 
 def _get_subprocess_kwargs() -> dict:
-    """Get platform-specific subprocess kwargs.
+    """Keyword arguments shared by every program the installer runs.
 
     Forces a neutral ``cwd`` (the cache directory) so the venv Python
     can never accidentally import a package from the QGIS plugin's
-    own directory via the current working directory.
+    own directory via the current working directory. Console windows
+    stay hidden on Windows because QProcess starts console programs
+    without one from a GUI application.
 
     Returns:
-        Dict with cwd and startupinfo (Windows).
+        Dict with cwd.
     """
     os.makedirs(CACHE_DIR, exist_ok=True)
-    kwargs = {"cwd": CACHE_DIR}
-    if sys.platform == "win32":
-        startupinfo = subprocess.STARTUPINFO()
-        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startupinfo.wShowWindow = subprocess.SW_HIDE
-        kwargs["startupinfo"] = startupinfo
-        kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-    return kwargs
+    return {"cwd": CACHE_DIR}
 
 
 def _get_qgis_proxy_settings() -> Optional[str]:
@@ -1321,10 +1315,8 @@ def _get_qgis_python() -> Optional[str]:
         env["PYTHONIOENCODING"] = "utf-8"
         subprocess_kwargs = _get_subprocess_kwargs()
 
-        result = subprocess.run(
+        result = proc.run(
             [python_path, "-c", "import sys; print(sys.version)"],
-            capture_output=True,
-            text=True,
             timeout=15,
             env=env,
             **subprocess_kwargs,
@@ -1373,7 +1365,7 @@ def _get_linux_system_python() -> Optional[str]:
             env["PYTHONIOENCODING"] = "utf-8"
             subprocess_kwargs = _get_subprocess_kwargs()
 
-            result = subprocess.run(
+            result = proc.run(
                 [
                     candidate,
                     "-c",
@@ -1384,8 +1376,6 @@ def _get_linux_system_python() -> Optional[str]:
                         "sys.version_info.micro)"
                     ),
                 ],
-                capture_output=True,
-                text=True,
                 timeout=15,
                 env=env,
                 **subprocess_kwargs,
@@ -1631,10 +1621,8 @@ def create_venv(
         env = _get_clean_env_for_venv()
         subprocess_kwargs = _get_subprocess_kwargs()
 
-        result = subprocess.run(
+        result = proc.run(
             cmd,
-            capture_output=True,
-            text=True,
             timeout=120,
             env=env,
             **subprocess_kwargs,
@@ -1661,10 +1649,8 @@ def create_venv(
                 uv_path, "venv", "--managed-python",
                 "--python", uv_python, venv_dir,
             ]
-            result = subprocess.run(
+            result = proc.run(
                 cmd,
-                capture_output=True,
-                text=True,
                 timeout=120,
                 env=env,
                 **subprocess_kwargs,
@@ -1690,10 +1676,8 @@ def create_venv(
                         "--upgrade",
                     ]
                     try:
-                        ensurepip_result = subprocess.run(
+                        ensurepip_result = proc.run(
                             ensurepip_cmd,
-                            capture_output=True,
-                            text=True,
                             timeout=120,
                             env=env,
                             **subprocess_kwargs,
@@ -1747,7 +1731,7 @@ def create_venv(
                 return False, _format_application_control_help()
             return False, f"Failed to create venv: {error_msg[:1500]}"
 
-    except subprocess.TimeoutExpired:
+    except proc.TimeoutExpired:
         _log("Virtual environment creation timed out", Qgis.MessageLevel.Critical)
         _cleanup_partial_venv(venv_dir)
         return False, "Virtual environment creation timed out"
@@ -1846,78 +1830,44 @@ def _run_pip_install(
         suffix="_stdout.txt", prefix="pip_")
     stderr_fd, stderr_path = tempfile.mkstemp(
         suffix="_stderr.txt", prefix="pip_")
+    # QProcess opens the two files itself; only their names are needed.
+    os.close(stdout_fd)
+    os.close(stderr_fd)
 
-    try:
-        stdout_file = os.fdopen(stdout_fd, "w", encoding="utf-8")
-        stderr_file = os.fdopen(stderr_fd, "w", encoding="utf-8")
-    except Exception:
+    def read_file(path: str) -> str:
         try:
-            os.close(stdout_fd)
-        except Exception:
-            pass
-        try:
-            os.close(stderr_fd)
-        except Exception:
-            pass
-        raise
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()
+        except OSError:
+            return ""
 
     process = None
     try:
-        process = subprocess.Popen(
-            cmd,
-            stdout=stdout_file,
-            stderr=stderr_file,
-            text=True,
-            env=env,
-            **subprocess_kwargs,
-        )
+        process = proc.Background(
+            cmd, stdout_path, stderr_path, env=env,
+            cwd=subprocess_kwargs.get("cwd"))
 
         start_time = time.monotonic()
         last_download_status = ""
 
-        while True:
-            try:
-                process.wait(timeout=poll_interval)
-                break
-            except subprocess.TimeoutExpired:
-                pass
-
+        while not process.wait(poll_interval):
             elapsed = int(time.monotonic() - start_time)
 
             if cancel_check and cancel_check():
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
+                process.stop()
                 return _PipResult(-1, "", "Installation cancelled")
 
             if elapsed >= timeout:
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait(timeout=5)
-                raise subprocess.TimeoutExpired(cmd, timeout)
+                process.stop()
+                raise proc.TimeoutExpired(cmd, timeout)
 
-            # Read last lines to find download progress
-            try:
-                with open(stdout_path, "r", encoding="utf-8", errors="replace") as f:
-                    f.seek(0, 2)
-                    file_size = f.tell()
-                    read_from = max(0, file_size - 4096)
-                    f.seek(read_from)
-                    tail = f.read()
-                    lines = tail.strip().split("\n")
-                    for line in reversed(lines):
-                        parsed = _parse_pip_download_line(line)
-                        if parsed:
-                            last_download_status = parsed
-                            break
-            except Exception:
-                pass
+            # Read the last lines to find download progress.
+            tail = read_file(stdout_path)[-4096:]
+            for line in reversed(tail.strip().splitlines()):
+                parsed = _parse_pip_download_line(line)
+                if parsed:
+                    last_download_status = parsed
+                    break
 
             if elapsed >= 60:
                 elapsed_str = "{}m {}s".format(elapsed // 60, elapsed % 60)
@@ -1940,54 +1890,18 @@ def _run_pip_install(
             if progress_callback:
                 progress_callback(interpolated, msg)
 
-        stdout_file.close()
-        stderr_file.close()
-        stdout_file = None
-        stderr_file = None
+        return _PipResult(process.returncode, read_file(stdout_path), read_file(stderr_path))
 
-        try:
-            with open(stdout_path, "r", encoding="utf-8", errors="replace") as f:
-                full_stdout = f.read()
-        except Exception:
-            full_stdout = ""
-
-        try:
-            with open(stderr_path, "r", encoding="utf-8", errors="replace") as f:
-                full_stderr = f.read()
-        except Exception:
-            full_stderr = ""
-
-        return _PipResult(process.returncode, full_stdout, full_stderr)
-
-    except subprocess.TimeoutExpired:
+    except proc.TimeoutExpired:
         raise
     except Exception:
-        if process and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except Exception:
-                process.kill()
+        if process is not None:
+            process.stop()
         raise
     finally:
-        if stdout_file is not None:
-            try:
-                stdout_file.close()
-            except Exception:
-                pass
-        if stderr_file is not None:
-            try:
-                stderr_file.close()
-            except Exception:
-                pass
-        try:
-            os.unlink(stdout_path)
-        except Exception:
-            pass
-        try:
-            os.unlink(stderr_path)
-        except Exception:
-            pass
+        for path in (stdout_path, stderr_path):
+            with contextlib.suppress(OSError):
+                os.unlink(path)
 
 
 # ---------------------------------------------------------------------------
@@ -2017,8 +1931,8 @@ def _get_installed_versions(
         cmd = [python_path, "-m", "pip", "freeze",
                "--disable-pip-version-check"]
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=120, env=env,
+        result = proc.run(
+            cmd, timeout=120, env=env,
             **subprocess_kwargs,
         )
     except Exception as exc:
@@ -2090,10 +2004,8 @@ def _is_cpu_torch_installed(
         True if CPU-only torch is installed.
     """
     try:
-        result = subprocess.run(
+        result = proc.run(
             [python_path, "-c", "import torch; print(torch.version.cuda)"],
-            capture_output=True,
-            text=True,
             timeout=30,
             env=env,
             **subprocess_kwargs,
@@ -2101,7 +2013,7 @@ def _is_cpu_torch_installed(
         if result.returncode == 0:
             return result.stdout.strip() == "None"
     except Exception:
-        pass
+        _LOG.debug("Ignored non-fatal error", exc_info=True)
     return False
 
 
@@ -2133,9 +2045,9 @@ def _install_spconv(
     variants = [f"{name}-{idx}" for idx in _SPCONV_INDEXES + ("cu128", "cu120")
                 for name in ("spconv", "cumm")]
     try:
-        subprocess.run(
+        proc.run(
             [uv_path, "pip", "uninstall", "--python", python_path] + variants,
-            capture_output=True, text=True, timeout=180, env=env,
+            timeout=180, env=env,
             **subprocess_kwargs,
         )
     except Exception as exc:
@@ -2189,10 +2101,8 @@ def _verify_cuda_in_venv(venv_dir: str) -> bool:
         # Retry once because CUDA initialization can be transiently slow/flaky
         # immediately after installation on some Windows systems.
         for attempt in (1, 2):
-            result = subprocess.run(
+            result = proc.run(
                 [python_path, "-c", cuda_test_code],
-                capture_output=True,
-                text=True,
                 timeout=180 if attempt == 2 else 120,
                 env=env,
                 **subprocess_kwargs,
@@ -2442,10 +2352,8 @@ def install_dependencies(
                             "-y",
                             package_name,
                         ]
-                    subprocess.run(
+                    proc.run(
                         uninstall_cmd,
-                        capture_output=True,
-                        text=True,
                         timeout=120,
                         env=env,
                         **subprocess_kwargs,
@@ -2580,7 +2488,7 @@ def install_dependencies(
                     install_error_msg = error_msg
                     last_returncode = result.returncode
 
-            except subprocess.TimeoutExpired:
+            except proc.TimeoutExpired:
                 _log(
                     "Installation of {} timed out".format(package_spec),
                     Qgis.MessageLevel.Critical,
@@ -2908,7 +2816,7 @@ def install_dependencies(
                 return (False, "Failed to install {}: {}".format(
                     failed_pkg, error_output[:200]), )
 
-        except subprocess.TimeoutExpired:
+        except proc.TimeoutExpired:
             _log("Batch install timed out", Qgis.MessageLevel.Critical)
             return False, "Dependency installation timed out"
         except Exception as e:
@@ -3055,10 +2963,8 @@ def verify_venv(
         pkg_timeout = _get_verification_timeout(package_name)
 
         try:
-            result = subprocess.run(
+            result = proc.run(
                 cmd,
-                capture_output=True,
-                text=True,
                 timeout=pkg_timeout,
                 env=env,
                 **subprocess_kwargs,
@@ -3084,7 +2990,7 @@ def verify_venv(
                     package_name, error_detail[:200]
                 )
 
-        except subprocess.TimeoutExpired:
+        except proc.TimeoutExpired:
             _log(
                 "Verification of {} timed out ({}s), retrying...".format(
                     package_name, pkg_timeout
@@ -3092,10 +2998,8 @@ def verify_venv(
                 Qgis.MessageLevel.Info,
             )
             try:
-                result = subprocess.run(
+                result = proc.run(
                     cmd,
-                    capture_output=True,
-                    text=True,
                     timeout=pkg_timeout,
                     env=env,
                     **subprocess_kwargs,
@@ -3113,7 +3017,7 @@ def verify_venv(
                     return False, "Package {} is broken: {}".format(
                         package_name, error_detail[:200]
                     )
-            except subprocess.TimeoutExpired:
+            except proc.TimeoutExpired:
                 if _is_optional_verify_package(package_name):
                     _log(
                         "Verification of {} timed out but package is optional on "

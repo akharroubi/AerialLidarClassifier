@@ -67,6 +67,9 @@ from ..utils.logger import log_info, log_warning
 from ..utils.output_safety import (atomic_output_path, validate_output_paths, validate_label_field, validate_waveform_storage,
                                    checked_predictions, label_values, assign_labels, add_label_metadata,
                                    upgrade_header_preserving_fields, convert_points_preserving_fields)
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 
 # Chunk size used both for partitioning and for the output writer.
@@ -163,7 +166,7 @@ def streaming_tiled_classify(
             try:
                 info_callback(msg)
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
 
     def _emit_warning(msg: str) -> None:
         log_warning(msg)
@@ -171,7 +174,7 @@ def streaming_tiled_classify(
             try:
                 warning_callback(msg)
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
 
     emit_info = _emit_info
     emit_warning = _emit_warning

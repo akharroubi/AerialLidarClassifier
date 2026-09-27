@@ -29,6 +29,9 @@ from ..core.registry import ModelSpec, get_model
 from .compat import scoped_enum
 from .logger import log_error, log_info, log_warning
 from .weights import is_verified
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 
 _CHUNK = 1024 * 256
@@ -145,7 +148,7 @@ class ModelManager:
                 try:
                     tmp_path.unlink()
                 except OSError:
-                    pass
+                    _LOG.debug("Ignored non-fatal error", exc_info=True)
                 return False, (
                     f"SHA-256 mismatch for {origin} (expected "
                     f"{expected[:12]}..., got {got[:12]}...). The file is "
@@ -276,7 +279,7 @@ class ModelManager:
             try:
                 request.downloadProgress.connect(on_progress)
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
             err = request.get(QNetworkRequest(QUrl(url)), False, feedback)
             if feedback.isCanceled():
                 return False, "Download cancelled."

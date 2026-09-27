@@ -11,9 +11,12 @@ def int_to_plotly_rgb(x):
     """Convert 1D torch.Tensor of int into plotly-friendly RGB format.
     This operation is deterministic on the int values.
     """
-    assert isinstance(x, torch.Tensor)
-    assert x.dim() == 1
-    assert not x.is_floating_point()
+    if not (isinstance(x, torch.Tensor)):
+        raise AssertionError('isinstance(x, torch.Tensor)')
+    if not (x.dim() == 1):
+        raise AssertionError('x.dim() == 1')
+    if not (not x.is_floating_point()):
+        raise AssertionError('not x.is_floating_point()')
     from colorhash import ColorHash  # debug helper only; not a plugin dependency
     x = x.cpu().long().numpy()
     palette = np.array([ColorHash(i).rgb for i in range(x.max() + 1)])
@@ -21,7 +24,8 @@ def int_to_plotly_rgb(x):
 
 @torch.inference_mode()
 def encode(grid_coord, batch=None, depth=16, order="z"):
-    assert order in {"z", "z-trans", "hilbert", "hilbert-trans"}
+    if not (order in {"z", "z-trans", "hilbert", "hilbert-trans"}):
+        raise AssertionError('order in {"z", "z-trans", "hilbert", "hilbert-trans"}')
     if order == "z":
         code = z_order_encode(grid_coord, depth=depth)
         # code = torch.argsort(code)
@@ -46,7 +50,8 @@ def encode(grid_coord, batch=None, depth=16, order="z"):
 
 @torch.inference_mode()
 def decode(code, depth=16, order="z"):
-    assert order in {"z", "hilbert"}
+    if not (order in {"z", "hilbert"}):
+        raise AssertionError('order in {"z", "hilbert"}')
     batch = code >> depth * 3
     code = code & ((1 << depth * 3) - 1)
     if order == "z":

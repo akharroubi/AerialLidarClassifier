@@ -22,6 +22,9 @@ from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 METRE = 1.0
 INTERNATIONAL_FOOT = 0.3048
@@ -358,7 +361,7 @@ def _header_vlrs(header) -> list:
         try:
             vlrs.extend(list(getattr(header, attr, None) or []))
         except Exception:
-            pass
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
     return vlrs
 
 
@@ -378,7 +381,7 @@ def _header_wkt(header) -> Optional[str]:
             try:
                 return bytes(raw).decode("utf-8", errors="ignore").strip("\x00")
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
     return None
 
 
@@ -392,6 +395,7 @@ def _header_geokeys(header) -> dict:
                 if int(entry.tiff_tag_location) == 0:
                     keys[int(entry.id)] = int(entry.value_offset)
             except Exception:
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
                 continue
         return keys
     return {}

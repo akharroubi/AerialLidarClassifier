@@ -69,6 +69,9 @@ from ..utils.logger import LOG_TAG, log_error, log_info, log_warning
 from ..utils.model_manager import ModelManager
 from ..widgets.drag_drop_list import DragDropList
 from ..workers.file_loader import FileInfoLoader
+import logging
+
+_LOG = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +183,7 @@ class ClassifierDockWidget(QDockWidget):
                 self._on_log_message
             )
         except Exception:
-            pass
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
 
         # Stop and reap any in-flight FileInfoLoader threads so we do
         # not leak QThread handles if the user closes the dock while
@@ -192,7 +195,7 @@ class ClassifierDockWidget(QDockWidget):
                     loader.quit()
                     loader.wait(2000)
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
         self._loaders.clear()
 
         # Cancel any running classification task and disconnect its
@@ -203,7 +206,7 @@ class ClassifierDockWidget(QDockWidget):
                 if not self.task.isCanceled():
                     self.task.cancel()
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
             for signal_name in (
                 "progressChanged",
                 "taskCompleted",
@@ -211,7 +214,7 @@ class ClassifierDockWidget(QDockWidget):
                 try:
                     getattr(self.task, signal_name).disconnect()
                 except Exception:
-                    pass
+                    _LOG.debug("Ignored non-fatal error", exc_info=True)
             self.task = None
 
         self.closed.emit()
@@ -485,6 +488,7 @@ class ClassifierDockWidget(QDockWidget):
                 self.layer_combo.setFilters(candidate())
                 break
             except Exception:
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
                 continue
         self.layer_combo.setAllowEmptyLayer(
             True, "(select a point-cloud layer)")
@@ -1122,7 +1126,7 @@ class ClassifierDockWidget(QDockWidget):
         try:
             self._loaders.remove(loader)
         except ValueError:
-            pass
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
         loader.deleteLater()
 
     def _on_file_info_loaded(self, filepath, point_count, file_size_mb):
@@ -1518,7 +1522,7 @@ class ClassifierDockWidget(QDockWidget):
                 if hasattr(err, "summary") and err.summary():
                     err_summary = err.summary()
             except Exception:
-                pass
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
             failures.append((output_path, err_summary))
             log_warning(
                 f"Failed to load '{output_path.name}' as point cloud "
