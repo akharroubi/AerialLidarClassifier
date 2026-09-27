@@ -502,7 +502,7 @@ And, optionally, the plugin itself:
                   semantic segmentation of aerial LiDAR point clouds},
   year         = {2026},
   url          = {https://github.com/akharroubi/AerialLidarClassifier},
-  version      = {1.1.1},
+  version      = {1.1.2},
   note         = {GPL-3.0-or-later}
 }
 ```

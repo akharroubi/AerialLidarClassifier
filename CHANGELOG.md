@@ -4,7 +4,7 @@ All notable changes to **Aerial LiDAR Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
-## [1.1.1] - 2026-09-27
+## [1.1.2] - 2026-09-27
 
 ### Changed
 - Stable release: the plugin is no longer marked experimental.
@@ -19,6 +19,11 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - The plugins.qgis.org security scan now passes with no configuration
   file: the `.bandit` file is removed, and `build_zip.py` refuses to
   build when Bandit reports any finding.
+- Cancel during the dependency setup, and the time limits on helper
+  programs, stop the running program at once on Windows.
+
+1.1.1 was uploaded but replaced by 1.1.2 before approval; it waited
+10 s before stopping a helper program on Windows.
 
 ## [1.1.0] - 2026-09-25
 

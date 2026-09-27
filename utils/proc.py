@@ -11,6 +11,7 @@ programs without opening a console window.
 that the installer reads for progress.
 """
 import locale
+import sys
 from typing import Dict, List, Optional, Sequence
 
 from qgis.PyQt.QtCore import QProcess, QProcessEnvironment
@@ -83,13 +84,23 @@ def _running(process: QProcess) -> bool:
 
 
 def _stop(process: QProcess) -> None:
-    """Ask the program to stop, then force it after 10 s."""
+    """Stop the program.
+
+    On Windows QProcess.terminate() only posts WM_CLOSE, which console
+    programs ignore, so the program is ended at once (TerminateProcess,
+    what subprocess.Popen.terminate() does there). Elsewhere it gets
+    SIGTERM first and SIGKILL after 10 s.
+    """
     if not _running(process):
         return
-    process.terminate()
-    if not process.waitForFinished(10000):
+    if sys.platform == "win32":
         process.kill()
-        process.waitForFinished(5000)
+    else:
+        process.terminate()
+        if process.waitForFinished(10000):
+            return
+        process.kill()
+    process.waitForFinished(5000)
 
 
 def run(

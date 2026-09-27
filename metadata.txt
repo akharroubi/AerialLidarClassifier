@@ -3,7 +3,7 @@ name=Aerial LiDAR Classifier
 qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Deep-learning semantic segmentation of aerial LiDAR point clouds with LitePT-L (default on NVIDIA GPUs) or the 3D SegFormer (GPU or CPU).
-version=1.1.1
+version=1.1.2
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
 email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
@@ -38,13 +38,15 @@ hasProcessingProvider=yes
 server=False
 
 changelog=
-    1.1.1
+    1.1.2
         - Stable release: no longer marked experimental.
         - The dependency installer starts its helper programs (portable
           Python, uv, nvidia-smi) through Qt's QProcess.
         - Errors that are safe to ignore are now logged at debug level,
           and internal checks raise explicit errors. The plugin passes
           the plugins.qgis.org security scan with no configuration file.
+        - Cancel during the dependency setup stops the running step at
+          once on Windows.
     1.1.0
         - New default model on NVIDIA GPUs: LitePT-L, a point transformer
           trained on DALES at 10 cm (8 classes, test mIoU 0.824). The 3D
