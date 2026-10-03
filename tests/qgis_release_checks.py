@@ -95,7 +95,7 @@ class ReleaseChecks(unittest.TestCase):
             final.write_bytes(b'old good model'); temporary.write_bytes(b'new good model')
             manager = object.__new__(manager_module.ModelManager)
             manager.spec = types.SimpleNamespace(weights_sha256=hashlib.sha256(b'new good model').hexdigest(), short_name='test')
-            with patch.object(manager, 'get_model_path', return_value=final), patch.object(Path, 'replace', side_effect=PermissionError('locked')):
+            with patch.object(manager, '_cache_path', return_value=final), patch.object(Path, 'replace', side_effect=PermissionError('locked')):
                 ok, reason = manager._verify_and_promote(temporary, 'test')
             self.assertFalse(ok); self.assertIn('retained', reason)
             self.assertEqual(final.read_bytes(), b'old good model')

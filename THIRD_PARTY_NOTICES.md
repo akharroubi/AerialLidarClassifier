@@ -1,4 +1,4 @@
-# Model provenance and licences
+# Third-party notices and licences
 
 The plugin's original source is GPL-3.0-or-later; see LICENSE. Model weights
 are separate downloads and are not included in the plugin ZIP.
@@ -9,16 +9,24 @@ Architecture and vendored implementation: Photogrammetry and Remote Sensing
 Lab, ETH Zurich, https://github.com/prs-eth/LitePT. The upstream MIT notice is
 retained in `core/litept/LICENSE.upstream`.
 
-The released DALES 10 cm weights were trained by Abderrazzaq Kharroubi /
-GeoScITY Lab, University of Liege. The maintainer confirmed ownership of this
-trained model on 25 September 2026. The release retains the maintainer's
-existing CC BY-NC 4.0 designation for these weights. This designation is not
-an assertion that the training dataset automatically determines the licence
-of a trained model. DALES is credited separately as training data.
+The LitePT-L Airborne weights are provided by Abderrazzaq Kharroubi /
+GeoScITY Lab, University of Liege. The release retains the maintainer's
+existing CC BY-NC 4.0 designation for these weights (research and other
+non-commercial use).
 
 Weight file: `litept_l_dales_10cm_ema_fp16.pth`
 
 SHA-256: starts with `849ba5089e62` (full value in `core/registry.py`).
+
+## LitePT-L Mobile Mapping
+
+The LitePT-L Mobile Mapping weights are provided by Abderrazzaq Kharroubi /
+GeoScITY Lab, University of Liege. They are released under CC BY-NC 4.0
+(research and other non-commercial use).
+
+Weight file: `litept_l_mls_5cm_fp16.pth`
+
+SHA-256: starts with `d2fd555c9147` (full value in `core/registry.py`).
 
 ## SegFormer 3D / UrbanFiltering
 

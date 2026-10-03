@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512">
-  <title>Aerial LiDAR Classifier</title>
+  <title>LiDAR AI Classifier</title>
   <circle cx="23.60" cy="17.00" r="6.20" fill="#228B22"/>
   <circle cx="10.40" cy="30.20" r="6.20" fill="#228B22"/>
   <circle cx="23.60" cy="30.20" r="6.20" fill="#228B22"/>

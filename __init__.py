@@ -1,7 +1,7 @@
-"""Aerial LiDAR Classifier - QGIS Plugin.
+"""LiDAR AI Classifier - QGIS Plugin.
 
-Deep-learning semantic segmentation of aerial LiDAR point clouds with
-LitePT-L (prs-eth/LitePT, trained on DALES) or the 3D SegFormer from the
+Deep-learning semantic segmentation of airborne and mobile mapping LiDAR
+with separate LitePT-L models (prs-eth/LitePT) or the 3D SegFormer from the
 TreeAIBox project (NRCan, Crown Copyright, Government of Canada). Model
 weights are CC BY-NC 4.0; see core/registry.py.
 """

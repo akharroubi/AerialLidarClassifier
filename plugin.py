@@ -27,7 +27,7 @@ import logging
 _LOG = logging.getLogger(__name__)
 
 
-MENU_LABEL = "&Aerial LiDAR Classifier"
+MENU_LABEL = f"&{PLUGIN_NAME}"
 DOCS_URL = "https://github.com/akharroubi/AerialLidarClassifier"
 
 
@@ -64,11 +64,11 @@ class AerialLidarClassifierPlugin:
         # Main toggle action (checkable - shows/hides the dock panel)
         self.toggle_action = self._add_action(
             QIcon(self.icon_path),
-            tr("Aerial LiDAR Classifier"),
+            tr(PLUGIN_NAME),
             self.toggle_dock,
             checkable=True,
             add_to_toolbar=True,
-            tooltip=tr("Show / hide the Aerial LiDAR Classifier panel"),
+            tooltip=tr(f"Show / hide the {PLUGIN_NAME} panel"),
         )
         self.iface.addPluginToMenu(MENU_LABEL, self.toggle_action)
 
@@ -118,7 +118,7 @@ class AerialLidarClassifierPlugin:
         from .processing.provider import AerialLidarProvider
         provider = AerialLidarProvider()
         if not QgsApplication.processingRegistry().addProvider(provider):
-            raise RuntimeError("Could not register Aerial LiDAR Processing provider.")
+            raise RuntimeError(f"Could not register the {PLUGIN_NAME} Processing provider.")
         self.provider = provider
 
     def unload(self):

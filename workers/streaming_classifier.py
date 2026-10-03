@@ -61,12 +61,14 @@ import numpy as np
 
 from ..config import TILE_DEFAULT_BUFFER_M
 from ..core.tiling import compute_tile_grid
+from ..utils.class_mapping import supports_output_codes, validate_model_output_field
 from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_from_header
 from ..utils.logger import log_info, log_warning
 from ..utils.output_safety import (atomic_output_path, validate_output_paths, validate_label_field, validate_waveform_storage,
                                    checked_predictions, label_values, assign_labels, add_label_metadata,
-                                   upgrade_header_preserving_fields, convert_points_preserving_fields)
+                                   upgrade_header_preserving_fields, convert_points_preserving_fields,
+                                   extra_dim_description)
 import logging
 
 _LOG = logging.getLogger(__name__)
@@ -155,6 +157,8 @@ def streaming_tiled_classify(
     """
     validate_output_paths([input_path], [output_path])
     field = (field_name or ASPRS_CLASSIFICATION_FIELD).strip() or ASPRS_CLASSIFICATION_FIELD
+    if model_spec is not None:
+        field = validate_model_output_field(model_spec, field)
     is_asprs_field = field.lower() == ASPRS_CLASSIFICATION_FIELD
 
     # Convenience wrappers: always log to QgsMessageLog, AND surface to
@@ -456,6 +460,7 @@ def _build_output_header(
     field_name: str,
     needs_pf_upgrade: bool,
     field_description: str = "AI classification",
+    preserve_legacy_angle: bool = True,
 ):
     """Build the output LAS header, applying every requested transformation.
 
@@ -469,10 +474,11 @@ def _build_output_header(
     _strip_copc_from_header(header)
 
     if needs_pf_upgrade:
-        header = upgrade_header_preserving_fields(header, laspy_module)
+        header = upgrade_header_preserving_fields(
+            header, laspy_module, preserve_legacy_angle=preserve_legacy_angle)
     if not is_asprs_field and field_name not in header.point_format.dimension_names:
         header.add_extra_dim(laspy_module.ExtraBytesParams(
-            name=field_name, type="int32", description=str(field_description)[:32]))
+            name=field_name, type="int32", description=extra_dim_description(field_description)))
 
     return header
 
@@ -483,6 +489,7 @@ def _build_chunk_for_writer(
     out_scales,
     out_offsets,
     laspy_module,
+    preserve_legacy_angle: bool = True,
 ):
     """Create an output-schema point record and copy every common dim
     from the input chunk by name."""
@@ -497,7 +504,9 @@ def _build_chunk_for_writer(
 
     # Raw structured fields preserve scaled uint64 extras without float conversion.
     if in_chunk.point_format.id != out_pf.id:
-        return convert_points_preserving_fields(in_chunk, out_pf, out_scales, out_offsets, laspy_module)
+        return convert_points_preserving_fields(
+            in_chunk, out_pf, out_scales, out_offsets, laspy_module,
+            preserve_legacy_angle=preserve_legacy_angle)
     for name in in_chunk.array.dtype.names:
         if name not in out_chunk.array.dtype.names:
             raise ValueError(f"Output schema would lose raw field '{name}'.")
@@ -525,6 +534,7 @@ def _pass4_write(
     emit_info(f"Streaming pass 4/4: writing {output_path.name}")
 
     is_laz = output_path.suffix.lower() == ".laz"
+    preserve_legacy_angle = model_spec is None or not supports_output_codes(model_spec)
 
     # Determine whether we need a PRF upgrade.
     max_code = int(predictions.max()) if predictions.size else 0
@@ -541,6 +551,7 @@ def _pass4_write(
             field_name=field_name,
             needs_pf_upgrade=needs_pf_upgrade,
             field_description=field_description,
+            preserve_legacy_angle=preserve_legacy_angle,
         )
         if model_spec is not None:
             add_label_metadata(out_header, model_spec, field_name)
@@ -604,6 +615,7 @@ def _pass4_write(
                 # all common dims by name from the input chunk.
                 out_chunk = _build_chunk_for_writer(
                     chunk, out_pf, out_scales, out_offsets, laspy_module,
+                    preserve_legacy_angle=preserve_legacy_angle,
                 )
                 chunk_preds = predictions[global_offset:global_offset + n]
                 assign_labels(out_chunk, target_field, chunk_preds.astype(cls_dtype))

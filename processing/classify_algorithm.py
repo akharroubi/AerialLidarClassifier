@@ -1,4 +1,4 @@
-"""Processing algorithm: classify aerial LiDAR point cloud.
+"""Processing algorithm: classify airborne or Mobile Mapping LiDAR.
 
 Wraps the same classification pipeline used by the interactive dock so
 it can be invoked from the Processing Toolbox, the Graphical Modeler
@@ -8,6 +8,7 @@ Output is written to the standard ASPRS ``classification`` dimension by
 default (LAS / LAZ 1.4 / point format 6 when codes require >5 bits).
 """
 
+import logging
 from pathlib import Path
 
 from qgis.core import (
@@ -28,8 +29,11 @@ from qgis.core import (
 
 from ..config import PLUGIN_NAME, TILE_DEFAULT_BUFFER_M
 from ..core.registry import MODELS
+from ..utils.class_mapping import output_codes_json, output_model_spec, supports_output_codes, validate_model_output_field
 from ..utils.compat import scoped_enum
 from ..utils.las_units import UNIT_OVERRIDES, resolve_units
+
+_LOG = logging.getLogger(__name__)
 
 # Scoped enums (QGIS >= 3.36, required by QGIS 4 / PyQt6) with the
 # QGIS 3.34 spellings as fallback.
@@ -52,6 +56,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
     OUTPUT_FOLDER = "OUTPUT_FOLDER"
     SUFFIX = "SUFFIX"
     FIELD_NAME = "FIELD_NAME"
+    OUTPUT_CODES_JSON = "OUTPUT_CODES_JSON"
     DEVICE = "DEVICE"
     LOAD_AS_LAYER = "LOAD_AS_LAYER"
     TILE_ENABLED = "TILE_ENABLED"
@@ -81,7 +86,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         return "classify_lidar"
 
     def displayName(self) -> str:  # noqa: N802
-        return self.tr("Classify aerial LiDAR point cloud")
+        return self.tr("Classify airborne / Mobile Mapping LiDAR point cloud")
 
     def group(self) -> str:
         return self.tr("Classification")
@@ -94,24 +99,23 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         parts = []
         for spec in MODELS:
             rows = "".join(
-                f"<tr><td>{info.name}</td><td>{info.asprs_code}</td></tr>"
+                f"<tr><td>{info.model_id}</td><td>{info.name}</td><td>{info.asprs_code}</td></tr>"
                 for info in spec.class_mapping.values()
             )
             parts.append(
                 f"<p><b>{spec.display_name}</b> ({spec.device_requirement_text()}): "
                 f"{spec.description} Licence: {spec.licence}.</p>"
-                "<table><tr><th align=left>Class</th><th align=left>ASPRS code</th></tr>"
+                "<table><tr><th align=left>Model ID</th><th align=left>Class</th><th align=left>Default output code</th></tr>"
                 f"{rows}</table>"
             )
         return "".join(parts)
 
     def shortHelpString(self) -> str:  # noqa: N802
         return self.tr(
-            "<h3>Aerial LiDAR Classifier</h3>"
-            "<p>Deep-learning semantic segmentation of aerial LiDAR point "
-            "clouds (LAS / LAZ / COPC). Two models are available; classes "
-            "without an ASPRS code (cars, trucks, fences) are written as "
-            "1 = <i>Unclassified</i>.</p>"
+            f"<h3>{PLUGIN_NAME}</h3>"
+            "<p>Deep-learning semantic segmentation of airborne and Mobile Mapping "
+            "point clouds (LAS / LAZ / COPC). Choose the model for the acquisition "
+            "type. The Mobile Mapping model has nine classes and editable output codes.</p>"
             "<h4>Models</h4>"
             + self._models_help() +
             "<h4>ASPRS compliance</h4>"
@@ -119,23 +123,33 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "LAS <code>classification</code> dimension. The file is "
             "automatically promoted to <b>LAS 1.4 / a compatible point format</b> "
             "when an assigned code exceeds the 5-bit legacy limit of point "
-            "formats 0-5, so any ASPRS code 0-255 is encoded losslessly.</p>"
+            "formats 0-5, so any classification code 0-255 is encoded losslessly. "
+            "Mobile Mapping defaults 64, 65 and 66 are project-defined codes for "
+            "pole-like objects, vehicles and fences/barriers.</p>"
             "<h4>Parameters</h4>"
             "<ul>"
             "<li><b>Input point cloud</b> - a single LAS, LAZ or "
             "<code>.copc.laz</code> file.</li>"
-            "<li><b>Model</b> - LitePT-L (NVIDIA CUDA GPU required) or "
-            "SegFormer 3D (GPU or CPU). The weights download "
-            "automatically the first time a model is used (SHA-256 "
-            "verified).</li>"
+            "<li><b>Model</b> - LitePT-L Airborne or LitePT-L Mobile Mapping "
+            "(NVIDIA CUDA GPU required), or SegFormer 3D Airborne (GPU or CPU). "
+            "The weights download automatically the first time a model is used "
+            "(SHA-256 verified).</li>"
             "<li><b>Output folder</b> - where the classified file is "
             "written.</li>"
             "<li><b>Output filename suffix</b> - appended before the "
             "extension. Default <code>_classified</code>.</li>"
             "<li><b>Classification field</b> - the dimension to write "
             "predictions into. Default <code>classification</code> "
-            "(ASPRS standard). Use a new name to store raw model IDs in an extra-byte "
-            "field instead.</li>"
+            "(ASPRS standard). Mobile Mapping always writes to this existing field. "
+            "Airborne models also support a new name to store raw model IDs in an extra-byte field.</li>"
+            "<li><b>Mobile Mapping output codes (JSON)</b> - optional overrides keyed "
+            "by model class ID, for example <code>{\"5\": 64, \"6\": 65, \"7\": 66}</code>. "
+            "Use model IDs 1-9 from the Mobile Mapping table above. Values must be "
+            "integers 0-255; omitted classes use model defaults. Repeated values "
+            "merge classes. This parameter applies only to the Mobile Mapping model "
+            "and the existing classification field. IDs 1-9 identify mapping rows; "
+            "no extra label field is added. "
+            "Processing uses this explicit parameter, independently of dock settings.</li>"
             "<li><b>Compute device</b> - <i>Auto</i> uses CUDA when "
             "PyTorch reports it, then Apple MPS, otherwise the CPU. "
             "<i>GPU (CUDA)</i> and <i>GPU (Apple MPS)</i> stop with a "
@@ -175,10 +189,9 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "</ul>"
             "<h4>Notes</h4>"
             "<ul>"
-            "<li>The class mapping is internal and not user-editable - the "
-            "standard classification field uses ASPRS codes. Custom fields retain raw model IDs. The five "
-            "primary classes map to their standard ASPRS codes; Vehicles "
-            "and Fences map to <i>Unclassified</i> (ASPRS 1).</li>"
+            "<li>Airborne model mappings retain their established defaults. "
+            "Mobile Mapping output codes can be customized with the JSON parameter. "
+            "The actual mapping and model identity are recorded in the output metadata.</li>"
             "</ul>")
 
     def initAlgorithm(self, config=None):  # noqa: N802
@@ -239,6 +252,14 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 self.LOAD_AS_LAYER,
                 self.tr("Load classified file in QGIS when finished"),
                 defaultValue=True,
+            )
+        )
+        self._add_advanced(
+            QgsProcessingParameterString(
+                self.OUTPUT_CODES_JSON,
+                self.tr("Mobile Mapping output codes (JSON; blank = model defaults)"),
+                defaultValue="",
+                optional=True,
             )
         )
         # -- Advanced parameters (collapsed in the dialog by default) --
@@ -321,6 +342,20 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
     def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
         import numpy as np
 
+        model_idx = self.parameterAsEnum(parameters, self.MODEL, context)
+        if not 0 <= model_idx < len(MODELS):
+            model_idx = 0
+        try:
+            spec = output_model_spec(
+                MODELS[model_idx],
+                self.parameterAsString(parameters, self.OUTPUT_CODES_JSON, context),
+            )
+            field_name = validate_model_output_field(
+                spec, self.parameterAsString(parameters, self.FIELD_NAME, context)
+            )
+        except ValueError as exc:
+            raise QgsProcessingException(self.tr(f"Invalid output settings: {exc}")) from exc
+
         from ..utils.venv_manager import (
             ensure_venv_packages_available,
             get_venv_status,
@@ -346,10 +381,6 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         # Make the venv site-packages importable from this Python process.
         ensure_venv_packages_available()
 
-        model_idx = self.parameterAsEnum(parameters, self.MODEL, context)
-        if not 0 <= model_idx < len(MODELS):
-            model_idx = 0
-        spec = MODELS[model_idx]
         manager = ModelManager(spec)
 
         input_path = Path(
@@ -360,10 +391,6 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         )
         suffix = self.parameterAsString(
             parameters, self.SUFFIX, context) or "_classified"
-        field_name = (
-            self.parameterAsString(parameters, self.FIELD_NAME, context)
-            or "classification"
-        )
         device_choice = self.parameterAsEnum(parameters, self.DEVICE, context)
         load_as_layer = self.parameterAsBool(
             parameters, self.LOAD_AS_LAYER, context
@@ -454,16 +481,18 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         )
 
         from ..utils.output_safety import (validate_label_field, read_complete, checked_predictions,
-                                           label_values, assign_labels, add_label_metadata, add_extra_dim_preserving_raw)
+                                           label_values, assign_labels, add_label_metadata, add_extra_dim_preserving_raw,
+                                           extra_dim_description)
         with laspy.open(str(input_path)) as reader:
             field_name = validate_label_field(reader.header.point_format, field_name, laspy)
         output_path = _resolve_output_path(input_path, output_folder, suffix)
         self._guard_input_output_collision(input_path, output_path)
 
-        # The class mapping is internal-only: it tells the inference
-        # post-processor how to translate the model's class ids into the
-        # standard ASPRS codes.
+        # Snapshot includes explicit MMS output code overrides, independent
+        # of interactive dock settings. Both writers record it in the VLR.
         class_mapping = spec.class_mapping
+        if supports_output_codes(spec):
+            feedback.pushInfo(self.tr(f"Mobile Mapping output codes: {output_codes_json(spec)}"))
 
         backend = create_backend(
             spec, manager.get_model_path(), log=feedback.pushWarning,
@@ -532,7 +561,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
 
             log_info(f"Streaming processing wrote {written}")
             if load_as_layer:
-                self._register_output_layer(written, context, feedback)
+                self._register_output_layer(written, context, feedback, spec, field_name)
             return {
                 self.OUTPUT_FOLDER: str(output_folder),
                 self.OUTPUT_FILE: str(written),
@@ -604,7 +633,9 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 max_code = int(asprs.max())
             except ValueError:
                 max_code = 0
-            las = _ensure_asprs_classification_capacity(las, laspy, max_code)
+            las = _ensure_asprs_classification_capacity(
+                las, laspy, max_code,
+                preserve_legacy_angle=not supports_output_codes(spec))
             las.classification = asprs.astype(np.uint8)
             feedback.pushInfo(
                 self.tr(
@@ -619,7 +650,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             else:
                 add_extra_dim_preserving_raw(las, laspy.ExtraBytesParams(
                     name=field_name, type="int32",
-                    description=f"AI classification ({spec.display_name})"[:32],
+                    description=extra_dim_description(f"AI classification ({spec.display_name})"),
                 ))
                 assign_labels(las, field_name, asprs)
             feedback.pushInfo(
@@ -644,7 +675,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         log_info(f"Processing algorithm wrote {output_path}")
 
         if load_as_layer:
-            self._register_output_layer(output_path, context, feedback)
+            self._register_output_layer(output_path, context, feedback, spec, field_name)
 
         return {
             self.OUTPUT_FOLDER: str(output_folder),
@@ -652,7 +683,8 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         }
 
     # ------------------------------------------------------------------
-    def _register_output_layer(self, output_path: Path, context, feedback) -> None:
+    def _register_output_layer(self, output_path: Path, context, feedback, spec=None,
+                               field_name="classification") -> None:
         """Ask Processing to load the result once the algorithm has finished.
 
         ``processAlgorithm`` runs in a worker thread when launched from
@@ -671,16 +703,31 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             ))
             return
 
+        # This method runs in the Processing worker. Keep the primary output
+        # as OUTPUT_FILE and register only the optional compatible viewing copy.
+        from ..utils.pointcloud_view import prepare_qgis_view
+        view_path = prepare_qgis_view(
+            output_path, cancel_callback=feedback.isCanceled,
+            info_callback=feedback.pushInfo, warning_callback=feedback.pushWarning,
+        )
+        if feedback.isCanceled():
+            return
+
         details = QgsProcessingContext.LayerDetails(
             output_path.stem, project, self.OUTPUT_FILE, _POINT_CLOUD_HINT
         )
         # Processing only keeps a weak reference to the post-processor;
         # one that is garbage-collected is silently skipped.
-        self._post_processor = _PointCloud3DPostProcessor()
+        standard_field = spec is not None and field_name.strip().lower() == "classification"
+        self._post_processor = _PointCloud3DPostProcessor(
+            spec.class_mapping if standard_field else None,
+            classify_2d=bool(standard_field and supports_output_codes(spec)),
+            primary_output=output_path,
+        )
         details.setPostProcessor(self._post_processor)
-        context.addLayerToLoadOnCompletion(str(output_path), details)
+        context.addLayerToLoadOnCompletion(str(view_path), details)
         feedback.pushInfo(self.tr(
-            f"'{output_path.name}' will be added to the project when the "
+            f"'{view_path.name}' will be added to the project when the "
             "algorithm finishes."
         ))
 
@@ -696,11 +743,28 @@ _POINT_CLOUD_HINT = getattr(
 class _PointCloud3DPostProcessor(QgsProcessingLayerPostProcessorInterface):
     """Runs on the main thread after Processing loaded the output layer."""
 
+    def __init__(self, class_mapping=None, classify_2d=False, primary_output=None):
+        super().__init__()
+        from copy import deepcopy
+        self.class_mapping = deepcopy(class_mapping)
+        self.classify_2d = classify_2d
+        self.primary_output = primary_output
+
     def postProcessLayer(self, layer, context, feedback):  # noqa: N802
         try:
             from ..utils.helpers import enable_point_cloud_3d_rendering
-            enable_point_cloud_3d_rendering(layer)
+            enable_point_cloud_3d_rendering(layer, self.class_mapping, self.classify_2d)
         except Exception as exc:
             feedback.pushWarning(
                 f"Could not attach a 3D renderer to '{layer.name()}': {exc}"
             )
+        if self.primary_output is not None:
+            # Viewing copies of earlier runs that no layer uses any more.
+            try:
+                from ..utils.pointcloud_view import remove_stale_views
+                project = context.project() if context is not None else None
+                in_use = ([lyr.source() for lyr in project.mapLayers().values()]
+                          if project is not None else [])
+                remove_stale_views(self.primary_output, keep=layer.source(), in_use=in_use)
+            except Exception:
+                _LOG.debug("Ignored non-fatal error", exc_info=True)

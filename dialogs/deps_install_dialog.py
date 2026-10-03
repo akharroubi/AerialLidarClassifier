@@ -9,6 +9,8 @@ import os
 import platform
 import sys
 
+from ..config import PLUGIN_NAME
+
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
@@ -41,7 +43,7 @@ class DepsInstallDockWidget(QDockWidget):
         Args:
             parent: Optional parent widget.
         """
-        super().__init__("Aerial LiDAR Classifier - Setup", parent)
+        super().__init__(f"{PLUGIN_NAME} - Setup", parent)
         self.setObjectName("AerialLidarClassifierDepsInstallDock")
         self.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
@@ -56,7 +58,7 @@ class DepsInstallDockWidget(QDockWidget):
         welcome_layout = QVBoxLayout(welcome_group)
 
         welcome_text = QLabel(
-            "Aerial LiDAR Classifier needs to install its AI "
+            f"{PLUGIN_NAME} needs to install its AI "
             "dependencies before you can run it.\n\n"
             "This is a one-time setup, with nothing to configure. It will:\n"
             "  \u2022 Download a Python runtime (~50 MB)\n"
@@ -160,7 +162,7 @@ class DepsInstallDockWidget(QDockWidget):
         self.cpu_retry_button.setToolTip(
             "Installs PyTorch for the CPU. LitePT-L will not be available; "
             "SegFormer 3D runs on the CPU. You can retry the GPU version "
-            "later with Plugins > Aerial LiDAR Classifier > Repair "
+            f"later with Plugins > {PLUGIN_NAME} > Repair "
             "dependencies.")
         self.cpu_retry_button.clicked.connect(self._on_cpu_retry_clicked)
         self.cpu_retry_button.hide()

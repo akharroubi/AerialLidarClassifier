@@ -17,6 +17,7 @@ from ..core.backends import create_backend
 from ..core.registry import get_model
 from ..core.tiling import compute_tile_grid
 from ..utils.compat import scoped_enum
+from ..utils.class_mapping import output_model_spec, supports_output_codes, validate_model_output_field
 from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_vlrs
 from ..utils.logger import LOG_TAG, log_error, log_info, log_warning
@@ -24,7 +25,7 @@ from ..utils.model_manager import ModelManager
 from ..utils.output_safety import (add_extra_dim_preserving_raw, atomic_output_path, validate_output_paths, validate_label_field,
                                    read_complete, checked_predictions, label_values, assign_labels,
                                    add_label_metadata, upgrade_header_preserving_fields,
-                                   convert_points_preserving_fields)
+                                   convert_points_preserving_fields, extra_dim_description)
 import logging
 
 _LOG = logging.getLogger(__name__)
@@ -53,7 +54,8 @@ ASPRS_CLASSIFICATION_FIELD = "classification"
 ASPRS_PF6 = 6
 
 
-def _ensure_asprs_classification_capacity(las, laspy_module, max_code: int):
+def _ensure_asprs_classification_capacity(las, laspy_module, max_code: int,
+                                          preserve_legacy_angle: bool = True):
     """Return a LAS object whose point format can hold ``max_code``.
 
     The ASPRS LAS specification only guarantees a full classification
@@ -70,9 +72,11 @@ def _ensure_asprs_classification_capacity(las, laspy_module, max_code: int):
         return las
     if pf_id >= ASPRS_PF6:
         return las
-    header = upgrade_header_preserving_fields(las.header, laspy_module)
+    header = upgrade_header_preserving_fields(
+        las.header, laspy_module, preserve_legacy_angle=preserve_legacy_angle)
     points = convert_points_preserving_fields(las.points, header.point_format,
-                                               header.scales, header.offsets, laspy_module)
+                                               header.scales, header.offsets, laspy_module,
+                                               preserve_legacy_angle=preserve_legacy_angle)
     return laspy_module.LasData(header, points)
 
 
@@ -227,7 +231,8 @@ class ClassificationTask(QgsTask):
     def __init__(self, files, out_dir, suffix, model_id, device, field_name,
                  tile_enabled=False, tile_auto=True,
                  tile_size_m=None, tile_buffer_m=TILE_DEFAULT_BUFFER_M,
-                 tile_streaming=False, units_override=None):
+                 tile_streaming=False, units_override=None, output_codes=None,
+                 prepare_qgis_view=False):
         super().__init__("Classifying LiDAR point clouds",
                          scoped_enum(QgsTask, "Flag", "CanCancel"))
         # "auto" (read the CRS), "metre", "foot" or "us_foot"; see
@@ -238,10 +243,10 @@ class ClassificationTask(QgsTask):
         self.suffix = suffix or "_classified"
         # The model (core.registry) brings its weights, its backend and
         # its class-id -> ASPRS mapping.
-        self.spec = get_model(model_id)
+        self.spec = output_model_spec(get_model(model_id), output_codes)
         # "cuda", "mps" or "cpu" (see classifier_core.resolve_device).
         self.device = device
-        self.field_name = field_name or ASPRS_CLASSIFICATION_FIELD
+        self.field_name = validate_model_output_field(self.spec, field_name)
         self.class_mapping = self.spec.class_mapping
 
         self.tile_enabled = bool(tile_enabled)
@@ -251,6 +256,8 @@ class ClassificationTask(QgsTask):
         self.tile_streaming = bool(tile_streaming)
 
         self.output_files = []
+        self.prepare_qgis_view = bool(prepare_qgis_view)
+        self.view_files = {}
         self.error_message = None
         self.current_file_name = ""
         # Set while a stage other than a file is running (weights download).
@@ -370,6 +377,17 @@ class ClassificationTask(QgsTask):
                     )
                     if actual_path is not None:
                         self.output_files.append(actual_path)
+                        if self.prepare_qgis_view:
+                            from ..utils.pointcloud_view import prepare_qgis_view
+                            self.status_text = f"Preparing QGIS view: {actual_path.name}"
+                            # Emit so the dock shows the step (no other progress meanwhile).
+                            self.setProgress(file_base + file_span * 0.98)
+                            self.view_files[actual_path] = prepare_qgis_view(
+                                actual_path, laspy_module=laspy, cancel_callback=self.isCanceled,
+                            )
+                            self.status_text = ""
+                            if self.isCanceled():
+                                return False
                 except InterruptedError:
                     log_info("Cancellation requested - stopping.")
                     return False
@@ -508,14 +526,16 @@ class ClassificationTask(QgsTask):
                 max_code = int(asprs_p.max())
             except ValueError:
                 max_code = 0
-            las = _ensure_asprs_classification_capacity(las, laspy, max_code)
+            las = _ensure_asprs_classification_capacity(
+                las, laspy, max_code,
+                preserve_legacy_angle=not supports_output_codes(self.spec))
             las.classification = asprs_p.astype(np.uint8)
         elif field in las.point_format.dimension_names:
             assign_labels(las, field, asprs_p)
         else:
             add_extra_dim_preserving_raw(las, laspy.ExtraBytesParams(
                 name=field, type="int32",
-                description=f"AI classification ({self.spec.display_name})"[:32],
+                description=extra_dim_description(f"AI classification ({self.spec.display_name})"),
             ))
             assign_labels(las, field, asprs_p)
 

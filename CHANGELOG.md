@@ -1,8 +1,66 @@
 # Changelog
 
-All notable changes to **Aerial LiDAR Classifier** will be documented here.
+All notable changes to **LiDAR AI Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
+
+## [1.2.0] - 2026-10-03
+
+### Fixed
+- Prevent a Processing shutdown crash after a first-use model download.
+  Delayed progress callbacks stop before the Processing feedback is released.
+
+### Added
+- **LitePT-L Mobile Mapping (MLS, 5 cm)**: a separate model for mobile
+  mapping point clouds. Nine classes: ground, low
+  vegetation, high vegetation, building, pole-like, vehicle,
+  fence/barrier, wire, unknown. Geometry only (XYZ), 5 cm voxels,
+  240,000-point / 12 m crops, NVIDIA CUDA. The fp16 weights (172 MB)
+  download automatically on first use or during Setup and are SHA-256
+  verified, like the airborne LitePT-L.
+- Editable output codes for the mobile mapping classes (*MMS classes:
+  Edit output codes...*), saved per model, with *Reset to model
+  defaults*. Defaults: ground 2, low vegetation 3, high vegetation 5,
+  building 6, pole-like 64, vehicle 65, fence/barrier 66, wire 14,
+  unknown 1 (64-66 are user-defined LAS codes). Repeated codes merge
+  classes. Processing: optional `OUTPUT_CODES_JSON`, e.g.
+  `{"5": 20, "6": 21}`; invalid values stop the run before inference.
+- Smaller GPUs get a reduced crop budget for the mobile mapping model
+  (under 16 GB: 120,000 points / 9 m; 8 GB or less: 50,000 points / 6 m),
+  logged when used.
+- Outputs that keep extra attributes of the input get a COPC viewing copy
+  (`<name>.<id>.qgis-view.copc.laz`, built with QGIS's Untwine) when
+  results are loaded, because some QGIS PDAL builds refuse LAS 1.4 files
+  with extra bytes. The classified LAS/LAZ is not modified and remains the
+  Processing `OUTPUT_FILE`.
+
+### Changed
+- The visible plugin name is now **LiDAR AI Classifier**. The package
+  folder (`Aerial_LiDAR_Classifier`), saved settings, model cache and the
+  Processing algorithm ID (`aeriallidar:classify_lidar`) are unchanged.
+- The existing models are labelled *Airborne*. Processing `MODEL` indexes
+  are unchanged: 0 LitePT-L Airborne, 1 SegFormer 3D Airborne, 2 LitePT-L
+  Mobile Mapping (new).
+- Mobile mapping writes only to the standard `classification` field; the
+  effective mapping is recorded in the `AerialLiDAR` VLR. Codes above 31
+  upgrade legacy point formats to LAS 1.4 without adding an extra
+  dimension (the legacy scan angle is converted to the LAS 1.4 angle, at
+  most 0.003 degrees of rounding).
+- Loaded layers are styled in 2D (mobile mapping) and 3D with the codes
+  actually written, including user-defined and merged codes.
+- A saved model choice is kept when it cannot run on the computer; the dock
+  explains what is missing instead of switching models silently.
+- LitePT dependency checks are retried after *Repair dependencies*
+  instead of being cached for the whole session, and name the package that
+  failed to import. A detected GPU with *Use GPU* switched off, and a
+  CPU-only PyTorch, now have their own messages.
+
+### Fixed
+- QGIS 4: the 3D renderer of loaded layers could not be created (the 3D
+  symbol classes cannot be instantiated from Python there); it is now
+  derived from the 2D renderer, on QGIS 3 and 4.
+- An RTX 5000 Ada could be taken for an RTX 50 (Blackwell) card when the
+  compute capability was unknown, which selected the cu128 index.
 
 ## [1.1.2] - 2026-09-27
 
@@ -30,15 +88,10 @@ and the project follows [Semantic Versioning](https://semver.org/).
 ### Added
 - **LitePT-L**, a second model and the new default on NVIDIA GPUs: a
   point transformer (85.8 M parameters, [prs-eth/LitePT](https://github.com/prs-eth/LitePT),
-  MIT) trained on the DALES aerial LiDAR dataset at 10 cm. Eight
+  MIT) using 10 cm voxels. Eight
   classes: ground, vegetation, cars, trucks, power lines, fences,
-  poles, buildings. Custom four-tile DALES test: mIoU 0.824, overall
-  accuracy 97.9 % (per class: ground 0.972, vegetation 0.940, cars
-  0.889, power lines 0.968; trucks 0.367 is the weak class). Weights
-  are shipped as float16 (172 MB, SHA-256 verified) and run in float32.
-  The plugin's port was checked against the reference implementation:
-  99.998 % of 2.7 M points identical on a single pass, 99.09 % through
-  150 m tiles, tiled and streaming outputs identical.
+  poles, buildings. Weights are downloaded as float16 (172 MB,
+  SHA-256 verified) and run in float32.
 - Model selector in the dock and a `MODEL` parameter in the Processing
   algorithm. Weights download automatically: Setup fetches the weights
   of every model that can run on the machine, and the first run of a
@@ -55,9 +108,9 @@ and the project follows [Semantic Versioning](https://semver.org/).
   sparse convolutions LitePT-L needs; no CPU or macOS build exists, so
   LitePT-L is CUDA-only and SegFormer 3D stays the model elsewhere).
   Missing required spconv now fails setup. The model panel also checks
-  native imports before enabling LitePT. cu126 is now preferred over cu128 on non-Blackwell
-  GPUs (spconv has no cu128 wheel yet; RTX 50 cards keep cu128 and
-  cannot run LitePT-L until spconv ships one).
+  native imports before enabling LitePT. cu126 is now preferred over cu128
+  on non-Blackwell GPUs. The cu128 installer path does not install spconv;
+  LitePT availability is reported by the model panel's dependency checks.
 - QGIS 4 support (`qgisMaximumVersion=4.99`), tested on QGIS 4.2.2
   (Qt 6.11, PyQt 6.11, Python 3.12) and 3.44.10 LTR (Qt 5.15).
 - New icon: a 7 x 7 grid of points coloured by class (brown ground, a
@@ -110,7 +163,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - Reach LitePT's 5,000-point OOM retry floor. A zero tile buffer remains zero.
 - Cooperatively cancel installers.
 - Add Repair dependencies, accurate model dependency gating and reproducible ZIP packaging.
-- Document maintainer-confirmed SegFormer permission and ownership of LitePT trained weights.
+- Document third-party licences and model-weight permissions.
 - Add optional Maven cohort invitations in the panel, About and plugin menu, with dismissible panel placement and fixed campaign tags.
 
 ### Fixed

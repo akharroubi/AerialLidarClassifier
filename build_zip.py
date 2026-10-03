@@ -1,6 +1,6 @@
 """Build the plugins.qgis.org ZIP from this checkout (flat repository layout).
 
-    python build_zip.py            -> dist/aerial_lidar_classifier_v<version>.zip
+    python build_zip.py            -> dist/lidar_ai_classifier_v<version>.zip
 
 The archive holds one top-level folder, ``Aerial_LiDAR_Classifier``: the
 package name of the published plugin (plugins.qgis.org/plugins/
@@ -8,9 +8,14 @@ Aerial_LiDAR_Classifier). Any other folder name would be a different
 plugin for QGIS and for the repository, so it must never change.
 
 Only an explicit list of runtime files is packed (no tests, reports,
-caches, weights or stray files). Timestamps are fixed and text files
-use LF, so the same source always gives the same bytes; a SHA-256
-sidecar is written next to the ZIP.
+caches, weights or stray files): model weights download on first use
+from the GitHub releases listed in core/registry.py. Timestamps are fixed
+and text files use LF, so the same source always gives the same bytes; a
+SHA-256 sidecar is written next to the ZIP.
+
+The build refuses to produce an archive that plugins.qgis.org would
+reject or hold for manual review: larger than 25 MB, containing binaries
+or weights, failing Bandit, Flake8's blocking checks, or the secrets scan.
 """
 import argparse
 import re
@@ -28,6 +33,11 @@ FILES = ("__init__.py", "plugin.py", "config.py", "metadata.txt", "icon.png",
 SKIP_SUFFIXES = (".pyc", ".pyo", ".pth", ".pt", ".log", ".zip", ".bak")
 TEXT_SUFFIXES = (".py", ".md", ".txt", ".json", ".svg", ".ts", ".ui", ".cfg")
 FIXED_TIME = (2026, 9, 25, 0, 0, 0)
+# plugins.qgis.org: "The size of the plugin package should not exceed 25MB"
+# and "Don't include binaries".
+MAX_ZIP_BYTES = 25 * 1000 * 1000
+FORBIDDEN_SUFFIXES = (".pt", ".pth", ".ckpt", ".onnx", ".npy", ".npz", ".exe", ".dll",
+                      ".so", ".dylib", ".pyd", ".sh", ".bat", ".cmd", ".las", ".laz")
 
 
 def read_version() -> str:
@@ -94,7 +104,12 @@ def check_bandit() -> None:
         raise SystemExit(f"Could not run Bandit: {exc}")
     if "No module named bandit" in result.stderr:
         raise SystemExit("Bandit is required to build: python -m pip install bandit")
-    findings = json.loads(result.stdout or "{}").get("results", [])
+    if result.returncode not in (0, 1):
+        raise SystemExit(f"Bandit failed to run: {result.stderr}")
+    scan = json.loads(result.stdout or "{}")
+    if "results" not in scan or scan.get("errors"):
+        raise SystemExit("Bandit did not complete a full source scan: " + result.stderr)
+    findings = scan["results"]
     if findings:
         listed = [f"{f['test_id']} {Path(f['filename']).relative_to(ROOT)}:{f['line_number']}"
                   for f in findings]
@@ -104,10 +119,37 @@ def check_bandit() -> None:
         raise SystemExit("Remove .bandit: the scan must pass without a config file.")
 
 
+def check_no_binaries(files) -> None:
+    """Weights, data and executables never go into the plugin ZIP."""
+    found = [str(p.relative_to(ROOT)) for p in files if p.suffix.lower() in FORBIDDEN_SUFFIXES]
+    if found:
+        raise SystemExit("Binary or data files must not be packed:\n  " + "\n  ".join(found))
+
+
+def check_flake8_blockers() -> None:
+    """Refuse the Flake8 errors plugins.qgis.org treats as blocking.
+
+    E9 (syntax / IO errors), F821 (undefined name), F823 (local variable
+    referenced before assignment) and F831 (duplicate argument name).
+    """
+    import subprocess  # nosec B404 - build tool only, never shipped
+    targets = [str(ROOT / name) for name in DIRS if (ROOT / name).is_dir()]
+    targets += [str(ROOT / name) for name in FILES if name.endswith(".py")]
+    result = subprocess.run(  # nosec B603 - fixed argument list
+        [sys.executable, "-m", "flake8", "--isolated", "--select=E9,F821,F823,F831", *targets],
+        capture_output=True, text=True, check=False)
+    if "No module named flake8" in result.stderr:
+        raise SystemExit("Flake8 is required to build: python -m pip install flake8")
+    if result.returncode != 0:
+        raise SystemExit("Flake8 blocking errors:\n" + (result.stdout or result.stderr))
+
+
 def build(destination: Path) -> str:
     files = collect()
+    check_no_binaries(files)
     check_secrets_scanner(files)
     check_bandit()
+    check_flake8_blockers()
     destination.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(destination, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in files:
@@ -119,6 +161,10 @@ def build(destination: Path) -> str:
             if path.suffix.lower() in TEXT_SUFFIXES or path.name.startswith("LICENSE"):
                 data = data.replace(b"\r\n", b"\n")
             archive.writestr(info, data)
+    if destination.stat().st_size > MAX_ZIP_BYTES:
+        size_mb = destination.stat().st_size / 1e6
+        destination.unlink()
+        raise SystemExit(f"The ZIP is {size_mb:.1f} MB; plugins.qgis.org accepts at most 25 MB.")
     digest = hashlib.sha256(destination.read_bytes()).hexdigest()
     destination.with_name(destination.name + ".sha256").write_text(
         f"{digest}  {destination.name}\n", encoding="utf-8")
@@ -131,5 +177,5 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("output", nargs="?", default=None)
     args = parser.parse_args()
-    default = ROOT / "dist" / f"aerial_lidar_classifier_v{read_version()}.zip"
+    default = ROOT / "dist" / f"lidar_ai_classifier_v{read_version()}.zip"
     build(Path(args.output) if args.output else default)

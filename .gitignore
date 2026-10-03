@@ -9,3 +9,13 @@ Thumbs.db
 *.zip
 release_evidence/
 dist/
+model_release/
+validation/
+test_logs/
+*.pt
+*.pth
+*.ckpt
+*.las
+*.laz
+*.npy
+*.npz

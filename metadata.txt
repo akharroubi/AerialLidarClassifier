@@ -1,18 +1,22 @@
 [general]
-name=Aerial LiDAR Classifier
+name=LiDAR AI Classifier
 qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
-description=Deep-learning semantic segmentation of aerial LiDAR point clouds with LitePT-L (default on NVIDIA GPUs) or the 3D SegFormer (GPU or CPU).
-version=1.1.2
+description=Classify airborne and mobile mapping LiDAR point clouds with deep learning (LitePT-L, SegFormer 3D).
+version=1.2.0
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
 email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
 
-about=Classifies aerial LiDAR point clouds (LAS / LAZ / COPC) into
-    ground, vegetation, buildings, power lines and poles, written as
-    standard ASPRS codes. Two deep-learning models: LitePT-L, a point
-    transformer trained on DALES at 10 cm (default on NVIDIA GPUs), and
-    the UrbanFiltering 3D SegFormer from NRCan's TreeAIBox (GPU or CPU).
+about=Classifies airborne and mobile mapping LiDAR point clouds
+    (LAS / LAZ / COPC) with deep-learning models. For mobile mapping,
+    LitePT-L MLS is a point transformer using 5 cm voxels.
+    It labels ground, low and high vegetation, buildings,
+    pole-like objects, vehicles, fences and barriers, wires and other
+    objects, and each class code can be edited. For airborne LiDAR,
+    LitePT-L at 10 cm (default on NVIDIA GPUs) and the
+    UrbanFiltering 3D SegFormer from NRCan's TreeAIBox (GPU or CPU) write
+    standard ASPRS codes. The LitePT-L models need an NVIDIA CUDA GPU.
     External dependencies: PyTorch, laspy, lazrs, timm, scipy and, on
     NVIDIA GPUs, spconv. A one-click setup installs them into a separate
     per-user folder on first use (no admin rights, nothing to
@@ -27,7 +31,7 @@ tracker=https://github.com/akharroubi/AerialLidarClassifier/issues
 repository=https://github.com/akharroubi/AerialLidarClassifier
 homepage=https://github.com/akharroubi/AerialLidarClassifier
 
-tags=lidar,point cloud,classification,semantic segmentation,deep learning,litept,point transformer,segformer,machine learning,pytorch,asprs,las,laz,copc,aerial,dales,treeaibox
+tags=lidar,point cloud,classification,semantic segmentation,deep learning,litept,point transformer,segformer,machine learning,pytorch,asprs,las,laz,copc,aerial,treeaibox,mobile mapping,mls,mms
 
 category=Analysis
 icon=icon.png
@@ -38,6 +42,30 @@ hasProcessingProvider=yes
 server=False
 
 changelog=
+    1.2.0
+        - New model for mobile mapping LiDAR: LitePT-L Mobile Mapping
+          (MLS, 5 cm), nine classes, NVIDIA CUDA. Weights download
+          automatically on first use and are SHA-256 verified.
+        - Fix a Processing shutdown crash after a first-use model
+          download by retiring download progress callbacks safely.
+        - Editable output codes for the mobile mapping classes, saved per
+          model, with a reset to the defaults (pole-like 64, vehicle 65,
+          fence/barrier 66 are user-defined codes). Processing parameter
+          OUTPUT_CODES_JSON.
+        - The visible name is now LiDAR AI Classifier. The package, saved
+          settings, model cache and Processing algorithm ID do not change.
+          The existing models are labelled Airborne and keep their
+          Processing MODEL indexes (0 and 1); the new model is 2.
+        - Classified layers are styled with the codes actually written, in
+          2D and 3D, including merged classes. Fixes the 3D style on QGIS 4.
+        - Outputs with existing extra attributes get a COPC viewing copy
+          when they are loaded, for QGIS builds whose PDAL reader rejects
+          them. The classified LAS/LAZ is not modified.
+        - LitePT dependency checks are retried after a repair and report
+          the failing package; "Use GPU" switched off and CPU-only PyTorch
+          are reported as such.
+        - RTX 5000 Ada is no longer mistaken for an RTX 50 (Blackwell) card
+          when the compute capability is unknown.
     1.1.2
         - Stable release: no longer marked experimental.
         - The dependency installer starts its helper programs (portable
@@ -48,8 +76,8 @@ changelog=
         - Cancel during the dependency setup stops the running step at
           once on Windows.
     1.1.0
-        - New default model on NVIDIA GPUs: LitePT-L, a point transformer
-          trained on DALES at 10 cm (8 classes, test mIoU 0.824). The 3D
+        - New default model on NVIDIA GPUs: LitePT-L Airborne, a point
+          transformer with 10 cm voxels and 8 classes. The 3D
           SegFormer stays available and is the model on CPU and Apple
           Silicon. Model selector in the dock, MODEL parameter in
           Processing.

@@ -21,6 +21,7 @@ from qgis.PyQt.QtNetwork import QNetworkRequest
 
 from . import proc
 from .compat import scoped_enum
+from ..config import PLUGIN_NAME
 
 CACHE_DIR = (
     os.environ.get("AERIAL_LIDAR_CLASSIFIER_CACHE_DIR")
@@ -42,7 +43,7 @@ def _log(message, level=Qgis.MessageLevel.Info):
     """
     QgsMessageLog.logMessage(
         str(message),
-        "Aerial LiDAR Classifier",
+        PLUGIN_NAME,
         level=level)
 
 

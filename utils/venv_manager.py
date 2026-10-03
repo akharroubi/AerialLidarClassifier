@@ -20,6 +20,7 @@ from typing import Callable, List, Optional, Tuple
 from qgis.core import Qgis, QgsMessageLog
 
 from . import proc
+from ..config import PLUGIN_NAME
 import logging
 
 _LOG = logging.getLogger(__name__)
@@ -142,7 +143,7 @@ def _log(message: str, level=Qgis.MessageLevel.Info):
         message: The message to log.
         level: The log level (default: Qgis.MessageLevel.Info).
     """
-    QgsMessageLog.logMessage(message, "Aerial LiDAR Classifier", level=level)
+    QgsMessageLog.logMessage(message, PLUGIN_NAME, level=level)
 
 
 def _log_system_info():
@@ -467,14 +468,14 @@ def _cuda_candidates(needs_cu128: bool) -> list:
     """Ordered CUDA wheel indexes to try (single source for the cascade)."""
     if needs_cu128:
         return ["cu128"]
-    return ["cu126", "cu128", "cu124", "cu121", "cu118"]
+    return ["cu126", "cu124", "cu121", "cu118"]
 
 
 def _select_cuda_index(gpu_info: dict) -> Optional[str]:
     """Choose the correct PyTorch CUDA wheel index based on GPU info.
 
     Picks the preferred CUDA toolkit the user's driver actually supports,
-    cascading down through ``cu126 -> cu128 -> cu124 -> cu121 -> cu118``
+    cascading down through ``cu126 -> cu124 -> cu121 -> cu118``
     if the preferred options require a more recent driver than installed.
     Each PyTorch wheel index publishes a subset of torch versions, so
     uv naturally resolves to the latest torch that has wheels for the
@@ -497,7 +498,13 @@ def _select_cuda_index(gpu_info: dict) -> Optional[str]:
     if compute_cap is not None:
         needs_cu128 = compute_cap >= _MIN_COMPUTE_CAP_FOR_CU128
     else:
-        needs_cu128 = "RTX 50" in gpu_name.upper()
+        # RTX 5000 Ada is a workstation Ada GPU, not the GeForce RTX 50
+        # series. Match consumer 5050..5099 names or an explicit Blackwell
+        # label only when nvidia-smi did not provide compute capability.
+        name = gpu_name.upper()
+        needs_cu128 = "BLACKWELL" in name or (
+            "ADA" not in name and re.search(r"\bRTX\s+50[5-9]\d\b", name) is not None
+        )
 
     driver_str = gpu_info.get("driver_version", "")
     driver_major = None
@@ -1219,6 +1226,13 @@ def ensure_venv_packages_available() -> bool:
     return True
 
 
+# DLL directories already registered in this QGIS session, with their
+# handles. ensure_venv_packages_available() runs on every model check of
+# the dock; registering (and logging) the same folder again each time is
+# useless, so each folder is added once.
+_DLL_DIRECTORY_HANDLES: dict = {}
+
+
 def _add_windows_dll_directories(site_packages: str) -> None:
     """Register DLL search directories for native packages on Windows.
 
@@ -1240,8 +1254,10 @@ def _add_windows_dll_directories(site_packages: str) -> None:
     path_parts = os.environ.get("PATH", "").split(os.pathsep)
     for dll_dir in dll_dirs:
         if os.path.isdir(dll_dir):
+            if dll_dir in _DLL_DIRECTORY_HANDLES:
+                continue
             try:
-                os.add_dll_directory(dll_dir)
+                _DLL_DIRECTORY_HANDLES[dll_dir] = os.add_dll_directory(dll_dir)
                 _log(f"Added DLL directory: {dll_dir}", Qgis.MessageLevel.Info)
             except OSError as exc:
                 _log(
@@ -3583,7 +3599,7 @@ def create_venv_and_install(
             "The packages were installed outside the plugin's environment "
             f"({where_msg} in {get_venv_site_packages(VENV_DIR)}). Please "
             "report this on the issue tracker with the Log Messages panel "
-            "content (Aerial LiDAR Classifier tab)."
+            f"content ({PLUGIN_NAME} tab)."
         )
 
     if cancel_check and cancel_check():

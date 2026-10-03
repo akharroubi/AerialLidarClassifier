@@ -6,77 +6,69 @@ import logging
 _LOG = logging.getLogger(__name__)
 
 
-def enable_point_cloud_3d_rendering(layer) -> bool:
-    """Attach a classification-coloured 3D renderer to a point-cloud layer.
+def _point_cloud_categories(class_mapping):
+    """One enabled legend category per actual output code, including merges."""
+    from qgis.core import QgsPointCloudCategory
+    from qgis.PyQt.QtGui import QColor
+    grouped = {}
+    for _class_id, info in sorted(class_mapping.items()):
+        code = int(info.asprs_code)
+        if code not in grouped:
+            grouped[code] = (info.color, [])
+        names = grouped[code][1]
+        if info.name not in names:
+            names.append(info.name)
+    return [QgsPointCloudCategory(code, QColor(color), " / ".join(names), True)
+            for code, (color, names) in sorted(grouped.items())]
 
-    When QGIS adds a ``QgsPointCloudLayer`` via Python without an
-    explicit 3D renderer, opening a 3D Map View shows the layer as a
-    flat 2D sprite (or invisibly). This helper wires up a 3D symbol
-    keyed on the standard ASPRS ``Classification`` attribute so the
-    layer renders correctly as a 3D point cloud immediately after
-    auto-load - no manual ``Layer Properties -> 3D View`` step.
 
-    Symbol preference: classification-categorised first (proper ASPRS
-    palette), then colour-ramp-by-attribute, then single colour. Each
-    is wrapped in feature-detection ``try/except`` so we degrade
-    gracefully on older / leaner QGIS builds.
+def enable_point_cloud_3d_rendering(layer, class_mapping=None, classify_2d=False) -> bool:
+    """Style actual classification codes, or mirror existing styling for raw fields.
 
-    Args:
-        layer: A ``QgsPointCloudLayer`` already added to the project.
-
-    Returns:
-        True if a 3D renderer was attached, False otherwise (in which
-        case the user can still open Layer Properties manually).
+    Pass the completed run's mapping only when it wrote the standard LAS
+    classification field. Mobile Mapping also uses these categories in 2D.
+    No point data is changed. Missing optional 3D support leaves 2D usable.
     """
+    source_2d = None
+    categories = _point_cloud_categories(class_mapping) if class_mapping else None
+    if categories:
+        from qgis.core import QgsPointCloudClassifiedRenderer
+        source_2d = QgsPointCloudClassifiedRenderer("Classification", categories)
+        if classify_2d:
+            layer.setRenderer(source_2d.clone())
+            layer.triggerRepaint()
+    else:
+        # Raw extra fields must not relabel the input's existing classification.
+        # Match its existing RGB/elevation style, instead of an empty category list.
+        source_2d = layer.renderer()
+
     try:
-        from qgis.core import QgsPointCloudLayer3DRenderer
+        from qgis import _3d as qgis3d
     except ImportError:
-        log_warning(
-            "3D point-cloud rendering classes not available in this "
-            "QGIS build; skipping auto-3D setup."
-        )
+        from qgis import core as qgis3d
+    renderer_class = getattr(qgis3d, "QgsPointCloudLayer3DRenderer", None)
+    if renderer_class is None or source_2d is None:
+        log_warning("3D point-cloud rendering is unavailable in this QGIS build.")
         return False
 
-    symbol = None
-    # Preferred: classification-categorised symbol (matches user
-    # intent for an ASPRS-classified file).
+    # The 3D symbol is built by QGIS from a 2D renderer. QGIS 4 exposes the
+    # 3D symbol classes (QgsClassificationPointCloud3DSymbol...) as abstract
+    # in Python, so they cannot be instantiated directly there.
     try:
-        from qgis.core import QgsClassificationPointCloud3DSymbol
-        symbol = QgsClassificationPointCloud3DSymbol()
-        symbol.setAttribute("Classification")
-    except (ImportError, AttributeError):
-        _LOG.debug("Ignored non-fatal error", exc_info=True)
-
-    # Fallback 1: colour ramp keyed on Classification.
-    if symbol is None:
-        try:
-            from qgis.core import QgsColorRampPointCloud3DSymbol
-            symbol = QgsColorRampPointCloud3DSymbol()
-            symbol.setAttribute("Classification")
-        except (ImportError, AttributeError):
-            _LOG.debug("Ignored non-fatal error", exc_info=True)
-
-    # Fallback 2: single colour - at least the points show up in 3D.
-    if symbol is None:
-        try:
-            from qgis.core import QgsSingleColorPointCloud3DSymbol
-            symbol = QgsSingleColorPointCloud3DSymbol()
-        except (ImportError, AttributeError):
-            log_warning(
-                "No usable point-cloud 3D symbol class in this QGIS "
-                "build; 3D rendering remains off for the layer."
-            )
+        renderer3d = renderer_class()
+        renderer3d.setLayer(layer)
+        if not renderer3d.convertFrom2DRenderer(source_2d):
+            log_warning(f"No 3D style could be derived for layer '{layer.name()}'; "
+                        "the 2D view is unaffected.")
             return False
-
-    # Reasonable default point size; user can change in Layer Properties.
-    try:
-        symbol.setPointSize(2.0)
-    except (AttributeError, TypeError):
-        _LOG.debug("Ignored non-fatal error", exc_info=True)
-
-    renderer3d = QgsPointCloudLayer3DRenderer()
-    renderer3d.setSymbol(symbol)
-    layer.setRenderer3D(renderer3d)
+        symbol = renderer3d.symbol()
+        if symbol is not None:
+            symbol.setPointSize(2.0)
+        layer.setRenderer3D(renderer3d)
+    except Exception as exc:
+        log_warning(f"3D rendering could not be enabled for layer '{layer.name()}': {exc}. "
+                    "The 2D view is unaffected.")
+        return False
     log_info(f"3D rendering enabled for layer '{layer.name()}'")
     return True
 

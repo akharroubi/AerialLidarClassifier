@@ -1,6 +1,6 @@
 """Linear units of a LAS file and the factors that bring XYZ to metres.
 
-The model was trained on metric data (30 cm voxels, 33.6 m blocks). Most
+The inference backends require coordinates in metres. Most
 US LiDAR is delivered in US survey feet; fed as-is, every distance is
 3.28 times too small for the model, buildings come out as wires and
 towers (GitHub issue #5) and there are about ten times more voxel

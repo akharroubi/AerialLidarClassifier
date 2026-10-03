@@ -6,6 +6,7 @@ native QGIS widgets where possible (QgsFileWidget, QgsCollapsibleGroupBox,
 QgsMessageBar) and stays out of the way when unused.
 """
 
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -61,7 +62,8 @@ from ..config import (
     SETTINGS_PREFIX,
     TILE_DEFAULT_BUFFER_M,
 )
-from ..core.registry import MODELS, default_model_for_device, get_model
+from ..core.registry import MODELS, FALLBACK_MODEL_ID, default_model_for_device, get_model
+from ..utils.class_mapping import output_codes_json, output_model_spec, supports_output_codes
 from ..utils.helpers import get_gpu_info, truncate_name
 from ..utils.las_units import UNIT_OVERRIDES
 from ..utils.las_utils import find_las_files
@@ -164,7 +166,7 @@ class ClassifierDockWidget(QDockWidget):
         self.gpu_check.toggled.connect(self._on_gpu_toggled)
 
         # Listen for plugin log messages
-        QgsApplication.messageLog().messageReceived.connect(self._on_log_message)
+        self._connect_log()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -184,6 +186,7 @@ class ClassifierDockWidget(QDockWidget):
             )
         except Exception:
             _LOG.debug("Ignored non-fatal error", exc_info=True)
+        self._log_connected = False
 
         # Stop and reap any in-flight FileInfoLoader threads so we do
         # not leak QThread handles if the user closes the dock while
@@ -216,9 +219,25 @@ class ClassifierDockWidget(QDockWidget):
                 except Exception:
                     _LOG.debug("Ignored non-fatal error", exc_info=True)
             self.task = None
+            # The dock is only hidden: when it is shown again it must be
+            # able to start a new run.
+            self._running = False
+            self.cancel_btn.setEnabled(False)
+            self.current_file_label.setText("Cancelled when the panel was closed.")
+            self._update_run_button()
 
         self.closed.emit()
         super().closeEvent(event)
+
+    def showEvent(self, event):  # noqa: N802 - Qt API
+        # closeEvent disconnects the log; reconnect when the dock reopens.
+        self._connect_log()
+        super().showEvent(event)
+
+    def _connect_log(self):
+        if not getattr(self, "_log_connected", False):
+            QgsApplication.messageLog().messageReceived.connect(self._on_log_message)
+            self._log_connected = True
 
     # ------------------------------------------------------------------
     # Settings
@@ -275,6 +294,23 @@ class ClassifierDockWidget(QDockWidget):
             s.value(f"{SETTINGS_PREFIX}/input_units", "auto") or "auto"
         )
         self._saved_model_id = str(s.value(f"{SETTINGS_PREFIX}/model_id", "") or "")
+        self._airborne_field_name = str(s.value(
+            f"{SETTINGS_PREFIX}/airborne_field_name", self._saved_field or "classification"
+        ) or "classification")
+        self._output_field_model_id = None
+        self._output_codes_by_model = {}
+        for spec in MODELS:
+            if not supports_output_codes(spec):
+                continue
+            saved = s.value(f"{SETTINGS_PREFIX}/output_codes/{spec.id}", "")
+            try:
+                selected = output_model_spec(spec, saved)
+            except ValueError as exc:
+                log_warning(f"Saved {spec.display_name} output codes were invalid; using defaults. {exc}")
+                selected = output_model_spec(spec)
+            self._output_codes_by_model[spec.id] = {
+                key: info.asprs_code for key, info in selected.class_mapping.items()
+            }
 
     def _save_settings(self):
         s = QgsSettings()
@@ -283,6 +319,7 @@ class ClassifierDockWidget(QDockWidget):
             f"{SETTINGS_PREFIX}/field_name",
             self.field_edit.text().strip() or "classification",
         )
+        s.setValue(f"{SETTINGS_PREFIX}/airborne_field_name", self._airborne_field_name)
         s.setValue(
             f"{SETTINGS_PREFIX}/load_result",
             self.load_result_check.isChecked())
@@ -631,7 +668,19 @@ class ClassifierDockWidget(QDockWidget):
             "input's own 'classification' is kept unchanged. Standard LAS "
             "dimension names (X, intensity, red...) are refused."
         )
+        self._airborne_field_tooltip = self.field_edit.toolTip()
         form.addRow("Field:", self.field_edit)
+
+        self.mms_codes_row = QWidget()
+        codes_layout = QHBoxLayout(self.mms_codes_row)
+        codes_layout.setContentsMargins(0, 0, 0, 0)
+        codes_layout.addWidget(QLabel("MMS classes:"))
+        self.mms_codes_btn = QPushButton("Edit output codes…")
+        self.mms_codes_btn.clicked.connect(self._edit_output_codes)
+        codes_layout.addWidget(self.mms_codes_btn, 1)
+        form.addRow(self.mms_codes_row)
+        self.mms_codes_row.hide()
+        self.field_edit.textChanged.connect(self._update_output_codes_button)
 
         self.load_result_check = QCheckBox(
             "Load classified files in QGIS"
@@ -926,11 +975,20 @@ class ClassifierDockWidget(QDockWidget):
             self.gpu_check.setChecked(False)
             self.gpu_check.setText("Use GPU (not available)")
             reason = self.gpu_info.get("reason", "no_gpu")
-            self.gpu_detail.setText(
-                "No CUDA / MPS device detected - inference will run on CPU."
-                if reason in ("no_gpu", "no_cuda")
-                else f"GPU probe failed: {reason}"
-            )
+            if reason == "no_cuda":
+                self.gpu_detail.setText(
+                    "PyTorch CPU build: inference runs on the CPU. On a computer with an "
+                    "NVIDIA GPU, Repair dependencies installs the GPU build.")
+            elif reason == "no_gpu":
+                self.gpu_detail.setText(
+                    "PyTorch has CUDA support but sees no GPU: update the NVIDIA driver, "
+                    "then restart QGIS. Inference runs on the CPU meanwhile.")
+            elif reason == "torch_import_failed":
+                self.gpu_detail.setText(
+                    "PyTorch could not be loaded (see the Log). Use Repair dependencies, "
+                    "then restart QGIS.")
+            else:
+                self.gpu_detail.setText(f"GPU probe failed: {reason}. See the plugin log for details.")
             self.device_label.setText("Device: CPU")
 
     def _current_device(self) -> str:
@@ -946,10 +1004,10 @@ class ClassifierDockWidget(QDockWidget):
         try:
             return get_model(self.model_combo.currentData())
         except KeyError:
-            return MODELS[-1]
+            return get_model(FALLBACK_MODEL_ID)
 
     def _select_initial_model(self):
-        """Saved choice when it still fits the device, else the default."""
+        """Restore the saved choice, preserving the Mobile Mapping domain."""
         device = self._current_device()
         chosen = None
         if self._saved_model_id:
@@ -957,7 +1015,9 @@ class ClassifierDockWidget(QDockWidget):
                 chosen = get_model(self._saved_model_id)
             except KeyError:
                 chosen = None
-        if chosen is None or not self._model_runs_here(chosen, device):
+        # Keep explicit saved choices. A device/dependency gate explains a
+        # missing requirement instead of silently substituting another model.
+        if chosen is None:
             chosen = default_model_for_device(device)
             if not self._model_runs_here(chosen, device):
                 # e.g. an RTX 50 card: CUDA works but spconv has no build
@@ -974,17 +1034,67 @@ class ClassifierDockWidget(QDockWidget):
     def _on_model_changed(self, _index=None):
         self._check_model()
 
+    def _update_output_codes_button(self, _text=None):
+        spec = self._current_spec()
+        mobile_mapping = supports_output_codes(spec)
+        previous_id = self._output_field_model_id
+        self._output_field_model_id = spec.id
+        self.field_edit.blockSignals(True)
+        if mobile_mapping:
+            if previous_id is not None and previous_id != spec.id:
+                self._airborne_field_name = self.field_edit.text().strip() or "classification"
+            self.field_edit.setText("classification")
+            self.field_edit.setToolTip(
+                "Mobile Mapping writes only to the existing LAS classification field. "
+                "Use Edit output codes to choose the code for each MMS class."
+            )
+        else:
+            if previous_id is not None and supports_output_codes(get_model(previous_id)):
+                self.field_edit.setText(self._airborne_field_name)
+            self._airborne_field_name = self.field_edit.text().strip() or "classification"
+            self.field_edit.setToolTip(self._airborne_field_tooltip)
+        self.field_edit.blockSignals(False)
+        self.field_edit.setEnabled(not mobile_mapping)
+        self.mms_codes_row.setVisible(mobile_mapping)
+        self.mms_codes_btn.setEnabled(True)
+        if mobile_mapping:
+            selected = output_model_spec(spec, self._output_codes_by_model.get(spec.id))
+            self.mms_codes_btn.setToolTip("\n".join(
+                f"{info.name}: {info.asprs_code}" for info in selected.class_mapping.values()
+            ))
+
+    def _edit_output_codes(self):
+        spec = self._current_spec()
+        if not supports_output_codes(spec):
+            return
+        from ..dialogs.class_mapping_dialog import ClassMappingDialog
+        dialog = ClassMappingDialog(spec, self._output_codes_by_model.get(spec.id), self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected = output_model_spec(spec, dialog.output_codes())
+            self._output_codes_by_model[spec.id] = {
+                key: info.asprs_code for key, info in selected.class_mapping.items()
+            }
+            QgsSettings().setValue(
+                f"{SETTINGS_PREFIX}/output_codes/{spec.id}", output_codes_json(selected)
+            )
+            self._update_output_codes_button()
+
     def _on_gpu_toggled(self, _checked=None):
         # The device gate of the selected model depends on the checkbox.
         self._check_model()
 
     def _check_model(self):
         spec = self._current_spec()
+        self._update_output_codes_button()
         manager = ModelManager(spec)
         device = self._current_device()
         self.model_combo.setToolTip(
             f"{spec.display_name}\n{spec.description}\n"
             f"{spec.device_requirement_text()}."
+        )
+        self.import_btn.setToolTip(
+            f"Import a weights file for {spec.display_name} (offline computers); "
+            "its SHA-256 is verified. Weights also download automatically on first use."
         )
 
         if manager.is_model_available():
@@ -1012,16 +1122,50 @@ class ClassifierDockWidget(QDockWidget):
             if dependency_message:
                 colour, status = _ERROR, "LitePT dependencies missing"
                 self.model_gate_message = dependency_message
+            elif (self.gpu_info.get("available")
+                  and self.gpu_info.get("backend", "cuda") == "cuda"
+                  and not self.gpu_check.isChecked()):
+                colour, status = _WARN, "GPU use is switched off"
+                self.model_gate_message = (
+                    f"{self.gpu_info.get('name', 'An NVIDIA CUDA GPU')} is detected. "
+                    f"Enable 'Use GPU' in Advanced parameters to run {spec.display_name}."
+                )
+            elif sys.platform == "darwin" or self.gpu_info.get("backend") == "mps":
+                colour, status = _ERROR, "Needs an NVIDIA GPU"
+                self.model_gate_message = (
+                    f"{spec.display_name} runs on NVIDIA CUDA GPUs only, which macOS "
+                    "does not support."
+                )
+            elif self.gpu_info.get("reason") == "no_cuda":
+                colour, status = _ERROR, "PyTorch is CPU-only"
+                self.model_gate_message = (
+                    f"{spec.display_name} runs on NVIDIA CUDA GPUs only, and the "
+                    "installed PyTorch build has no CUDA support. On a computer with "
+                    f"an NVIDIA GPU, use Plugins > {PLUGIN_NAME} > Repair dependencies "
+                    "(GPU installation), then restart QGIS."
+                )
+            elif self.gpu_info.get("reason") == "no_gpu":
+                colour, status = _ERROR, "No GPU visible"
+                self.model_gate_message = (
+                    f"{spec.display_name} runs on NVIDIA CUDA GPUs only. PyTorch has "
+                    "CUDA support but sees no GPU: update the NVIDIA driver, then "
+                    "restart QGIS."
+                )
+            elif self.gpu_info.get("reason") == "torch_import_failed":
+                colour, status = _ERROR, "PyTorch not loaded"
+                self.model_gate_message = (
+                    "PyTorch could not be loaded in QGIS (see the Log). Use "
+                    f"Plugins > {PLUGIN_NAME} > Repair dependencies, then restart QGIS."
+                )
             else:
                 colour, status = _ERROR, "Needs an NVIDIA GPU"
                 self.model_gate_message = (
-                    f"{spec.display_name} runs on NVIDIA CUDA GPUs only. "
-                    "Tick 'Use GPU' in Advanced parameters, or choose "
-                    "SegFormer 3D which runs on CPU."
+                    f"{spec.display_name} runs on NVIDIA CUDA GPUs only."
                 )
             fallback = next(
                 (m for m in MODELS
-                 if m.id != spec.id and self._model_runs_here(m, device)),
+                 if not supports_output_codes(spec)
+                 and m.id != spec.id and self._model_runs_here(m, device)),
                 None,
             )
             if fallback is not None:
@@ -1033,6 +1177,11 @@ class ClassifierDockWidget(QDockWidget):
         self.model_label.setText(
             f"<span style='color:{colour};'>●</span> {status}")
         self.model_label.setToolTip(self.model_gate_message)
+        if (self.model_gate_message
+                and self.model_gate_message != getattr(self, "_last_model_gate_message", "")):
+            # The log is selectable/copyable, unlike a transient tooltip.
+            self._log(f"{spec.display_name}: {self.model_gate_message}")
+        self._last_model_gate_message = self.model_gate_message
         self._update_run_button()
 
     def _on_fix_clicked(self):
@@ -1376,6 +1525,9 @@ class ClassifierDockWidget(QDockWidget):
             f"field: {field} "
             f"({'ASPRS-standard' if is_asprs else 'custom extra-byte'})"
         )
+        if supports_output_codes(spec):
+            selected = output_model_spec(spec, self._output_codes_by_model.get(spec.id))
+            self._log(f"Mobile Mapping output codes: {output_codes_json(selected)}")
 
         from ..workers.classifier_task import ClassificationTask
         self.task = ClassificationTask(
@@ -1391,6 +1543,8 @@ class ClassifierDockWidget(QDockWidget):
             tile_buffer_m=self.tile_buffer_spin.value(),
             tile_streaming=self.tile_streaming_check.isChecked(),
             units_override=self.units_combo.currentData() or "auto",
+            output_codes=self._output_codes_by_model.get(spec.id),
+            prepare_qgis_view=self.load_result_check.isChecked(),
         )
         self.task.progressChanged.connect(self._on_progress)
         self.task.taskCompleted.connect(self._on_task_completed)
@@ -1422,7 +1576,9 @@ class ClassifierDockWidget(QDockWidget):
         self._log(summary)
 
         if self.load_result_check.isChecked() and outputs:
-            self._load_output_layers(outputs)
+            views = getattr(self.task, "view_files", {}) if self.task else {}
+            self._load_output_layers([views.get(path, path) for path in outputs])
+            self._remove_stale_views(outputs, views)
 
         self._push_completion_message(summary, outputs)
 
@@ -1463,6 +1619,12 @@ class ClassifierDockWidget(QDockWidget):
                 f"Classification failed: {self.task.error_message[:200]}",
                 level=Qgis.MessageLevel.Critical, duration=0,
             )
+        elif self.task and self.task.output_files:
+            done = list(self.task.output_files)
+            self.current_file_label.setText(
+                f"Cancelled after {len(done)} file(s) were classified; they are kept.")
+            self._log("Classification cancelled by user. Classified files kept: "
+                      + ", ".join(str(path) for path in done))
         else:
             self.current_file_label.setText(
                 "Cancelled. Existing output files were left unchanged.")
@@ -1476,6 +1638,16 @@ class ClassifierDockWidget(QDockWidget):
     # ------------------------------------------------------------------
     # Output layer loading
     # ------------------------------------------------------------------
+
+    def _remove_stale_views(self, outputs, views):
+        """Delete viewing copies of earlier runs that no layer still uses."""
+        from ..utils.pointcloud_view import remove_stale_views
+        in_use = [layer.source() for layer in QgsProject.instance().mapLayers().values()]
+        for output in outputs:
+            try:
+                remove_stale_views(output, keep=views.get(output), in_use=in_use)
+            except Exception:
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
 
     def _load_output_layers(self, output_files):
         try:
@@ -1492,6 +1664,7 @@ class ClassifierDockWidget(QDockWidget):
 
         # Flush any pending UI / filesystem events so the just-written
         # LAZ file is fully visible to QGIS providers.
+        task = self.task  # snapshot before processing events can start another run
         QgsApplication.processEvents()
 
         failures: list[tuple[Path, str]] = []
@@ -1503,14 +1676,19 @@ class ClassifierDockWidget(QDockWidget):
                 continue
 
             layer = QgsPointCloudLayer(
-                str(output_path), output_path.stem, "pdal"
+                str(output_path), output_path.stem,
+                "copc" if output_path.name.lower().endswith(".copc.laz") else "pdal"
             )
             if layer.isValid():
                 QgsProject.instance().addMapLayer(layer)
                 # Attach a 3D renderer so 3D Map Views show the points
                 # correctly instead of as a flat 2D sprite.
                 from ..utils.helpers import enable_point_cloud_3d_rendering
-                enable_point_cloud_3d_rendering(layer)
+                standard_field = task is not None and task.field_name.strip().lower() == "classification"
+                enable_point_cloud_3d_rendering(
+                    layer, class_mapping=task.spec.class_mapping if standard_field else None,
+                    classify_2d=bool(standard_field and supports_output_codes(task.spec)),
+                )
                 log_info(f"Loaded layer: {output_path.stem}")
                 loaded += 1
                 continue

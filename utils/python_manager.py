@@ -22,6 +22,7 @@ from qgis.PyQt.QtNetwork import QNetworkRequest
 
 from . import proc
 from .compat import scoped_enum
+from ..config import PLUGIN_NAME
 
 CACHE_DIR = (
     os.environ.get("AERIAL_LIDAR_CLASSIFIER_CACHE_DIR")
@@ -51,7 +52,7 @@ def _log(message: str, level=Qgis.MessageLevel.Info):
         message: The message to log.
         level: The log level (default: Qgis.MessageLevel.Info).
     """
-    QgsMessageLog.logMessage(message, "Aerial LiDAR Classifier", level=level)
+    QgsMessageLog.logMessage(message, PLUGIN_NAME, level=level)
 
 
 def _safe_extract_tar(tar: tarfile.TarFile, dest_dir: str) -> None:

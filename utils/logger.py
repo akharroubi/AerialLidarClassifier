@@ -6,8 +6,9 @@ makes it easy to redirect logging in tests.
 """
 
 from qgis.core import QgsMessageLog, Qgis
+from ..config import PLUGIN_NAME
 
-LOG_TAG = "Aerial LiDAR Classifier"
+LOG_TAG = PLUGIN_NAME
 
 
 def log_info(message: str) -> None:

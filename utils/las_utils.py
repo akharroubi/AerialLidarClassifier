@@ -36,14 +36,20 @@ def strip_copc_vlrs(las_or_header) -> None:
 
 
 def find_las_files(path):
-    """Find all LAS/LAZ files in a path. Avoids duplicates on case-insensitive filesystems."""
+    """Find all LAS/LAZ files in a path. Avoids duplicates on case-insensitive filesystems.
+
+    Folder scans skip the plugin's own COPC viewing copies
+    (``*.qgis-view.copc.laz``, see utils/pointcloud_view.py): they are
+    reordered duplicates of classified outputs, not inputs.
+    """
     p = Path(path)
     if p.is_file() and p.suffix.lower() in ('.las', '.laz'):
         return [p]
     if p.is_dir():
         files = set()
         for ext in ('*.las', '*.laz'):
-            files.update(p.glob(ext))
+            files.update(f for f in p.glob(ext)
+                         if not f.name.lower().endswith('.qgis-view.copc.laz'))
         return sorted(files)
     return []
 

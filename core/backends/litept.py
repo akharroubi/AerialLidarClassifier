@@ -1,21 +1,21 @@
 """LitePT-L backend: crop-based inference on a point cloud in metres.
 
-Reproduces the inference recipe the model was validated with
-(``mls_dales.infer`` in the training workspace), on one tile at a time:
+Runs spatial inference on one tile at a time:
 
 1. remove an integer origin and work in float32 metres;
-2. one representative per occupied 10 cm voxel (first point in order),
+2. one representative per occupied model voxel (first point in order),
    with an exact voxel-membership projection back to every raw point;
 3. cover the representatives with crops of at most ``points_per_crop``
    points within ``max_radius`` (regular centres, then one crop per
    still-uncovered point), each centred, floor-referenced and voxelised
-   exactly like a validation crop;
+   using the model's configured geometry features;
 4. average the softmax probabilities of every visit per representative,
    argmax, and project to the raw points.
 
-Returns model class ids 1..8 (DALES: ground, vegetation, cars, trucks,
-power lines, fences, poles, buildings); 0 never occurs because coverage is
-complete or an error is raised.
+Returns plugin model class ids 1..num_classes. Airborne has 8 classes; Mobile
+Mapping has 9. These are always the zero-based network output indices plus
+one, including Mobile Mapping's ground and unknown classes. Zero remains
+reserved for no prediction; coverage is complete or an error is raised.
 
 CUDA only: the sparse convolutions come from spconv, which ships no CPU or
 macOS build.
@@ -33,7 +33,7 @@ import logging
 
 _LOG = logging.getLogger(__name__)
 
-# Class ids as written by the reference pipeline (DALES source values).
+# Class names in the Airborne output order.
 LITEPT_CLASS_NAMES = (
     "ground", "vegetation", "cars", "trucks",
     "power_lines", "fences", "poles", "buildings",
@@ -65,9 +65,9 @@ class LitePTBackend:
         evaluation = self.card["eval"]
         self.points_per_crop = int(_positive(evaluation["points_per_crop"], "points_per_crop"))
         self.max_radius = float(_positive(evaluation["max_radius"], "max_radius"))
-        self.center_spacing = float(evaluation.get(
+        self.center_spacing = float(_positive(evaluation.get(
             "center_spacing", 2 * self.max_radius / (math.sqrt(3) * 1.1)
-        ))
+        ), "center_spacing"))
         self.amp = bool(evaluation.get("amp", False))
         self.model = None
         self.device = None
@@ -113,6 +113,8 @@ class LitePTBackend:
         from ...utils.weights import verified_weights
         with verified_weights(self.weights_path, self.card["id"]) as weights:
             state = torch.load(weights, map_location="cpu", weights_only=True)
+        if not isinstance(state, dict):
+            raise RuntimeError(f"{self.weights_path.name} does not contain a state dictionary.")
         backbone_state = {
             key[len("backbone."):]: value for key, value in state.items()
             if key.startswith("backbone.")
@@ -126,8 +128,8 @@ class LitePTBackend:
                 f"{self.weights_path.name} does not look like LitePT-L weights "
                 "(missing backbone.* or seg_head.* tensors)."
             )
-        # Weights are stored in float16; the network runs in float32 as it
-        # did during validation (attention casts to half internally).
+        # Released weights use float16 storage; inference uses float32
+        # parameters (attention casts to half internally).
         backbone.load_state_dict(
             {k: v.float() if v.is_floating_point() else v for k, v in backbone_state.items()},
             strict=True,
@@ -136,8 +138,8 @@ class LitePTBackend:
 
         backbone.to(device).eval()
         head.to(device).eval()
-        # Validation disables every serialization shuffle, including the
-        # ones GridPooling owns; keep inference deterministic the same way.
+        # Disable every serialization shuffle, including GridPooling's,
+        # to keep inference deterministic.
         for module in backbone.modules():
             if hasattr(module, "shuffle_orders"):
                 module.shuffle_orders = False
@@ -154,25 +156,43 @@ class LitePTBackend:
         except Exception:
             _LOG.debug("Ignored non-fatal error", exc_info=True)
 
-        # Crop budget by VRAM. 70 000 points / 30 m is the validated recipe
-        # (about 4.5 GB peak); cards under 8 GB get the profile recipe the
-        # model was also trained with early on (35 000 points / 20 m),
-        # which halves the peak at the cost of less context per crop.
+        # Each model has its own spatial context and memory requirements.
+        # Retain the Airborne policy when no card profiles are present.
         try:
             total_gb = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
         except Exception:
             total_gb = 0.0
-        if 0 < total_gb < 7.5 and self.points_per_crop > 35_000:
+        self._configure_crop_budget(total_gb)
+
+    def _configure_crop_budget(self, total_gb: float) -> None:
+        """Apply a model-specific conservative budget for smaller GPUs."""
+        profiles = self.card["eval"].get("low_memory_profiles")
+        if profiles is not None:
+            for profile in sorted(profiles, key=lambda item: item["below_gb"]):
+                if 0 < total_gb < float(profile["below_gb"]):
+                    points = min(self.points_per_crop, int(profile["points_per_crop"]))
+                    radius = min(self.max_radius, float(profile["max_radius"]))
+                    spacing = min(self.center_spacing, float(profile["center_spacing"]))
+                    self.log(
+                        f"{self.card['display_name']}: GPU has {total_gb:.1f} GB; "
+                        f"using {points:,}-point / {radius:g} m crops with less context "
+                        "than the standard inference settings."
+                    )
+                    self._set_crop_budget(points, radius, spacing)
+                    break
+        elif 0 < total_gb < 7.5 and self.points_per_crop > 35_000:
             self.log(
                 f"LitePT-L: GPU has {total_gb:.1f} GB, using 35 000-point / "
                 "20 m crops instead of 70 000 / 30 m."
             )
             self._set_crop_budget(35_000, 20.0)
 
-    def _set_crop_budget(self, points_per_crop: int, max_radius: float) -> None:
+    def _set_crop_budget(self, points_per_crop: int, max_radius: float,
+                         center_spacing: Optional[float] = None) -> None:
         self.points_per_crop = int(points_per_crop)
         self.max_radius = float(max_radius)
-        self.center_spacing = 2 * self.max_radius / (math.sqrt(3) * 1.1)
+        self.center_spacing = (float(center_spacing) if center_spacing is not None
+                               else 2 * self.max_radius / (math.sqrt(3) * 1.1))
 
     def unload(self) -> None:
         self.model = None
@@ -194,7 +214,7 @@ class LitePTBackend:
         progress_callback: Optional[Callable[[float], None]] = None,
         cancel_callback: Optional[Callable[[], bool]] = None,
     ) -> np.ndarray:
-        """Return one model class id (1..8) per input point."""
+        """Return one plugin model class id (1..num_classes) per input point."""
         import torch
         from scipy.spatial import cKDTree
 
@@ -337,7 +357,7 @@ def _voxel_partition(local: np.ndarray, grid_size: float):
 
 
 def _prepare_crop(coord: np.ndarray, grid_size: float) -> dict:
-    """Centre, floor-reference and voxelise one crop like a validation crop.
+    """Centre, floor-reference and voxelise one inference crop.
 
     ``coord`` is float32 and already relative to the crop centre. Returns
     the unique-voxel ``coord`` / ``feat`` / ``grid_coord`` arrays and the

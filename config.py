@@ -14,7 +14,7 @@ _LOG = logging.getLogger(__name__)
 # Plugin Info
 # =============================================================================
 
-PLUGIN_NAME = "Aerial LiDAR Classifier"
+PLUGIN_NAME = "LiDAR AI Classifier"
 SETTINGS_PREFIX = "AerialLidarClassifier"
 
 

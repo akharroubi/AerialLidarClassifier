@@ -1,4 +1,4 @@
-"""Generate the Aerial LiDAR Classifier logo: SVG master + PNG exports.
+"""Generate the LiDAR AI Classifier logo: SVG master + PNG exports.
 
 Design ("classified profile"): a cross-section of a scene the plugin
 classifies, in the plugin's own ASPRS palette: a brown ground band, a green
@@ -200,13 +200,13 @@ def svg_text(variant: str) -> str:
         return (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512">\n'
-            "  <title>Aerial LiDAR Classifier</title>\n"
+            "  <title>LiDAR AI Classifier</title>\n"
             f"{circles}\n</svg>\n"
         )
     parts = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" width="512" height="512">',
-        "  <title>Aerial LiDAR Classifier</title>",
+        "  <title>LiDAR AI Classifier</title>",
         "  <defs>",
         f'    <pattern id="pts" width="{DOT_STEP * 100:.2f}" height="{DOT_STEP * 200:.2f}" patternUnits="userSpaceOnUse">',
         f'      <circle cx="0" cy="0" r="{DOT_R * 100:.2f}" fill="#fff" fill-opacity="0.25"/>',

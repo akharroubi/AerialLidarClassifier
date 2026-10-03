@@ -7,6 +7,7 @@ install packages) in a separate thread to keep the QGIS UI responsive.
 import traceback
 
 from qgis.PyQt.QtCore import QThread, pyqtSignal
+from ..config import PLUGIN_NAME
 
 
 class DepsInstallWorker(QThread):
@@ -69,8 +70,8 @@ class DepsInstallWorker(QThread):
                 self.completed.emit(False, (
                     "The classifier's AI libraries are already loaded in "
                     "this QGIS session and cannot be replaced while it runs. "
-                    "Restart QGIS, then choose Plugins > Aerial LiDAR "
-                    "Classifier > Repair dependencies before opening the "
+                    f"Restart QGIS, then choose Plugins > {PLUGIN_NAME} "
+                    "> Repair dependencies before opening the "
                     "classifier."
                 ))
                 return

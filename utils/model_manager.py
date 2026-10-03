@@ -73,8 +73,11 @@ class ModelManager:
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
+    def _cache_path(self) -> Path:
+        return self.model_dir() / self.spec.weights_filename
+
     def get_model_path(self) -> Path:
-        path = self.model_dir() / self.spec.weights_filename
+        path = self._cache_path()
         if not path.exists():
             # v1.0 kept the single model directly under models/; adopt it.
             legacy = self.models_root() / self.spec.weights_filename
@@ -155,7 +158,7 @@ class ModelManager:
                     "not the released model; it was discarded."
                 )
             log_info(f"{self.spec.short_name}: SHA-256 verified.")
-        final_path = self.get_model_path()
+        final_path = self._cache_path()
         try:
             tmp_path.replace(final_path)
         except OSError as exc:
@@ -178,6 +181,13 @@ class ModelManager:
         """
         if self.is_model_available():
             return True, ""
+        if not self.get_candidate_urls():
+            return False, (
+                f"The {self.spec.display_name} weights are missing or failed "
+                "their SHA-256 check, and no download URL is configured. "
+                f"Import {self.spec.weights_filename} with the folder icon "
+                "next to the model selector."
+            )
         log_info(
             f"{self.spec.display_name}: weights not found locally; "
             f"downloading them now (about {self.spec.weights_size_mb:.0f} MB, "
@@ -226,7 +236,7 @@ class ModelManager:
         if not urls:
             return False, "No model URL configured."
 
-        final_path = self.get_model_path()
+        final_path = self._cache_path()
         fd, name = tempfile.mkstemp(prefix="weights-", suffix=".part", dir=str(final_path.parent))
         import os
         os.close(fd)
@@ -265,11 +275,18 @@ class ModelManager:
         cancel_callback: Callable[[], bool] = None,
     ):
         """Download a single URL to ``tmp_path`` via the QGIS network stack."""
+        request = None
+        on_progress = None
+        download_active = True
         try:
             request = QgsBlockingNetworkRequest()
             feedback = QgsFeedback()
 
             def on_progress(received, total):
+                # The blocking request can leave queued progress events behind.
+                # Processing may destroy its feedback before Qt delivers them.
+                if not download_active:
+                    return
                 # Also the place where a cancel request aborts the transfer.
                 if cancel_callback is not None and cancel_callback():
                     feedback.cancel()
@@ -304,13 +321,23 @@ class ModelManager:
         except Exception as exc:  # pragma: no cover - surfaced to user
             log_error(f"Unexpected error downloading {url}: {exc}")
             return False, f"Error: {exc}"
+        finally:
+            # Disconnect prevents new deliveries; the guard also covers events
+            # which Qt queued before the disconnect. Do not retain caller-owned
+            # Processing feedback beyond this download's lifetime.
+            download_active = False
+            if request is not None and on_progress is not None:
+                try:
+                    request.downloadProgress.disconnect(on_progress)
+                except (TypeError, RuntimeError):
+                    _LOG.debug("Download progress signal already disconnected", exc_info=True)
 
     def import_file(self, source):
         """Adopt a weights file the user already has (copied, then verified)."""
         source = Path(source)
         if not source.is_file():
             return False, f"File not found: {source}"
-        final_path = self.get_model_path()
+        final_path = self._cache_path()
         fd, name = tempfile.mkstemp(prefix="weights-", suffix=".part", dir=str(final_path.parent))
         import os
         os.close(fd)
@@ -323,7 +350,7 @@ class ModelManager:
         return self._verify_and_promote(tmp_path, source.name)
 
     def delete_model(self) -> None:
-        path = self.get_model_path()
+        path = self._cache_path()
         if path.exists():
             path.unlink()
             log_info(f"{self.spec.short_name}: weights deleted from cache.")

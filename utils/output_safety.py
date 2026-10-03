@@ -109,6 +109,11 @@ def add_extra_dim_preserving_raw(las, params):
         las.points.array[name] = original[name]
 
 
+def extra_dim_description(text):
+    """Fit the LAS Extra Bytes description's 32-byte UTF-8 storage."""
+    return str(text).encode("utf-8")[:32].decode("utf-8", errors="ignore")
+
+
 def read_complete(reader):
     validate_waveform_storage(reader.header)
     declared = int(reader.header.point_count)
@@ -131,7 +136,8 @@ def upgraded_point_format(old_id):
     return {0: 6, 1: 6, 2: 7, 3: 7, 4: 9, 5: 10}.get(old_id, old_id)
 
 
-def convert_points_preserving_fields(points, point_format, scales, offsets, laspy_module):
+def convert_points_preserving_fields(points, point_format, scales, offsets, laspy_module,
+                                     preserve_legacy_angle=True):
     """Convert packed layouts, retaining raw extra bytes and legacy scan angles."""
     converted = laspy_module.PackedPointRecord.from_point_record(points, point_format)
     result = laspy_module.ScaleAwarePointRecord(converted.array, point_format, scales, offsets)
@@ -140,18 +146,19 @@ def convert_points_preserving_fields(points, point_format, scales, offsets, lasp
     if points.point_format.id < 6 <= point_format.id:
         old_angle = np.asarray(points.scan_angle_rank)
         result.scan_angle = np.rint(old_angle.astype(np.float64) / 0.006).astype(np.int16)
-        result.array["scan_angle_rank"] = old_angle
+        if preserve_legacy_angle:
+            result.array["scan_angle_rank"] = old_angle
     return result
 
 
-def upgrade_header_preserving_fields(header, laspy_module):
+def upgrade_header_preserving_fields(header, laspy_module, preserve_legacy_angle=True):
     from copy import deepcopy
     temporary = deepcopy(header)
     temporary.point_count = 0
     upgraded = laspy_module.convert(laspy_module.LasData(temporary),
                                     point_format_id=upgraded_point_format(header.point_format.id),
                                     file_version="1.4").header
-    if header.point_format.id < 6:
+    if header.point_format.id < 6 and preserve_legacy_angle:
         upgraded.add_extra_dim(laspy_module.ExtraBytesParams(
             name="scan_angle_rank", type="int8", description="Original legacy scan angle"))
     return upgraded

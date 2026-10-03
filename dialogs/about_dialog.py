@@ -53,13 +53,13 @@ class AboutDialog(QDialog):
 
         # Description
         desc = QLabel(
-            "Semantic segmentation of aerial LiDAR point clouds "
+            "Semantic segmentation of airborne and mobile mapping LiDAR "
             "(LAS / LAZ / COPC) with deep-learning models, written to the "
-            "standard ASPRS classification codes.\n\n"
-            "Two models are available: LitePT-L (default on NVIDIA GPUs) "
-            "and the 3D SegFormer (runs on GPU or CPU). Classes without an "
-            "ASPRS code (cars, trucks, fences) are written as 1, "
-            "Unclassified."
+            "LAS classification field.\n\n"
+            "Three models: LitePT-L Airborne and LitePT-L Mobile Mapping "
+            "(NVIDIA GPU), and SegFormer 3D Airborne (GPU or CPU). The "
+            "mobile mapping model has nine classes with editable codes; by "
+            "default poles, vehicles and fences get 64, 65 and 66."
         )
         desc.setWordWrap(True)
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -77,7 +77,6 @@ class AboutDialog(QDialog):
                 "<div style='text-align:center;'>"
                 f"<b>{spec.display_name}</b><br>"
                 f"{spec.attribution}<br>"
-                f"Training data: {spec.training_data}<br>"
                 f"<small>{spec.licence}</small><br>"
                 f'<a href="{spec.homepage}">{spec.homepage}</a>'
                 "</div>"
@@ -122,7 +121,7 @@ class AboutDialog(QDialog):
         # Non-commercial notice for the model
         commercial = QLabel(
             "<div style='text-align:center;'>"
-            "<small>Both downloaded weight sets are designated CC BY-NC 4.0 "
+            "<small>The downloaded weight sets are designated CC BY-NC 4.0 "
             "(non-commercial use only). Classifying LiDAR data for "
             "commercial purposes requires a separate licence from the "
             "model authors or a different model.</small>"

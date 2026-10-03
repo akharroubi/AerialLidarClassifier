@@ -40,7 +40,6 @@ class ModelSpec:
     licence: str = ""
     attribution: str = ""
     homepage: str = ""
-    training_data: str = ""
 
     @property
     def config_path(self) -> Path:
@@ -56,7 +55,7 @@ class ModelSpec:
 
 
 # ---------------------------------------------------------------------------
-# LitePT-L, trained on DALES at 10 cm (default where a CUDA GPU is present)
+# LitePT-L Airborne at 10 cm (default where a CUDA GPU is present)
 # ---------------------------------------------------------------------------
 
 _LITEPT_MAPPING: Dict[int, ClassInfo] = {
@@ -72,14 +71,12 @@ _LITEPT_MAPPING: Dict[int, ClassInfo] = {
 
 LITEPT_L_DALES = ModelSpec(
     id="litept_l_dales_10cm",
-    display_name="LitePT-L (DALES, 10 cm)",
+    display_name="LitePT-L Airborne (10 cm)",
     family="litept",
-    short_name="LitePT-L",
+    short_name="LitePT-L Airborne",
     description=(
-        "Point transformer (LitePT-L, 85.8 M parameters) trained on the "
-        "DALES aerial LiDAR dataset at 10 cm. Eight classes: ground, "
-        "vegetation, cars, trucks, power lines, fences, poles, buildings. "
-        "Custom four-tile DALES test: mIoU 0.824, overall accuracy 97.9 %."
+        "Point transformer for airborne LiDAR at 10 cm. Eight classes: "
+        "ground, vegetation, cars, trucks, power lines, fences, poles and buildings."
     ),
     resolution="10 cm",
     weights_filename="litept_l_dales_10cm_ema_fp16.pth",
@@ -97,10 +94,9 @@ LITEPT_L_DALES = ModelSpec(
     ),
     supported_devices=("cuda",),
     extra_packages=("spconv", "scipy"),
-    licence="Code MIT (prs-eth/LitePT); weights CC BY-NC 4.0 (maintainer-trained model)",
-    attribution="LitePT: Photogrammetry and Remote Sensing Lab, ETH Zurich. Trained by GeoScITY Lab, University of Liege.",
+    licence="Code MIT (prs-eth/LitePT); weights CC BY-NC 4.0 (maintainer model)",
+    attribution="LitePT: Photogrammetry and Remote Sensing Lab, ETH Zurich. Model provided by GeoScITY Lab, University of Liege.",
     homepage="https://github.com/prs-eth/LitePT",
-    training_data="DALES (Dayton Annotated LiDAR Earth Scan), 32 tiles",
 )
 
 
@@ -114,7 +110,7 @@ _SEGFORMER_MAPPING: Dict[int, ClassInfo] = DEFAULT_CLASS_MAPPING
 
 SEGFORMER3D_URBANFILTERING = ModelSpec(
     id="segformer3d_urbanfiltering",
-    display_name="SegFormer 3D (UrbanFiltering, 30 cm)",
+    display_name="SegFormer 3D Airborne (30 cm)",
     family="segformer3d",
     short_name="SegFormer 3D",
     description=(
@@ -142,11 +138,57 @@ SEGFORMER3D_URBANFILTERING = ModelSpec(
     licence="Model CC BY-NC 4.0 (NRCan, Crown Copyright, Government of Canada)",
     attribution="Zhouxin Xi (NRCan), TreeAIBox project.",
     homepage="https://github.com/NRCan/TreeAIBox",
-    training_data="UrbanFiltering ALS training set (NRCan)",
 )
 
 
-MODELS: Tuple[ModelSpec, ...] = (LITEPT_L_DALES, SEGFORMER3D_URBANFILTERING)
+# The plugin reserves ID 0 for points without a prediction. MLS logits 0..8
+# therefore become plugin model IDs 1..9 before the output mapping is applied.
+_MLS_MAPPING: Dict[int, ClassInfo] = {
+    1: ClassInfo(1, "Ground", 2, "#A87E55"),
+    2: ClassInfo(2, "Low vegetation", 3, "#90EE90"),
+    3: ClassInfo(3, "High vegetation", 5, "#228B22"),
+    4: ClassInfo(4, "Building", 6, "#FF0000"),
+    5: ClassInfo(5, "Pole like", 64, "#FF00FF"),
+    6: ClassInfo(6, "Vehicle", 65, "#4169E1"),
+    7: ClassInfo(7, "Fence barrier", 66, "#00CED1"),
+    8: ClassInfo(8, "Wire", 14, "#FFA500"),
+    9: ClassInfo(9, "Unknown", 1, "#C0C0C0"),
+}
+
+LITEPT_L_MLS = ModelSpec(
+    id="litept_l_mls_5cm",
+    display_name="LitePT-L Mobile Mapping (MLS, 5 cm)",
+    family="litept",
+    short_name="LitePT-L Mobile Mapping",
+    description=(
+        "Point transformer for mobile mapping LiDAR at 5 cm, using XYZ only. "
+        "Nine classes: ground, "
+        "low vegetation, high vegetation, building, pole-like objects, "
+        "vehicles, fences/barriers, wires and unknown. Output codes are editable."
+    ),
+    resolution="5 cm",
+    weights_filename="litept_l_mls_5cm_fp16.pth",
+    weights_urls=(
+        f"{_GITHUB_RELEASES}/v1.2/litept_l_mls_5cm_fp16.pth",
+    ),
+    weights_sha256="d2fd555c9147a01a5fac655fdccb7d4efc86b79347dff30f02f0aa4c09fffda8",  # noqa: E501  # pragma: allowlist secret
+    weights_size_mb=171.8,
+    config_filename="litept_l_mls_5cm.json",
+    class_mapping=_MLS_MAPPING,
+    class_summary=(
+        "Ground 2, Low vegetation 3, High vegetation 5, Building 6, "
+        "Pole like 64, Vehicle 65, Fence/barrier 66, Wire 14, Unknown 1; "
+        "64–66 are editable user-defined codes"
+    ),
+    supported_devices=("cuda",),
+    extra_packages=("spconv", "scipy"),
+    licence="Code MIT (prs-eth/LitePT); weights CC BY-NC 4.0 (maintainer model)",
+    attribution="LitePT: Photogrammetry and Remote Sensing Lab, ETH Zurich. Model provided by GeoScITY Lab, University of Liege.",
+    homepage="https://github.com/prs-eth/LitePT",
+)
+
+# Append new models: Processing saves MODEL as an integer enum index.
+MODELS: Tuple[ModelSpec, ...] = (LITEPT_L_DALES, SEGFORMER3D_URBANFILTERING, LITEPT_L_MLS)
 DEFAULT_MODEL_ID = LITEPT_L_DALES.id
 FALLBACK_MODEL_ID = SEGFORMER3D_URBANFILTERING.id
 

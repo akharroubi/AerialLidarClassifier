@@ -1,9 +1,10 @@
 {
-  "id": "litept_l_dales_10cm",
-  "display_name": "LitePT-L Airborne (10 cm)",
+  "id": "litept_l_mls_5cm",
+  "display_name": "LitePT-L Mobile Mapping (MLS, 5 cm)",
   "family": "litept",
-  "weights_file": "litept_l_dales_10cm_ema_fp16.pth",
+  "weights_file": "litept_l_mls_5cm_fp16.pth",
   "weights_dtype": "float16; loaded as float32 for inference",
+  "weights_bytes": 171822531,
   "architecture": {
     "in_channels": 2,
     "order": [
@@ -119,23 +120,49 @@
     "pre_norm": true,
     "enc_mode": false
   },
-  "num_classes": 8,
+  "num_classes": 9,
   "in_channels": 2,
-  "grid_size": 0.1,
+  "grid_size": 0.05,
   "eval": {
-    "points_per_crop": 70000,
-    "max_radius": 30.0,
-    "grid_size": 0.1,
-    "amp": false
+    "points_per_crop": 240000,
+    "max_radius": 12.0,
+    "grid_size": 0.05,
+    "center_spacing": 11.0,
+    "amp": false,
+    "votes": 1,
+    "low_memory_profiles": [
+      {
+        "below_gb": 8.5,
+        "points_per_crop": 50000,
+        "max_radius": 6.0,
+        "center_spacing": 5.5
+      },
+      {
+        "below_gb": 15.5,
+        "points_per_crop": 120000,
+        "max_radius": 9.0,
+        "center_spacing": 8.0
+      }
+    ]
   },
   "class_names": [
     "ground",
-    "vegetation",
-    "cars",
-    "trucks",
-    "power_lines",
-    "fences",
-    "poles",
-    "buildings"
+    "low_vegetation",
+    "high_vegetation",
+    "building",
+    "pole_like",
+    "vehicle",
+    "fence_barrier",
+    "wire",
+    "unknown"
+  ],
+  "class_ids": {
+    "source": "Zero-based network indices 0..8",
+    "plugin": "Network index + 1 (1..9); zero reserved for no prediction",
+    "output": "User-editable LAS classification codes mapped from plugin class IDs"
+  },
+  "features": [
+    "constant 1",
+    "height above crop minimum after mean centering"
   ]
 }
