@@ -1577,7 +1577,9 @@ class ClassifierDockWidget(QDockWidget):
 
         if self.load_result_check.isChecked() and outputs:
             views = getattr(self.task, "view_files", {}) if self.task else {}
-            self._load_output_layers([views.get(path, path) for path in outputs])
+            # A viewing copy is loaded under the classified file's name.
+            self._load_output_layers([views.get(path, path) for path in outputs],
+                                     names=[path.stem for path in outputs])
             self._remove_stale_views(outputs, views)
 
         self._push_completion_message(summary, outputs)
@@ -1649,7 +1651,7 @@ class ClassifierDockWidget(QDockWidget):
             except Exception:
                 _LOG.debug("Ignored non-fatal error", exc_info=True)
 
-    def _load_output_layers(self, output_files):
+    def _load_output_layers(self, output_files, names=None):
         try:
             from qgis.core import QgsPointCloudLayer
         except ImportError:
@@ -1669,14 +1671,15 @@ class ClassifierDockWidget(QDockWidget):
 
         failures: list[tuple[Path, str]] = []
         loaded = 0
-        for output_path in output_files:
+        names = list(names) if names is not None else [p.stem for p in output_files]
+        for output_path, layer_name in zip(output_files, names):
             if not output_path.exists():
                 failures.append((output_path, "file not found on disk"))
                 log_error(f"Output file missing after write: {output_path}")
                 continue
 
             layer = QgsPointCloudLayer(
-                str(output_path), output_path.stem,
+                str(output_path), layer_name,
                 "copc" if output_path.name.lower().endswith(".copc.laz") else "pdal"
             )
             if layer.isValid():
@@ -1689,7 +1692,7 @@ class ClassifierDockWidget(QDockWidget):
                     layer, class_mapping=task.spec.class_mapping if standard_field else None,
                     classify_2d=bool(standard_field and supports_output_codes(task.spec)),
                 )
-                log_info(f"Loaded layer: {output_path.stem}")
+                log_info(f"Loaded layer: {layer_name} ({output_path.name})")
                 loaded += 1
                 continue
 

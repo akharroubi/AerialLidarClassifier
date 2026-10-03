@@ -296,11 +296,11 @@ class ClassificationTask(QgsTask):
                 size_mb = self.spec.weights_size_mb
 
                 def download_progress(received, total):
-                    total = total if total > 0 else size_mb * 1024 * 1024
+                    total = total if total > 0 else size_mb * 1e6
                     self.status_text = (
                         f"Downloading the {self.spec.short_name} weights "
-                        f"(first use): {received / 1048576:.0f} / "
-                        f"{total / 1048576:.0f} MB"
+                        f"(first use): {received / 1e6:.0f} / "
+                        f"{total / 1e6:.0f} MB"
                     )
                     self.setProgress(min(99.0, 100.0 * received / total))
 

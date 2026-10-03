@@ -6,10 +6,6 @@ and the project follows [Semantic Versioning](https://semver.org/).
 
 ## [1.2.0] - 2026-10-03
 
-### Fixed
-- Prevent a Processing shutdown crash after a first-use model download.
-  Delayed progress callbacks stop before the Processing feedback is released.
-
 ### Added
 - **LitePT-L Mobile Mapping (MLS, 5 cm)**: a separate model for mobile
   mapping point clouds. Nine classes: ground, low
@@ -59,8 +55,21 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - QGIS 4: the 3D renderer of loaded layers could not be created (the 3D
   symbol classes cannot be instantiated from Python there); it is now
   derived from the 2D renderer, on QGIS 3 and 4.
+- Processing (`qgis_process`) could crash on exit after a first-use model
+  download: delayed progress callbacks now stop before the Processing
+  feedback is released.
 - An RTX 5000 Ada could be taken for an RTX 50 (Blackwell) card when the
   compute capability was unknown, which selected the cu128 index.
+- Closing the panel during a run left *Run* disabled until QGIS restarted;
+  cancelling after some files were written now says they are kept.
+- Model status messages no longer ask to tick a greyed-out *Use GPU* box:
+  a CPU-only PyTorch, a GPU PyTorch that sees no GPU, a PyTorch that fails
+  to load and macOS each get their own advice.
+- Viewing copies of earlier runs are deleted once no layer uses them, and
+  folder scans no longer pick them up as inputs. A loaded viewing copy keeps
+  the classified file's name in the Layers panel.
+- The weights download progress uses the same MB as the model status, and
+  the Windows DLL folders are registered (and logged) once per session.
 
 ## [1.1.2] - 2026-09-27
 

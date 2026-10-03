@@ -100,7 +100,7 @@ class ModelManager:
     def get_model_size_mb(self) -> float:
         path = self.get_model_path()
         if path.exists():
-            return path.stat().st_size / (1024 * 1024)
+            return path.stat().st_size / 1e6
         return 0.0
 
     # ------------------------------------------------------------------
@@ -164,7 +164,7 @@ class ModelManager:
         except OSError as exc:
             tmp_path.unlink(missing_ok=True)
             return False, f"Cannot replace the model file; the previous weights were retained: {exc}"
-        size_mb = final_path.stat().st_size / (1024 * 1024)
+        size_mb = final_path.stat().st_size / 1e6
         log_info(f"{self.spec.short_name}: weights ready ({size_mb:.1f} MB) from {origin}")
         return True, ""
 

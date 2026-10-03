@@ -162,8 +162,8 @@ class DepsInstallWorker(QThread):
             def progress(received, total, _label=label):
                 if total > 0:
                     self.progress.emit(
-                        100, f"{_label}: {received / 1048576:.0f} / "
-                             f"{total / 1048576:.0f} MB")
+                        100, f"{_label}: {received / 1e6:.0f} / "
+                             f"{total / 1e6:.0f} MB")
 
             try:
                 ok, _msg = manager.ensure_available(
