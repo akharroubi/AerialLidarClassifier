@@ -4,6 +4,22 @@ All notable changes to **LiDAR AI Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-10-10
+
+### Fixed
+- QGIS builds that ship NumPy 1.x: the LitePT-L models (airborne and
+  mobile mapping) could not load, with "LitePT cannot import
+  scipy.spatial ... AttributeError: module 'numpy' has no attribute
+  'long'". The plugin's packages run inside QGIS's Python, where QGIS's
+  own NumPy is loaded first, and Setup had installed the newest SciPy,
+  which needs NumPy 2. On those builds Setup now pins the plugin
+  environment to QGIS's exact NumPy version, so SciPy and the other
+  compiled packages are chosen to match it. QGIS builds with NumPy 2
+  (QGIS 3.44, QGIS 4) install exactly as before.
+- For installs made before this fix on such builds, the LitePT status
+  now says so and gives the steps: restart QGIS, then *Plugins > LiDAR AI
+  Classifier > Repair dependencies* before opening the classifier.
+
 ## [1.2.0] - 2026-10-03
 
 ### Added

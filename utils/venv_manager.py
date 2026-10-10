@@ -1973,6 +1973,64 @@ def _get_installed_versions(
     return found
 
 
+def _is_within(path: str, folder: str) -> bool:
+    """True when ``path`` is ``folder`` or lies inside it."""
+    try:
+        path = os.path.normcase(os.path.abspath(path))
+        folder = os.path.normcase(os.path.abspath(folder))
+        return os.path.commonpath([path, folder]) == folder
+    except (TypeError, ValueError):
+        return False
+
+
+def _host_numpy_version(venv_dir: str = None) -> Optional[str]:
+    """Version of the NumPy that QGIS's own Python provides, or None.
+
+    The plugin's packages are imported into the QGIS process. A NumPy that
+    QGIS (or another plugin) loaded first is the one every compiled
+    package from the plugin environment then runs against. Copies from
+    the plugin's own folders are ignored.
+    """
+    if venv_dir is None:
+        venv_dir = VENV_DIR
+
+    def ours(path):
+        return _is_within(path, venv_dir) or _is_within(path, CACHE_DIR)
+
+    module = sys.modules.get("numpy")
+    location = getattr(module, "__file__", None) or ""
+    if module is not None and location and not ours(location):
+        return str(getattr(module, "__version__", "") or "") or None
+    try:
+        from importlib import metadata
+        paths = [p for p in sys.path if p and not ours(p)]
+        for dist in metadata.distributions(name="numpy", path=paths):
+            return dist.version
+    except Exception:
+        _LOG.debug("Ignored non-fatal error", exc_info=True)
+    return None
+
+
+def _host_numpy_pin(venv_dir: str = None) -> Optional[str]:
+    """``numpy==<QGIS's version>`` when QGIS's own NumPy is 1.x, else None.
+
+    Recent SciPy releases (1.17 and later) need NumPy 2 and fail to import
+    against an older NumPy that QGIS already loaded ("module 'numpy' has
+    no attribute 'long'"). Pinning the plugin environment to the exact
+    NumPy of QGIS makes the resolver pick SciPy and the other compiled
+    packages that work with it, whichever copy is imported first. QGIS
+    builds with NumPy 2 are left as they were.
+    """
+    version = _host_numpy_version(venv_dir)
+    if not version:
+        return None
+    public = version.split("+", 1)[0].strip()
+    match = re.match(r"(\d+)\.(\d+)(?:\.(\d+))?$", public)
+    if match is None or int(match.group(1)) >= 2:
+        return None
+    return f"numpy=={public}"
+
+
 def _write_torch_constraints(venv_dir: str, versions: dict) -> Optional[str]:
     """Write a pip/uv constraints file pinning torch and torchvision.
 
@@ -1983,13 +2041,19 @@ def _write_torch_constraints(venv_dir: str, versions: dict) -> Optional[str]:
     keeps the local version segment (``2.12.0+cu126``): a bare
     ``==2.12.0`` would still match PyPI's ``2.12.0``.
 
-    Returns the file path, or None when torch is not installed.
+    On QGIS builds whose own NumPy is 1.x the file also pins NumPy to that
+    version (see ``_host_numpy_pin``).
+
+    Returns the file path, or None when there is nothing to pin.
     """
     pins = [
         f"{name}=={version}"
         for name, version in versions.items()
         if name in ("torch", "torchvision") and version
     ]
+    host_pin = _host_numpy_pin(venv_dir)
+    if host_pin:
+        pins.append(host_pin)
     if not pins:
         return None
     path = os.path.join(venv_dir, "torch_constraints.txt")
@@ -2233,6 +2297,19 @@ def install_dependencies(
     # Set once torch is installed: every later install in this phase
     # resolves under a torch pin.
     phase_a_constraint_args: List[str] = []
+    # QGIS with its own NumPy 1.x: pin NumPy from the first install on
+    # (torchvision already pulls NumPy in). Nothing changes elsewhere.
+    host_pin = _host_numpy_pin(venv_dir)
+    if host_pin:
+        _log(
+            f"QGIS provides NumPy {host_pin.split('==', 1)[1]}: the plugin "
+            "environment is pinned to it so SciPy and the other compiled "
+            "packages match QGIS's NumPy.",
+            Qgis.MessageLevel.Info,
+        )
+        constraints_path = _write_torch_constraints(venv_dir, {})
+        if constraints_path:
+            phase_a_constraint_args = ["--constraint", constraints_path]
     if cuda_packages:
         _precheck_env = _get_clean_env_for_venv()
         _precheck_kwargs = _get_subprocess_kwargs()
@@ -2607,7 +2684,7 @@ def install_dependencies(
             constraints_path = _write_torch_constraints(venv_dir, installed)
             if constraints_path:
                 constraint_args = ["--constraint", constraints_path]
-            else:
+            if not installed.get("torch"):
                 _log(
                     "torch is not installed after the CUDA phase; the batch "
                     "install runs without a torch pin.",

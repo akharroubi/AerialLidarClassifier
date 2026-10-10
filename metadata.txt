@@ -3,7 +3,7 @@ name=LiDAR AI Classifier
 qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Classify airborne and mobile mapping LiDAR point clouds with deep learning (LitePT-L, SegFormer 3D).
-version=1.2.0
+version=1.2.1
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
 email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
@@ -42,6 +42,15 @@ hasProcessingProvider=yes
 server=False
 
 changelog=
+    1.2.1
+        - Fix: on QGIS builds that ship NumPy 1.x, the LitePT-L models
+          could not load ("module 'numpy' has no attribute 'long'"):
+          Setup installed a SciPy that needs NumPy 2. Setup now installs
+          packages that match QGIS's own NumPy on those builds; builds
+          with NumPy 2 install exactly as before. Existing installs on
+          such builds: restart QGIS, then run Plugins > LiDAR AI
+          Classifier > Repair dependencies.
+        - The LitePT status names this mismatch and the steps to fix it.
     1.2.0
         - New model for mobile mapping LiDAR: LitePT-L Mobile Mapping
           (MLS, 5 cm), nine classes, NVIDIA CUDA. Weights download

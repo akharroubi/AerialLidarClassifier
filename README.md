@@ -503,6 +503,14 @@ the plugin copies it into
 `<QGIS profile>/AerialLidarClassifier/models/<model id>/` and checks its
 SHA-256.
 
+### LitePT says "module 'numpy' has no attribute 'long'"
+
+Your QGIS ships NumPy 1.x, and the plugin's dependencies were installed
+before version 1.2.1, with a SciPy that needs NumPy 2. Update the plugin,
+restart QGIS, then run *Plugins > LiDAR AI Classifier > Repair
+dependencies* before opening the classifier. The repair installs packages
+that match the NumPy of your QGIS. SegFormer 3D keeps working meanwhile.
+
 ### Almost everything is classified as wires or towers, or the run is very slow
 
 The file is in feet and its CRS is missing or wrong. Set *Input units* (dock)
@@ -590,7 +598,7 @@ And, optionally, the plugin itself:
                   LiDAR point clouds},
   year         = {2026},
   url          = {https://github.com/akharroubi/AerialLidarClassifier},
-  version      = {1.2.0},
+  version      = {1.2.1},
   note         = {GPL-3.0-or-later}
 }
 ```

@@ -43,6 +43,28 @@ def _torch_details():
     return details
 
 
+def _numpy_mismatch_hint():
+    """Explain an environment built for NumPy 2 inside a QGIS with NumPy 1.x."""
+    try:
+        from importlib import metadata
+        from .venv_manager import _host_numpy_version, get_venv_site_packages
+        host = _host_numpy_version()
+        if not host or int(host.split(".", 1)[0]) >= 2:
+            return ""
+        ours = next((d.version for d in metadata.distributions(
+            name="numpy", path=[get_venv_site_packages()])), None)
+        if not ours or int(ours.split(".", 1)[0]) < 2:
+            return ""
+    except Exception:
+        return ""
+    return (
+        f"QGIS provides NumPy {host}, but the plugin environment was installed "
+        f"for NumPy {ours}. Restart QGIS, then use Plugins > {PLUGIN_NAME} > "
+        "Repair dependencies before opening the classifier: the repair installs "
+        "packages that match QGIS's NumPy."
+    )
+
+
 def litept_dependency_status():
     # Setup/Repair can make imports available after a first failed check.
     # Cache only successful imports, never a failure for the entire session.
@@ -63,6 +85,9 @@ def litept_dependency_status():
     ready, reason = _check_imports()
     if not ready:
         _check_imports.cache_clear()
+        hint = _numpy_mismatch_hint()
+        if hint:
+            reason = hint + "\n" + reason
         reason += "\n" + _torch_details()
     return ready, reason
 
