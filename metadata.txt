@@ -23,7 +23,7 @@ about=Classifies airborne, mobile mapping and railway LiDAR point clouds
     per-user folder on first use (no admin rights, nothing to
     configure), and the model weights download automatically. Files in
     feet are converted from their CRS; tiling and streaming handle files
-    larger than RAM. Model weights are CC BY-NC 4.0. Documentation:
+    larger than RAM. Model weights are CC BY-NC 4.0 (railway: CC BY-NC-SA 4.0). Documentation:
     https://github.com/akharroubi/AerialLidarClassifier
     The plugin author teaches a live cohort, LiDAR Point Clouds
     Processing in QGIS: https://maven.com/geomatics/qgis3d?utm_source=plugins.qgis.org&utm_medium=listing&utm_campaign=qgis3d

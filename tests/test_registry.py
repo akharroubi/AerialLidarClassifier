@@ -114,7 +114,8 @@ def test_railway_card_codes_and_enum_compatibility():
     assert not registry.SEGFORMER3D_URBANFILTERING.editable_codes
     assert spec.supported_devices == ("cuda",)
     assert spec.extra_packages == ("spconv", "scipy")
-    assert "CC BY-NC 4.0" in spec.licence
+    assert "CC BY-NC-SA 4.0" in spec.licence
+    assert "CC BY-NC 4.0" in registry.LITEPT_L_MLS.licence
 
 
 def test_user_defined_default_codes_start_at_64_without_gaps():

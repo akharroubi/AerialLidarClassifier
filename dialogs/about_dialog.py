@@ -11,6 +11,7 @@ from ..config import PLUGIN_NAME, PLUGIN_VERSION
 REPO_URL = "https://github.com/akharroubi/AerialLidarClassifier"
 TREEAIBOX_URL = "https://github.com/NRCan/TreeAIBox"
 LICENSE_URL = "https://creativecommons.org/licenses/by-nc/4.0/"
+LICENSE_SA_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/"
 
 
 class AboutDialog(QDialog):
@@ -94,8 +95,10 @@ class AboutDialog(QDialog):
         license_lbl = QLabel(
             f'<small>Model weights are licensed under <a href="{LICENSE_URL}">'
             "Creative Commons Attribution-NonCommercial 4.0 International "
-            "(CC BY-NC 4.0)</a>; the 3D SegFormer weights are the unchanged "
-            f'<a href="{TREEAIBOX_URL}">TreeAIBox</a> release.</small>'
+            "(CC BY-NC 4.0)</a>, the railway weights under "
+            f'<a href="{LICENSE_SA_URL}">CC BY-NC-SA 4.0</a>; the 3D SegFormer '
+            f'weights are the unchanged <a href="{TREEAIBOX_URL}">TreeAIBox</a> '
+            "release.</small>"
         )
         license_lbl.setWordWrap(True)
         license_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -123,7 +126,7 @@ class AboutDialog(QDialog):
         commercial = QLabel(
             "<div style='text-align:center;'>"
             "<small>The downloaded weight sets are designated CC BY-NC 4.0 "
-            "(non-commercial use only). Classifying LiDAR data for "
+            "or CC BY-NC-SA 4.0 (non-commercial use only). Classifying LiDAR data for "
             "commercial purposes requires a separate licence from the "
             "model authors or a different model.</small>"
             "</div>"

@@ -31,8 +31,9 @@ SHA-256: starts with `d2fd555c9147` (full value in `core/registry.py`).
 ## LitePT-L Railway
 
 The LitePT-L Railway weights are provided by Abderrazzaq Kharroubi /
-GeoScITY Lab, University of Liege. They are released under CC BY-NC 4.0
-(research and other non-commercial use).
+GeoScITY Lab, University of Liege. They are released under CC BY-NC-SA 4.0
+(research and other non-commercial use; shared adaptations, such as
+fine-tuned weights, under the same licence), as is, without warranty.
 
 Weight file: `litept_l_rail_5cm_fp16.pth`
 

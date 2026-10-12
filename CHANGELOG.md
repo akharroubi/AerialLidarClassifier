@@ -16,6 +16,7 @@ and the project follows [Semantic Versioning](https://semver.org/).
   240,000-point / 12 m crops, NVIDIA CUDA, the same reduced crop budgets as
   mobile mapping on smaller GPUs. The fp16 weights (172 MB) download
   automatically during Setup or on first use and are SHA-256 verified.
+  They are licensed CC BY-NC-SA 4.0 and provided as is.
 - Default railway codes follow ASPRS LAS 1.4 where a class exists: ground 2,
   rail 10 (*Rail*), pole 15 (*Transmission Tower*), wire 14 (*Wire,
   Conductor*), vegetation 5, other 1. Fences have no ASPRS code and get 64,

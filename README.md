@@ -27,7 +27,7 @@ saved settings, downloaded weights and Processing models.
 [![QGIS](https://img.shields.io/badge/QGIS-3.34%20to%204.x-1f9b4e)](https://qgis.org)
 [![Python](https://img.shields.io/badge/python-3.9%E2%80%933.13-3776AB)](https://www.python.org)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
-[![Model: CC BY-NC 4.0](https://img.shields.io/badge/model-CC%20BY--NC%204.0-lightgrey)](https://creativecommons.org/licenses/by-nc/4.0/)
+[![Models: CC BY-NC 4.0 / BY-NC-SA 4.0](https://img.shields.io/badge/models-CC%20BY--NC%20%2F%20BY--NC--SA%204.0-lightgrey)](#model-weights)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-555)](#hardware-and-platform-support)
 
 Every input point is written back with a LAS classification code. The airborne
@@ -486,6 +486,9 @@ All models run inside a QGIS background task, so QGIS stays responsive.
   trains...), so it is a broad class.
 - Very large files: use tiling (a buffer of 10 m or more keeps context at the
   tile edges) or streaming.
+- The results are provided as is, without warranty (see the licences). Check
+  them before using them for asset management, maintenance planning or any
+  safety-related work.
 
 ---
 
@@ -612,7 +615,7 @@ The weights download automatically. The URLs below are for offline machines.
 | Size          | ~172 MB |
 | SHA-256       | starts with `bd3356898bcf`; the full value is in `core/registry.py` and the plugin checks it automatically |
 | URL           | [release v1.3 of this repository](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.3) |
-| License       | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) |
+| License       | [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) |
 
 **LitePT-L Mobile Mapping (MLS, 5 cm)**: Mobile mapping classifier
 
@@ -690,8 +693,10 @@ And, optionally, the plugin itself:
 - **Plugin source code**: [GPL-3.0-or-later](LICENSE). The vendored LitePT
   model code (`core/litept/`) is MIT, (c) Photogrammetry and Remote Sensing Lab,
   ETH Zurich (see `core/litept/LICENSE.upstream`).
-- **Model weights**: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/).
-  The LitePT-L weights are provided by the plugin maintainer. The SegFormer 3D
+- **Model weights**: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/),
+  except LitePT-L Railway: [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) (non-commercial;
+  shared modified versions, such as fine-tuned weights, must use the same
+  licence). The LitePT-L weights are provided by the plugin maintainer. The SegFormer 3D
   weights are distributed unchanged from TreeAIBox, whose authors permitted
   their use in this plugin. See
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution and scope.
