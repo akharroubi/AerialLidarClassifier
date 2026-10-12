@@ -169,7 +169,10 @@ def check(source_path, out_path, codes):
     output_extras = list(output.point_format.extra_dimension_names)
     if output_extras != source_extras:
         problems.append(f"extra dimensions changed: {source_extras} -> {output_extras}")
-    upgrade = source.point_format.id < 6 and max(codes.values()) > 31
+    # Both writers upgrade only when a code actually written exceeds 31 (a
+    # class the model did not predict on this file does not count).
+    written_codes = np.asarray(output.classification)
+    upgrade = source.point_format.id < 6 and written_codes.size and int(written_codes.max()) > 31
     expected_format = ({0: 6, 1: 6, 2: 7, 3: 7, 4: 9, 5: 10}[source.point_format.id]
                        if upgrade else source.point_format.id)
     expected_version = "1.4" if upgrade else str(source.header.version)
