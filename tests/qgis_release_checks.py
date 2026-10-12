@@ -268,6 +268,7 @@ class ReleaseChecks(unittest.TestCase):
         plugin.initProcessing()
         self.assertIs(plugin.provider, first)
         self.assertIsNotNone(QgsApplication.processingRegistry().algorithmById('aeriallidar:classify_lidar'))
+        self.assertIsNotNone(QgsApplication.processingRegistry().algorithmById('aeriallidar:classify_point_cloud'))
         plugin.unload()
 
     def test_streaming_and_memory_preserve_raw_attributes_and_evlr(self):

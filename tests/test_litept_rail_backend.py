@@ -91,6 +91,24 @@ def test_rail_every_raw_point_gets_a_class_from_1_to_7():
         raise AssertionError("Cancellation did not stop Railway inference")
 
 
+def test_recovery_advice_offers_segformer_only_for_airborne_data():
+    module = load_plugin_module("core.backends.litept")
+    messages = {}
+    for card in ("litept_l_dales_10cm", "litept_l_mls_5cm", "litept_l_rail_5cm"):
+        backend = module.LitePTBackend(PLUGIN_ROOT / "core" / f"{card}.json", "unused.pth")
+        try:
+            backend.load("cpu")
+        except RuntimeError as exc:
+            messages[card] = str(exc)
+        else:
+            raise AssertionError(f"{card} loaded on the CPU")
+    assert "Airborne classifier can run its SegFormer 3D engine" in messages["litept_l_dales_10cm"]
+    for card in ("litept_l_mls_5cm", "litept_l_rail_5cm"):
+        assert "SegFormer" not in messages[card], messages[card]
+        assert "Airborne" not in messages[card], messages[card]
+    assert messages["litept_l_rail_5cm"].startswith("LitePT-L Railway (5 cm) runs on NVIDIA CUDA GPUs only")
+
+
 def _released_weights():
     explicit = os.environ.get("ALC_RAIL_WEIGHTS")
     appdata = Path(os.environ.get("APPDATA", Path.home()))

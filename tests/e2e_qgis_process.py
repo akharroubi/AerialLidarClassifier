@@ -8,8 +8,9 @@ required. Each run gets a new private directory below --work; existing files
 and profiles are never removed. The test serves the released weights on
 localhost (or, with --public, lets the plugin download them from the URL in
 the ZIP's registry), checks the real first-use download and its SHA-256, then
-runs on CUDA with default codes in memory on QGIS 3, selected with the 1.2
-MODEL index, and custom codes in streaming mode on QGIS 4, selected with
+runs on CUDA with default codes in memory on QGIS 3, through the 1.0-1.2
+algorithm aeriallidar:classify_lidar and its MODEL index, and custom codes in
+streaming mode on QGIS 4, through aeriallidar:classify_point_cloud and
 CLASSIFIER. It verifies file integrity and cross-runtime class IDs. No
 reference-label field is required.
 
@@ -132,11 +133,11 @@ def make_profile(root, zip_path, ini_name, weights_url):
         encoding="utf-8")
 
 
-def run_qgis_process(launcher, profile, cache, args, log):
+def run_qgis_process(launcher, profile, cache, algorithm, args, log):
     env = dict(os.environ, QGIS_CUSTOM_CONFIG_PATH=str(profile),
                AERIAL_LIDAR_CLASSIFIER_CACHE_DIR=str(cache))
     command = ["cmd", "/c", str(launcher), "--json", "run",
-               "aeriallidar:classify_lidar", "--", *args]
+               algorithm, "--", *args]
     start = time.monotonic()
     with open(log, "w", encoding="utf-8", errors="replace") as stream:
         code = subprocess.run(command, env=env, stdout=stream, stderr=subprocess.STDOUT,  # nosec B603
@@ -285,13 +286,13 @@ def main():
             server = serve(weights_dir)
             url = f"http://127.0.0.1:{server.server_address[1]}/{WEIGHTS}"
         runs = (
-            ("qgis3", "QGIS3.ini", DEFAULT_CODES,
+            ("qgis3", "QGIS3.ini", DEFAULT_CODES, "aeriallidar:classify_lidar",
              [f"MODEL={TARGET['model_index']}", "TILE_ENABLED=false"]),
-            ("qgis4", "QGIS4.ini", CUSTOM_CODES,
+            ("qgis4", "QGIS4.ini", CUSTOM_CODES, "aeriallidar:classify_point_cloud",
              [f"CLASSIFIER={TARGET['classifier_index']}", "TILE_ENABLED=true", "TILE_STREAMING=true",
               f"TILE_SIZE_M={tile_size}", "TILE_BUFFER_M=0"]),
         )
-        for label, ini, codes, extra in runs:
+        for label, ini, codes, algorithm, extra in runs:
             profile, out_dir = work / f"profile_{label}", work / f"out_{label}"
             entry = {"launcher": str(launchers[label]), "log": str(work / f"{label}.log")}
             try:
@@ -302,7 +303,8 @@ def main():
                     params.append("OUTPUT_CODES_JSON=" + json.dumps({str(k): v for k, v in codes.items()},
                                                                       separators=(",", ":")))
                 requests_before = len(server.weight_requests) if server else 0
-                code, seconds = run_qgis_process(launchers[label], profile, Path(args.cache).resolve(),
+                entry["algorithm"] = algorithm
+                code, seconds = run_qgis_process(launchers[label], profile, Path(args.cache).resolve(), algorithm,
                                                  params, work / f"{label}.log")
                 entry.update(exit_code=code, seconds=round(seconds, 1))
                 if code:

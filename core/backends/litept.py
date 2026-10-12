@@ -79,26 +79,26 @@ class LitePTBackend:
     def load(self, device: str = "cuda") -> None:
         import torch
 
+        name = self.card.get("display_name", "LitePT-L")
         if device != "cuda":
             raise RuntimeError(
-                "LitePT-L runs on NVIDIA CUDA GPUs only (its sparse "
+                f"{name} runs on NVIDIA CUDA GPUs only (its sparse "
                 "convolutions come from spconv, which has no CPU or Apple "
-                "build). Choose the SegFormer 3D model for CPU or Apple "
-                "Silicon."
+                "build)." + self._fallback_hint()
             )
         if not torch.cuda.is_available():
             raise RuntimeError(
-                "LitePT-L needs a CUDA GPU but this torch build has none. "
-                "Choose the SegFormer 3D model or reinstall the dependencies "
-                "from the Setup panel."
+                f"{name} needs a CUDA GPU but this torch build has none. "
+                "Reinstall the dependencies with Plugins > Repair dependencies "
+                "(GPU installation)." + self._fallback_hint()
             )
         try:
             import spconv.pytorch  # noqa: F401
         except ImportError as exc:
             raise RuntimeError(
-                "LitePT-L needs the spconv package, which is not installed "
-                "in the plugin environment. Open the Setup panel and install "
-                "the model's dependencies, or choose the SegFormer 3D model."
+                f"{name} needs the spconv package, which is not installed "
+                "in the plugin environment. Use Plugins > Repair dependencies "
+                "to install it." + self._fallback_hint()
             ) from exc
 
         from ..litept.model import LitePT
@@ -193,6 +193,21 @@ class LitePTBackend:
         self.max_radius = float(max_radius)
         self.center_spacing = (float(center_spacing) if center_spacing is not None
                                else 2 * self.max_radius / (math.sqrt(3) * 1.1))
+
+    def _fallback_hint(self) -> str:
+        """Advice for when this model cannot run: only the Airborne classifier
+        has another engine; mobile mapping and railway data need this model."""
+        try:
+            from ..registry import classifier_for_model
+            classifier = classifier_for_model(self.card.get("id"))
+        except (ImportError, KeyError):
+            return ""
+        others = [spec for spec in classifier.engines if spec.id != self.card.get("id")]
+        if not others:
+            return ""
+        return (f" The {classifier.display_name} can run its {others[0].short_name} "
+                "engine instead: untick Use GPU in the dock, or choose the CPU device "
+                "in Processing.")
 
     def unload(self) -> None:
         self.model = None
@@ -294,9 +309,9 @@ class LitePTBackend:
                     torch.cuda.empty_cache()
                     if k <= 5_000:
                         raise RuntimeError(
-                            "LitePT-L ran out of GPU memory even with "
-                            f"{k:,}-point crops. Close other GPU applications "
-                            "or choose the SegFormer 3D model."
+                            f"{self.card.get('display_name', 'LitePT-L')} ran out of GPU "
+                            f"memory even with {k:,}-point crops. Close other GPU "
+                            "applications and run again." + self._fallback_hint()
                         ) from exc
                     k = max(5_000, k // 2)
                     self.points_per_crop = k

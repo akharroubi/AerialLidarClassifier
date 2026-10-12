@@ -1,8 +1,19 @@
-"""Processing algorithm: classify airborne, Mobile Mapping or railway LiDAR.
+"""Processing algorithms: classify airborne, Mobile Mapping or railway LiDAR.
 
-Wraps the same classification pipeline used by the interactive dock so
-it can be invoked from the Processing Toolbox, the Graphical Modeler
-and the ``qgis_process`` CLI.
+Wrap the same classification pipeline used by the interactive dock so it
+can be invoked from the Processing Toolbox, the Graphical Modeler and the
+``qgis_process`` CLI.
+
+Two algorithms share everything but the model choice:
+
+* ``aeriallidar:classify_point_cloud`` (1.3): ``CLASSIFIER`` picks Airborne,
+  Mobile mapping or Railway; Airborne runs the first of its engines that
+  works on the computer.
+* ``aeriallidar:classify_lidar`` (1.0 to 1.2): ``MODEL`` picks one model
+  (engine) by its registry index. Kept unchanged for saved models, scripts
+  and ``qgis_process`` calls, flagged deprecated so the Toolbox lists only
+  the classifier algorithm. Its parameter stays visible, so editing a saved
+  Graphical Modeler step keeps the model it names.
 
 Output is written to the standard ASPRS ``classification`` dimension by
 default (LAS / LAZ 1.4 / point format 6 when codes require >5 bits).
@@ -12,6 +23,7 @@ import logging
 from pathlib import Path
 
 from qgis.core import (
+    QgsProperty,
     QgsProcessingAlgorithm,
     QgsProcessingContext,
     QgsProcessingException,
@@ -40,24 +52,24 @@ _LOG = logging.getLogger(__name__)
 try:
     from qgis.core import Qgis as _Qgis
     _FLAG_ADVANCED = _Qgis.ProcessingParameterFlag.Advanced
-    _FLAG_HIDDEN = _Qgis.ProcessingParameterFlag.Hidden
+    _ALG_DEPRECATED = _Qgis.ProcessingAlgorithmFlag.Deprecated
 except AttributeError:
     _FLAG_ADVANCED = scoped_enum(QgsProcessingParameterDefinition, "Flag", "FlagAdvanced")
-    _FLAG_HIDDEN = scoped_enum(QgsProcessingParameterDefinition, "Flag", "FlagHidden")
+    _ALG_DEPRECATED = scoped_enum(QgsProcessingAlgorithm, "Flag", "FlagDeprecated")
 try:
     _NUMBER_DOUBLE = _Qgis.ProcessingNumberParameterType.Double
 except AttributeError:
     _NUMBER_DOUBLE = scoped_enum(QgsProcessingParameterNumber, "Type", "Double")
 
 
-class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
-    """Classify a LAS / LAZ / COPC point cloud with a deep-learning model."""
+class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
+    """Classify a LAS / LAZ / COPC point cloud with a deep-learning model.
+
+    Subclasses add the model-choice parameter and resolve it to engines.
+    """
 
     INPUT = "INPUT"
     CLASSIFIER = "CLASSIFIER"
-    # 1.1 / 1.2 parameter: an index into registry.MODELS (one engine).
-    # Hidden and optional; when given it wins, so saved models and scripts
-    # keep running the engine they chose.
     MODEL = "MODEL"
     OUTPUT_FOLDER = "OUTPUT_FOLDER"
     SUFFIX = "SUFFIX"
@@ -85,15 +97,6 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         from .. import tr
         return tr(text, context="ClassifyLidarAlgorithm")
 
-    def createInstance(self):  # noqa: N802
-        return ClassifyLidarAlgorithm()
-
-    def name(self) -> str:
-        return "classify_lidar"
-
-    def displayName(self) -> str:  # noqa: N802
-        return self.tr("Classify airborne / Mobile Mapping / railway LiDAR point cloud")
-
     def group(self) -> str:
         return self.tr("Classification")
 
@@ -101,7 +104,17 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         return "classification"
 
     @staticmethod
-    def _models_help() -> str:
+    def _engine_table(spec) -> str:
+        rows = "".join(
+            f"<tr><td>{info.model_id}</td><td>{info.name}</td><td>{info.asprs_code}</td></tr>"
+            for info in spec.class_mapping.values()
+        )
+        return ("<table><tr><th align=left>Model ID</th><th align=left>Class</th>"
+                "<th align=left>Default output code</th></tr>"
+                f"{rows}</table>")
+
+    @staticmethod
+    def _classifiers_help() -> str:
         parts = []
         for index, classifier in enumerate(CLASSIFIERS):
             parts.append(f"<p><b>{index} - {classifier.display_name}</b>: {classifier.description}</p>")
@@ -112,28 +125,26 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                     role = "Engine on NVIDIA CUDA GPUs"
                 else:
                     role = "Engine where LitePT-L cannot run (CPU, Apple Silicon, other GPUs)"
-                rows = "".join(
-                    f"<tr><td>{info.model_id}</td><td>{info.name}</td><td>{info.asprs_code}</td></tr>"
-                    for info in spec.class_mapping.values()
-                )
                 parts.append(
                     f"<p>{role}: <i>{spec.display_name}</i> ({spec.device_requirement_text()}). "
                     f"{spec.description} Licence: {spec.licence}.</p>"
-                    "<table><tr><th align=left>Model ID</th><th align=left>Class</th>"
-                    "<th align=left>Default output code</th></tr>"
-                    f"{rows}</table>"
+                    + _ClassifyAlgorithmBase._engine_table(spec)
                 )
         return "".join(parts)
+
+    def _intro_help(self) -> str:
+        raise NotImplementedError
+
+    def _models_help(self) -> str:
+        raise NotImplementedError
+
+    def _choice_help(self) -> str:
+        raise NotImplementedError
 
     def shortHelpString(self) -> str:  # noqa: N802
         return self.tr(
             f"<h3>{PLUGIN_NAME}</h3>"
-            "<p>Deep-learning semantic segmentation of airborne, Mobile Mapping and "
-            "railway point clouds (LAS / LAZ / COPC). Choose the model for the acquisition "
-            "type: Airborne, Mobile mapping or Railway classifier. The Mobile Mapping "
-            "(nine classes) and Railway (seven classes) models have editable output "
-            "codes.</p>"
-            "<h4>Classifiers</h4>"
+            + self._intro_help()
             + self._models_help() +
             "<h4>ASPRS compliance</h4>"
             "<p>By default the classification is written to the standard "
@@ -150,14 +161,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "<ul>"
             "<li><b>Input point cloud</b> - a single LAS, LAZ or "
             "<code>.copc.laz</code> file.</li>"
-            "<li><b>Classifier</b> - Airborne (0), Mobile mapping (1) or Railway (2). "
-            "Mobile mapping and Railway need an NVIDIA CUDA GPU. Airborne uses "
-            "LitePT-L on NVIDIA CUDA GPUs and the SegFormer 3D engine elsewhere; "
-            "the log says which engine ran and why. "
-            "The weights download automatically the first time a model is used "
-            "(SHA-256 verified). Scripts and models from versions 1.1 and 1.2 that "
-            "pass <code>MODEL</code> (0 LitePT-L Airborne, 1 SegFormer 3D, 2 Mobile "
-            "Mapping; 3 Railway) still run exactly that model.</li>"
+            + self._choice_help() +
             "<li><b>Output folder</b> - where the classified file is "
             "written.</li>"
             "<li><b>Output filename suffix</b> - appended before the "
@@ -228,16 +232,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 fileFilter="Point clouds (*.las *.laz *.copc.laz)",
             )
         )
-        # Index order is part of the public interface (saved models store
-        # the index): keep the registry order stable.
-        self.addParameter(
-            QgsProcessingParameterEnum(
-                self.CLASSIFIER,
-                self.tr("Classifier"),
-                options=[classifier.display_name for classifier in CLASSIFIERS],
-                defaultValue=0,
-            )
-        )
+        self._add_choice_parameter()
         self.addParameter(
             QgsProcessingParameterFolderDestination(
                 self.OUTPUT_FOLDER,
@@ -337,15 +332,6 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 defaultValue=0,
             )
         )
-        legacy = QgsProcessingParameterEnum(
-            self.MODEL,
-            self.tr("Model (1.1 / 1.2 parameter; use Classifier)"),
-            options=[spec.display_name for spec in MODELS],
-            optional=True,
-            defaultValue=None,
-        )
-        legacy.setFlags(legacy.flags() | _FLAG_HIDDEN)
-        self.addParameter(legacy)
         # The classified file itself, so the Graphical Modeler can chain
         # it into a next step (v1.0.2 only returned the folder).
         self.addOutput(
@@ -355,32 +341,45 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         )
 
     # ------------------------------------------------------------------
+    def _add_choice_parameter(self):
+        raise NotImplementedError
+
     def _requested_engines(self, parameters, context, feedback):
         """(classifier or None, engines in preference order) for this run."""
-        legacy = parameters.get(self.MODEL)
-        if legacy is not None and str(legacy).strip() != "":
-            # parameterAsEnum turns an out-of-range index into the default
-            # (0), which would silently run another model.
-            raw = str(legacy).strip()
-            index = (int(raw) if raw.lstrip("-").isdecimal()
-                     else self.parameterAsEnum(parameters, self.MODEL, context))
-            if not 0 <= index < len(MODELS):
+        raise NotImplementedError
+
+    def _enum_index(self, parameters, name, context, count, meaning):
+        """Index chosen for enum parameter ``name``, validated against ``count``.
+
+        parameterAsEnum turns an out-of-range index, also one computed by an
+        expression, into the default, which would silently run another
+        model: evaluate and check the value here instead. A missing value
+        takes the parameter's default.
+        """
+        value = parameters.get(name)
+        if isinstance(value, QgsProperty):
+            evaluated = value.value(context.expressionContext(), None)
+            value, ok = evaluated if isinstance(evaluated, tuple) else (evaluated, True)
+            if not ok:
                 raise QgsProcessingException(self.tr(
-                    f"MODEL must be 0 to {len(MODELS) - 1}; use CLASSIFIER instead."))
-            spec = MODELS[index]
-            feedback.pushInfo(self.tr(
-                f"MODEL={index} (parameter of versions 1.1 and 1.2) selects {spec.display_name}. "
-                "CLASSIFIER replaces it."))
-            return None, (spec,)
-        raw = str(parameters.get(self.CLASSIFIER, "")).strip()
-        index = (int(raw) if raw.lstrip("-").isdecimal()
-                 else self.parameterAsEnum(parameters, self.CLASSIFIER, context))
-        if not 0 <= index < len(CLASSIFIERS):
+                    f"{name}: the expression {value!r} could not be evaluated."))
+        if isinstance(value, (list, tuple)) and len(value) == 1:
+            value = value[0]
+        if value is None or str(value).strip() in ("", "NULL"):
+            return int(self.parameterDefinition(name).defaultValue() or 0)
+        index = None
+        if isinstance(value, bool):
+            index = None
+        elif isinstance(value, int):
+            index = value
+        elif isinstance(value, float) and value.is_integer():
+            index = int(value)
+        elif isinstance(value, str) and value.strip().lstrip("-").isdecimal():
+            index = int(value.strip())
+        if index is None or not 0 <= index < count:
             raise QgsProcessingException(self.tr(
-                f"CLASSIFIER must be 0 to {len(CLASSIFIERS) - 1} "
-                "(0 Airborne, 1 Mobile mapping, 2 Railway)."))
-        classifier = CLASSIFIERS[index]
-        return classifier, classifier.engines
+                f"{name} must be an integer from 0 to {count - 1} ({meaning}); got {value!r}."))
+        return index
 
     def _select_engine(self, classifier, device, feedback):
         """First engine of ``classifier`` that runs on ``device``, with the reason
@@ -852,3 +851,121 @@ class _PointCloud3DPostProcessor(QgsProcessingLayerPostProcessorInterface):
                 remove_stale_views(self.primary_output, keep=layer.source(), in_use=in_use)
             except Exception:
                 _LOG.debug("Ignored non-fatal error", exc_info=True)
+
+
+class ClassifyPointCloudAlgorithm(_ClassifyAlgorithmBase):
+    """Version 1.3 interface: choose a classifier (acquisition type)."""
+
+    def createInstance(self):  # noqa: N802
+        return ClassifyPointCloudAlgorithm()
+
+    def name(self) -> str:
+        return "classify_point_cloud"
+
+    def displayName(self) -> str:  # noqa: N802
+        return self.tr("Classify LiDAR point cloud (airborne, mobile mapping, railway)")
+
+    def _intro_help(self) -> str:
+        return (
+            "<p>Deep-learning semantic segmentation of airborne, Mobile Mapping and "
+            "railway point clouds (LAS / LAZ / COPC). Choose the classifier for the "
+            "acquisition type: Airborne, Mobile mapping or Railway. The Mobile Mapping "
+            "(nine classes) and Railway (seven classes) models have editable output "
+            "codes.</p>"
+        )
+
+    def _models_help(self) -> str:
+        return "<h4>Classifiers</h4>" + self._classifiers_help()
+
+    def _choice_help(self) -> str:
+        return (
+            "<li><b>Classifier</b> - Airborne (0), Mobile mapping (1) or Railway (2). "
+            "Mobile mapping and Railway need an NVIDIA CUDA GPU. Airborne uses "
+            "LitePT-L on NVIDIA CUDA GPUs and the SegFormer 3D engine elsewhere; "
+            "the log says which engine ran and why. "
+            "The weights download automatically the first time a model is used "
+            "(SHA-256 verified). Scripts and models from versions 1.0 to 1.2 use "
+            "the algorithm <code>aeriallidar:classify_lidar</code> and its "
+            "<code>MODEL</code> parameter, which still work unchanged.</li>"
+        )
+
+    def _add_choice_parameter(self):
+        # Index order is part of the public interface (saved models store
+        # the index): append new classifiers only.
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.CLASSIFIER,
+                self.tr("Classifier"),
+                options=[classifier.display_name for classifier in CLASSIFIERS],
+                defaultValue=0,
+            )
+        )
+
+    def _requested_engines(self, parameters, context, feedback):
+        index = self._enum_index(parameters, self.CLASSIFIER, context, len(CLASSIFIERS),
+                                 "0 Airborne, 1 Mobile mapping, 2 Railway")
+        classifier = CLASSIFIERS[index]
+        return classifier, classifier.engines
+
+
+class ClassifyLidarAlgorithm(_ClassifyAlgorithmBase):
+    """Interface of versions 1.0 to 1.2: choose one model by index.
+
+    Deprecated (hidden from the Toolbox) but fully supported, so saved
+    Graphical Modeler models, scripts and qgis_process calls keep running
+    and editing the exact model they name.
+    """
+
+    def createInstance(self):  # noqa: N802
+        return ClassifyLidarAlgorithm()
+
+    def name(self) -> str:
+        return "classify_lidar"
+
+    def displayName(self) -> str:  # noqa: N802
+        return self.tr("Classify LiDAR point cloud with a chosen model (1.0 to 1.2 interface)")
+
+    def flags(self):
+        return super().flags() | _ALG_DEPRECATED
+
+    def _intro_help(self) -> str:
+        return (
+            "<p>The algorithm of versions 1.0 to 1.2, kept for saved models, scripts "
+            "and <code>qgis_process</code> calls: <code>MODEL</code> selects one model "
+            "by its index and runs exactly that model. New work should use "
+            "<i>Classify LiDAR point cloud</i> "
+            "(<code>aeriallidar:classify_point_cloud</code>), which picks the model "
+            "for the computer.</p>"
+        )
+
+    def _models_help(self) -> str:
+        return "<h4>Models</h4>" + "".join(
+            f"<p><b>{index} - {spec.display_name}</b> ({spec.device_requirement_text()}): "
+            f"{spec.description} Licence: {spec.licence}.</p>" + self._engine_table(spec)
+            for index, spec in enumerate(MODELS)
+        )
+
+    def _choice_help(self) -> str:
+        return (
+            "<li><b>Model</b> - 0 LitePT-L Airborne, 1 SegFormer 3D Airborne, "
+            "2 LitePT-L Mobile Mapping, 3 LitePT-L Railway. The LitePT-L models need an "
+            "NVIDIA CUDA GPU. The weights download automatically the first time a model "
+            "is used (SHA-256 verified).</li>"
+        )
+
+    def _add_choice_parameter(self):
+        # Index order is part of the public interface: append only.
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.MODEL,
+                self.tr("Model"),
+                options=[spec.display_name for spec in MODELS],
+                defaultValue=0,
+            )
+        )
+
+    def _requested_engines(self, parameters, context, feedback):
+        index = self._enum_index(
+            parameters, self.MODEL, context, len(MODELS),
+            "0 LitePT-L Airborne, 1 SegFormer 3D, 2 LitePT-L Mobile Mapping, 3 LitePT-L Railway")
+        return None, (MODELS[index],)

@@ -13,9 +13,12 @@ from the GitHub releases listed in core/registry.py. Timestamps are fixed
 and text files use LF, so the same source always gives the same bytes; a
 SHA-256 sidecar is written next to the ZIP.
 
-The build refuses to produce an archive that plugins.qgis.org would
-reject or hold for manual review: larger than 25 MB, containing binaries
-or weights, failing Bandit, Flake8's blocking checks, or the secrets scan.
+The build refuses an archive larger than 25 MB (the repository limit),
+containing binaries or weights, with any Bandit finding, Flake8
+syntax-class errors or long hex strings. These checks are project policy,
+stricter than the plugins.qgis.org scanner (where critical Bandit and
+detect-secrets findings block publication and Flake8 findings are
+informational), so that every upload scans clean.
 """
 import argparse
 import re
@@ -88,9 +91,10 @@ def check_secrets_scanner(files) -> None:
 def check_bandit() -> None:
     """Refuse to build unless Bandit reports nothing, with no config file.
 
-    plugins.qgis.org runs Bandit on every upload. A clean scan without a
-    developer-supplied config (.bandit) keeps the version "Validated"
-    rather than "Validated (configured)", which needs an admin review.
+    plugins.qgis.org runs Bandit on every upload. Project policy: zero
+    findings and no developer-supplied config (.bandit), so the version is
+    "Validated" rather than "Validated (configured)" (1.1.0, uploaded with a
+    config file, waited days for an admin's approval).
     """
     import json
     import subprocess  # nosec B404 - build tool only, never shipped
@@ -127,10 +131,12 @@ def check_no_binaries(files) -> None:
 
 
 def check_flake8_blockers() -> None:
-    """Refuse the Flake8 errors plugins.qgis.org treats as blocking.
+    """Refuse Flake8's syntax-class errors (project policy).
 
     E9 (syntax / IO errors), F821 (undefined name), F823 (local variable
-    referenced before assignment) and F831 (duplicate argument name).
+    referenced before assignment) and F831 (duplicate argument name): real
+    failures in any QGIS. plugins.qgis.org reports Flake8 findings as
+    information.
     """
     import subprocess  # nosec B404 - build tool only, never shipped
     targets = [str(ROOT / name) for name in DIRS if (ROOT / name).is_dir()]

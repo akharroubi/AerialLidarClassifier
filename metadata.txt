@@ -57,10 +57,12 @@ changelog=
           the Airborne classifier runs it where LitePT-L cannot (no NVIDIA
           GPU, Apple Silicon, GPUs without spconv) and the status and log
           say so.
-        - Processing: new CLASSIFIER parameter (0 Airborne, 1 Mobile
-          mapping, 2 Railway). The MODEL parameter of 1.1 and 1.2 still
-          works and runs exactly the model it names (3 is LitePT-L
-          Railway), so saved models and scripts keep their results.
+        - Processing: new algorithm "Classify LiDAR point cloud"
+          (aeriallidar:classify_point_cloud, CLASSIFIER 0 Airborne,
+          1 Mobile mapping, 2 Railway). The algorithm of 1.0 to 1.2
+          (aeriallidar:classify_lidar, MODEL) still runs exactly the model
+          it names (3 is LitePT-L Railway) and is hidden from the Toolbox,
+          so saved models and scripts keep their results.
         - The output-code editor shows the ASPRS meaning of every code.
         - Setup states the real download size of the model weights.
     1.2.1

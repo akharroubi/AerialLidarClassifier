@@ -190,12 +190,13 @@ time and an *Open folder* button.
 
 ### Processing algorithm
 
-The algorithm `aeriallidar:classify_lidar` is available from the
-**Processing Toolbox**, the **Graphical Modeler** (the classified file is the
-`OUTPUT_FILE` output, ready to chain) and the `qgis_process` command line:
+The algorithm *Classify LiDAR point cloud*, `aeriallidar:classify_point_cloud`,
+is available from the **Processing Toolbox**, the **Graphical Modeler** (the
+classified file is the `OUTPUT_FILE` output, ready to chain) and the
+`qgis_process` command line:
 
 ```bash
-qgis_process run aeriallidar:classify_lidar -- \
+qgis_process run aeriallidar:classify_point_cloud -- \
   INPUT=/data/tile.laz OUTPUT_FOLDER=/data/classified \
   CLASSIFIER=0 TILE_ENABLED=true TILE_SIZE_M=0 TILE_BUFFER_M=50
 ```
@@ -204,30 +205,31 @@ qgis_process run aeriallidar:classify_lidar -- \
 |-----------|--------|
 | `INPUT` | LAS, LAZ or COPC file |
 | `CLASSIFIER` | `0` Airborne, `1` Mobile mapping, `2` Railway |
-| `MODEL` | parameter of versions 1.1 and 1.2, still accepted (hidden in the dialog): `0` LitePT-L Airborne, `1` SegFormer 3D, `2` LitePT-L Mobile Mapping, `3` LitePT-L Railway. It runs exactly that model and takes precedence over `CLASSIFIER` |
 | `OUTPUT_FOLDER`, `SUFFIX` | output location, default suffix `_classified` |
 | `DEVICE` | `0` Auto, `1` GPU (CUDA), `2` CPU, `3` GPU (Apple MPS) |
 | `FIELD_NAME` | `classification` (default). The Airborne classifier also accepts a new name (raw model classes in an extra field) |
-| `OUTPUT_CODES_JSON` | mobile mapping and railway, optional: codes keyed by model class ID, e.g. `{"5":20,"6":21,"7":22}`; blank keeps the defaults |
+| `OUTPUT_CODES_JSON` | mobile mapping and railway, optional: codes keyed by model class ID, e.g. `{"5":70,"6":71,"7":72}`; blank keeps the defaults |
 | `LOAD_AS_LAYER` | add the result to the project |
 | `TILE_ENABLED`, `TILE_SIZE_M`, `TILE_BUFFER_M` | tiling; size `0` is automatic (about 10 M points per tile), buffer default 50 m |
 | `TILE_STREAMING` | streaming I/O for files larger than RAM |
 | `UNITS` | `0` auto-detect, `1` metres, `2` international feet, `3` US survey feet |
 
-For example, mobile mapping with your own codes for poles, vehicles and fences:
+For example, mobile mapping with your own user-defined codes for poles,
+vehicles and fences:
 
 ```bash
-qgis_process run aeriallidar:classify_lidar -- \
+qgis_process run aeriallidar:classify_point_cloud -- \
   INPUT=/data/street.laz OUTPUT_FOLDER=/data/classified CLASSIFIER=1 \
-  'OUTPUT_CODES_JSON={"5":20,"6":21,"7":22}'
+  'OUTPUT_CODES_JSON={"5":70,"6":71,"7":72}'
 ```
 
-or railway, with fences written as code 17 and other objects as 0:
+or railway, with fences written as 70 and other objects as 71 (both
+user-defined codes):
 
 ```bash
-qgis_process run aeriallidar:classify_lidar -- \
+qgis_process run aeriallidar:classify_point_cloud -- \
   INPUT=/data/line.laz OUTPUT_FOLDER=/data/classified CLASSIFIER=2 \
-  'OUTPUT_CODES_JSON={"6":17,"7":0}'
+  'OUTPUT_CODES_JSON={"6":70,"7":71}'
 ```
 
 With the Airborne classifier the log names the engine that ran, and why when
@@ -235,14 +237,21 @@ it is SegFormer 3D. The weights download automatically on the first run of a
 model. The dependencies themselves are installed once from the dock's Setup
 panel.
 
+**Scripts and models from versions 1.0 to 1.2** keep working: they use the
+algorithm `aeriallidar:classify_lidar`, whose `MODEL` parameter selects one
+model by index (`0` LitePT-L Airborne, `1` SegFormer 3D Airborne, `2` LitePT-L
+Mobile Mapping, and now `3` LitePT-L Railway) and runs exactly that model. It is
+hidden from the Toolbox but still runs from saved models, Python and
+`qgis_process`, and a saved model step keeps its model when edited.
+
 ---
 
 ## Hardware and platform support
 
-| Environment | Status for 1.2.0 |
+| Environment | Status for 1.3.0 |
 |-------------|------------------|
-| Windows 10, QGIS 3.44.10 LTR (Qt 5.15), Python 3.12, RTX 3090 | Tested: the three models on CUDA (SegFormer also on CPU), dock, Processing, `qgis_process`, data-integrity suite |
-| Windows 10, QGIS 4.2.2 (Qt 6.11, PyQt 6.11), Python 3.12, RTX 3090 | Tested: plugin load, dock, Processing, `qgis_process`, the three models on CUDA |
+| Windows 10, QGIS 3.44.10 LTR (Qt 5.15), Python 3.12, RTX 3090 | Tested: the three classifiers and all four models on CUDA, the Airborne classifier's SegFormer 3D engine on the CPU, dock, Processing, Graphical Modeler, `qgis_process`, data-integrity suite |
+| Windows 10, QGIS 4.2.2 (Qt 6.11, PyQt 6.11), Python 3.12, RTX 3090 | Tested: the same as QGIS 3.44 |
 | Linux x86_64 (Ubuntu under WSL), Python 3.10 | Installer and runtime tested outside the QGIS GUI |
 | macOS, Apple Silicon (MPS) | Code path present, not tested; reports welcome |
 | GPUs under 8 GB, other GPU generations | Not tested on real hardware; a smaller-crop path and out-of-memory retries exist |
@@ -315,7 +324,7 @@ To change any code, choose the Mobile mapping or Railway classifier and click
 shows the ASPRS meaning of each value, is saved per classifier, and *Reset to
 model defaults* restores it. Giving two classes the same code merges them (for
 example vehicles and unknown both to 1). In Processing, pass the codes as
-`OUTPUT_CODES_JSON` keyed by model class, for example `{"5":20,"6":21,"7":22}`;
+`OUTPUT_CODES_JSON` keyed by model class, for example `{"5":70,"6":71,"7":72}`;
 omitted classes keep their default, and the dock's saved table is not used.
 
 The mobile mapping and railway classifiers always write to the

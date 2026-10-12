@@ -93,20 +93,46 @@ class RailChecks(unittest.TestCase):
         self.assertEqual(registry.AIRBORNE.engines,
                          (registry.LITEPT_L_DALES, registry.SEGFORMER3D_URBANFILTERING))
         self.assertEqual(registry.RAILWAY.engines, (RAIL,))
-        algorithm = processing.ClassifyLidarAlgorithm()
+        algorithm = processing.ClassifyPointCloudAlgorithm()
         algorithm.initAlgorithm()
+        self.assertEqual(algorithm.name(), 'classify_point_cloud')
         classifier = algorithm.parameterDefinition('CLASSIFIER')
         self.assertEqual(classifier.options(), [c.display_name for c in registry.CLASSIFIERS])
         self.assertEqual(classifier.defaultValue(), 0)
-        legacy = algorithm.parameterDefinition('MODEL')
-        self.assertEqual(legacy.options(), [s.display_name for s in registry.MODELS])
-        self.assertTrue(legacy.flags() & processing._FLAG_HIDDEN)
-        self.assertIsNone(legacy.defaultValue())
+        self.assertIsNone(algorithm.parameterDefinition('MODEL'))
+        self.assertFalse(algorithm.flags() & processing._ALG_DEPRECATED)
         self.assertEqual([mapping.supports_output_codes(s) for s in registry.MODELS],
                          [False, False, True, True])
         self.assertIn('Railway classifier', algorithm.shortHelpString())
         self.assertIn('Rail 10', algorithm.shortHelpString())
         self.assertIn('SegFormer 3D engine', algorithm.shortHelpString())
+        self.assertIn('aeriallidar:classify_lidar', algorithm.shortHelpString())
+        # The 1.0-1.2 algorithm keeps its id and its visible MODEL parameter,
+        # flagged deprecated so the Toolbox lists only the classifier one.
+        legacy_alg = processing.ClassifyLidarAlgorithm()
+        legacy_alg.initAlgorithm()
+        self.assertEqual(legacy_alg.name(), 'classify_lidar')
+        self.assertTrue(legacy_alg.flags() & processing._ALG_DEPRECATED)
+        self.assertIsNone(legacy_alg.parameterDefinition('CLASSIFIER'))
+        legacy = legacy_alg.parameterDefinition('MODEL')
+        self.assertEqual(legacy.options(), [s.display_name for s in registry.MODELS])
+        self.assertEqual(legacy.defaultValue(), 0)
+        self.assertFalse(legacy.flags() & processing._FLAG_ADVANCED)
+        self.assertIn('3 LitePT-L Railway', legacy_alg.shortHelpString())
+        self.assertIn('aeriallidar:classify_point_cloud', legacy_alg.shortHelpString())
+        # Both share every other parameter, in the same order.
+        names = [d.name() for d in algorithm.parameterDefinitions()]
+        legacy_names = [d.name() for d in legacy_alg.parameterDefinitions()]
+        self.assertEqual(names[0], 'INPUT')
+        self.assertEqual(names[1:2] + legacy_names[1:2], ['CLASSIFIER', 'MODEL'])
+        self.assertEqual(names[2:], legacy_names[2:])
+        provider = module('processing.provider').AerialLidarProvider()
+        from qgis.core import QgsApplication
+        registry_ = QgsApplication.processingRegistry()
+        if registry_.providerById(provider.id()) is None:
+            registry_.addProvider(provider)
+        self.assertIsNotNone(registry_.algorithmById('aeriallidar:classify_point_cloud'))
+        self.assertIsNotNone(registry_.algorithmById('aeriallidar:classify_lidar'))
 
     def test_default_codes_are_asprs_where_a_class_exists(self):
         codes = {i: c.asprs_code for i, c in RAIL.class_mapping.items()}
@@ -212,13 +238,13 @@ class RailChecks(unittest.TestCase):
 
     def processing_params(self, algorithm, source, folder, stream=False, codes='{"2":200,"6":17}'):
         params = base.MlsChecks.processing_params(self, algorithm, source, folder, stream)
-        del params[algorithm.MODEL]
-        params[algorithm.CLASSIFIER] = 2
+        del params['MODEL']
+        params['CLASSIFIER'] = 2
         params[algorithm.OUTPUT_CODES_JSON] = codes
         return params
 
     def test_processing_railway_classifier_parses_codes_and_writes_classification(self):
-        algorithm = processing.ClassifyLidarAlgorithm()
+        algorithm = processing.ClassifyPointCloudAlgorithm()
         algorithm.initAlgorithm()
         for stream, codes, overrides in ((False, '{"2":200,"6":17}', {2: 200, 6: 17}),
                                          (True, '', None)):
@@ -246,7 +272,7 @@ class RailChecks(unittest.TestCase):
                                     for m in feedback.messages), feedback.messages)
 
     def test_processing_rejects_bad_codes_field_and_cpu_before_inference(self):
-        algorithm = processing.ClassifyLidarAlgorithm()
+        algorithm = processing.ClassifyPointCloudAlgorithm()
         algorithm.initAlgorithm()
         with tempfile.TemporaryDirectory() as folder, ExitStack() as stack:
             source = Path(folder) / 'input.las'
@@ -274,9 +300,10 @@ class RailChecks(unittest.TestCase):
                 algorithm.processAlgorithm(parameters, QgsProcessingContext(), QgsProcessingFeedback())
             factory.assert_not_called()
 
-    def run_processing(self, parameters, cuda=True, litept_ready=True, folder=None):
-        """Processing run with stubbed inference; returns (engine id, warnings)."""
-        algorithm = processing.ClassifyLidarAlgorithm()
+    def run_processing(self, parameters, cuda=True, litept_ready=True, legacy=False, context=None):
+        """Processing run with stubbed inference; returns (engine id, warnings, infos)."""
+        algorithm = (processing.ClassifyLidarAlgorithm() if legacy
+                     else processing.ClassifyPointCloudAlgorithm())
         algorithm.initAlgorithm()
         readiness = module('utils.backend_readiness')
         with ExitStack() as stack:
@@ -292,21 +319,21 @@ class RailChecks(unittest.TestCase):
                     super().pushWarning(warning)
 
             feedback = Feedback()
-            algorithm.processAlgorithm(parameters, QgsProcessingContext(), feedback)
+            algorithm.processAlgorithm(parameters, context or QgsProcessingContext(), feedback)
             return factory.call_args.args[0].id, warnings, feedback.messages
 
     def test_processing_airborne_engine_selection_and_legacy_model_indexes(self):
-        algorithm = processing.ClassifyLidarAlgorithm()
+        algorithm = processing.ClassifyPointCloudAlgorithm()
         algorithm.initAlgorithm()
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / 'input.las'
             base.make_source(source)
             base_params = self.processing_params(algorithm, source, folder, codes='')
-            airborne = dict(base_params, **{algorithm.CLASSIFIER: 0, algorithm.FIELD_NAME: 'classification'})
+            airborne = dict(base_params, **{'CLASSIFIER': 0, algorithm.FIELD_NAME: 'classification'})
             # CUDA and LitePT ready: LitePT-L Airborne, nothing to explain.
             engine, warnings, _ = self.run_processing(airborne)
             self.assertEqual(engine, 'litept_l_dales_10cm')
-            self.assertEqual(warnings, [])
+            self.assertFalse([w for w in warnings if 'engine' in w], warnings)
             # Dependencies missing on a CUDA machine: SegFormer 3D, with the reason.
             engine, warnings, _ = self.run_processing(airborne, litept_ready=False)
             self.assertEqual(engine, 'segformer3d_urbanfiltering')
@@ -319,36 +346,98 @@ class RailChecks(unittest.TestCase):
             engine, _, _ = self.run_processing(dict(airborne, **{algorithm.DEVICE: 0}), cuda=False)
             self.assertEqual(engine, 'segformer3d_urbanfiltering')
             # Railway and Mobile mapping never fall back to an airborne engine.
-            for index, expected in ((1, MLS.id), (2, RAIL.id)):
-                engine, _, _ = self.run_processing(dict(airborne, **{algorithm.CLASSIFIER: index}))
+            for index, expected in ((1, MLS.id), (2, RAIL.id), ('2', RAIL.id), (2.0, RAIL.id)):
+                engine, _, _ = self.run_processing(dict(airborne, **{'CLASSIFIER': index}))
                 self.assertEqual(engine, expected)
             with self.assertRaisesRegex(QgsProcessingException, 'Railway'):
-                self.run_processing(dict(airborne, **{algorithm.CLASSIFIER: 2, algorithm.DEVICE: 2}))
-            # 1.1 / 1.2 scripts: MODEL wins over CLASSIFIER and selects that exact engine.
+                self.run_processing(dict(airborne, **{'CLASSIFIER': 2, algorithm.DEVICE: 2}))
+            # Without CLASSIFIER (Python calls that omit it) the default is Airborne.
+            engine, _, _ = self.run_processing({k: v for k, v in airborne.items() if k != 'CLASSIFIER'})
+            self.assertEqual(engine, 'litept_l_dales_10cm')
+            # 1.0 - 1.2 algorithm: MODEL selects that exact engine, never another.
+            legacy = {k: v for k, v in airborne.items() if k != 'CLASSIFIER'}
             for index, expected in ((0, 'litept_l_dales_10cm'), (1, 'segformer3d_urbanfiltering'),
-                                    (2, MLS.id), (3, RAIL.id), ('2', MLS.id)):
+                                    (2, MLS.id), (3, RAIL.id), ('2', MLS.id), (None, 'litept_l_dales_10cm')):
                 with self.subTest(model=index):
-                    legacy = dict(airborne, **{algorithm.MODEL: index, algorithm.CLASSIFIER: 0})
-                    engine, warnings, messages = self.run_processing(legacy)
+                    params = dict(legacy, MODEL=index) if index is not None else dict(legacy)
+                    engine, warnings, _ = self.run_processing(params, legacy=True)
                     self.assertEqual(engine, expected)
                     self.assertFalse([w for w in warnings if 'engine' in w], warnings)
-                    self.assertTrue(any(m.startswith('MODEL=') for m in messages), messages)
             # MODEL=0 keeps its 1.2 meaning even without CUDA: LitePT-L, refused on the CPU.
             with self.assertRaisesRegex(QgsProcessingException, "does not run on 'cpu'"):
-                self.run_processing(dict(airborne, **{algorithm.MODEL: 0, algorithm.DEVICE: 2}))
-            # An index no version ever had is refused, never mapped to model 0.
-            for invalid in (7, '4', -1):
-                with self.subTest(invalid=invalid), \
-                        self.assertRaisesRegex(QgsProcessingException, 'MODEL must be 0 to 3'):
-                    self.run_processing(dict(airborne, **{algorithm.MODEL: invalid}))
-            for invalid in (3, '9', -2):
-                with self.subTest(invalid_classifier=invalid), \
-                        self.assertRaisesRegex(QgsProcessingException, 'CLASSIFIER must be 0 to 2'):
-                    self.run_processing(dict(airborne, **{algorithm.CLASSIFIER: invalid}))
-            # Without CLASSIFIER and MODEL (old Python calls), the default is Airborne.
-            engine, _, _ = self.run_processing(
-                {k: v for k, v in airborne.items() if k != algorithm.CLASSIFIER})
-            self.assertEqual(engine, 'litept_l_dales_10cm')
+                self.run_processing(dict(legacy, MODEL=0, **{algorithm.DEVICE: 2}), legacy=True)
+
+    def test_out_of_range_or_invalid_choices_are_refused_also_from_expressions(self):
+        """An index no version ever had is refused, never mapped to the default."""
+        from qgis.core import QgsProperty
+        algorithm = processing.ClassifyPointCloudAlgorithm()
+        algorithm.initAlgorithm()
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'input.las'
+            base.make_source(source)
+            params = dict(self.processing_params(algorithm, source, folder, codes=''),
+                          **{algorithm.FIELD_NAME: 'classification'})
+            legacy = {k: v for k, v in params.items() if k != 'CLASSIFIER'}
+            bad = (3, '9', -2, '2.9', 2.5, 'garbage', True, QgsProperty.fromExpression('99'),
+                   QgsProperty.fromExpression("'text'"))
+            for value in bad:
+                with self.subTest(classifier=value), \
+                        self.assertRaisesRegex(QgsProcessingException, 'CLASSIFIER must be an integer from 0 to 2'):
+                    self.run_processing(dict(params, CLASSIFIER=value))
+            for value in (4, '7', -1, QgsProperty.fromExpression('4'), QgsProperty.fromExpression('1 + 3')):
+                with self.subTest(model=value), \
+                        self.assertRaisesRegex(QgsProcessingException, 'MODEL must be an integer from 0 to 3'):
+                    self.run_processing(dict(legacy, MODEL=value), legacy=True)
+            # Valid expressions select what they compute.
+            engine, _, _ = self.run_processing(dict(params, CLASSIFIER=QgsProperty.fromExpression('1 + 1')))
+            self.assertEqual(engine, RAIL.id)
+            engine, _, _ = self.run_processing(dict(legacy, MODEL=QgsProperty.fromExpression('3')),
+                                               legacy=True)
+            self.assertEqual(engine, RAIL.id)
+
+    def test_graphical_modeler_editor_keeps_the_chosen_model(self):
+        """Opening and accepting a saved model step keeps its model or classifier.
+
+        Uses QGIS's own ModelerParametersDialog, as a user editing a step does.
+        """
+        from qgis.core import (QgsApplication, QgsProcessingModelAlgorithm,
+                               QgsProcessingModelChildAlgorithm,
+                               QgsProcessingModelChildParameterSource)
+        plugins_dir = Path(QgsApplication.pkgDataPath()) / 'python' / 'plugins'
+        if str(plugins_dir) not in sys.path:
+            sys.path.insert(0, str(plugins_dir))
+        from processing.core.Processing import Processing
+        Processing.initialize()
+        from processing.modeler.ModelerParametersDialog import ModelerParametersDialog
+        provider = module('processing.provider').AerialLidarProvider()
+        registry_ = QgsApplication.processingRegistry()
+        if registry_.providerById(provider.id()) is None:
+            registry_.addProvider(provider)
+        cases = [('aeriallidar:classify_lidar', 'MODEL', index) for index in range(4)]
+        cases += [('aeriallidar:classify_point_cloud', 'CLASSIFIER', index) for index in range(3)]
+        for algorithm_id, name, index in cases:
+            with self.subTest(algorithm=algorithm_id, value=index):
+                algorithm = registry_.algorithmById(algorithm_id)
+                model = QgsProcessingModelAlgorithm()
+                child = QgsProcessingModelChildAlgorithm(algorithm.id())
+                child.setChildId('step')
+                for key, value in {name: index, 'INPUT': 'input.las', 'OUTPUT_FOLDER': '.',
+                                   'DEVICE': 0, 'FIELD_NAME': 'classification'}.items():
+                    child.addParameterSources(key, [QgsProcessingModelChildParameterSource.fromStaticValue(value)])
+                model.addChildAlgorithm(child)
+                dialog = ModelerParametersDialog(algorithm, model, 'step')
+                try:
+                    edited = dialog.widget.widget.createAlgorithm()
+                finally:
+                    dialog.close()
+                values = {key: sources[0].staticValue()
+                          for key, sources in edited.parameterSources().items() if sources}
+                self.assertEqual(int(values[name]), index, values)
+                other = 'CLASSIFIER' if name == 'MODEL' else 'MODEL'
+                self.assertNotIn(other, values)
+                resolved = algorithm._requested_engines(values, QgsProcessingContext(), QgsProcessingFeedback())
+                expected = (registry.MODELS[index],) if name == 'MODEL' else registry.CLASSIFIERS[index].engines
+                self.assertEqual(resolved[1], expected)
 
     def test_rail_weights_are_published_not_bundled(self):
         self.assertEqual(RAIL.weights_urls, (

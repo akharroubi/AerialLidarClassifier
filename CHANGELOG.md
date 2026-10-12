@@ -32,11 +32,17 @@ and the project follows [Semantic Versioning](https://semver.org/).
   otherwise (CPU, Apple Silicon, GPUs without `spconv`). The status line,
   its tooltip and the log say which engine runs and why. Mobile mapping and
   Railway are never replaced by an airborne model.
-- Processing: new `CLASSIFIER` parameter (0 Airborne, 1 Mobile mapping,
-  2 Railway). The `MODEL` parameter of 1.1 and 1.2 is still accepted
-  (hidden in the dialog) and runs exactly the model it names
-  (0 LitePT-L Airborne, 1 SegFormer 3D, 2 LitePT-L Mobile Mapping,
-  3 LitePT-L Railway), so saved models and scripts keep their results.
+- Processing: new algorithm *Classify LiDAR point cloud*
+  (`aeriallidar:classify_point_cloud`) with a `CLASSIFIER` parameter
+  (0 Airborne, 1 Mobile mapping, 2 Railway). The algorithm of 1.0 to 1.2,
+  `aeriallidar:classify_lidar`, keeps its `MODEL` parameter and runs exactly
+  the model it names (0 LitePT-L Airborne, 1 SegFormer 3D, 2 LitePT-L Mobile
+  Mapping, now 3 LitePT-L Railway); it is hidden from the Toolbox, and saved
+  models, scripts and `qgis_process` calls keep their results, also after a
+  model step is edited. Out-of-range values, also computed by expressions,
+  stop the run instead of selecting another model.
+- Error messages of the LitePT-L models suggest the SegFormer 3D engine only
+  for airborne data.
 - The dock's saved choice moves from the model to the classifier; the model
   saved by 1.1 or 1.2 selects its classifier once.
 - The one-click "Use <other model>" button is gone: the Airborne classifier

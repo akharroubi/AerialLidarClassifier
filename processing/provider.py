@@ -11,7 +11,7 @@ from qgis.core import QgsProcessingProvider
 from qgis.PyQt.QtGui import QIcon
 
 from ..config import PLUGIN_NAME, PLUGIN_VERSION
-from .classify_algorithm import ClassifyLidarAlgorithm
+from .classify_algorithm import ClassifyLidarAlgorithm, ClassifyPointCloudAlgorithm
 
 
 class AerialLidarProvider(QgsProcessingProvider):
@@ -23,6 +23,8 @@ class AerialLidarProvider(QgsProcessingProvider):
         super().__init__()
 
     def loadAlgorithms(self):  # noqa: N802 - QGIS API
+        self.addAlgorithm(ClassifyPointCloudAlgorithm())
+        # 1.0 to 1.2 interface (deprecated: hidden from the Toolbox, still runs).
         self.addAlgorithm(ClassifyLidarAlgorithm())
 
     def id(self) -> str:
