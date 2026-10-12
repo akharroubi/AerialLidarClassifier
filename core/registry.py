@@ -103,7 +103,7 @@ LITEPT_L_DALES = ModelSpec(
     supported_devices=("cuda",),
     extra_packages=("spconv", "scipy"),
     licence="Code MIT (prs-eth/LitePT); weights CC BY-NC 4.0 (maintainer model)",
-    attribution="LitePT: Photogrammetry and Remote Sensing Lab, ETH Zurich. Model provided by GeoScITY Lab, University of Liege.",
+    attribution="LitePT architecture: Photogrammetry and Remote Sensing Lab, ETH Zurich. Model weights © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège.",
     homepage="https://github.com/prs-eth/LitePT",
 )
 
@@ -191,7 +191,7 @@ LITEPT_L_MLS = ModelSpec(
     supported_devices=("cuda",),
     extra_packages=("spconv", "scipy"),
     licence="Code MIT (prs-eth/LitePT); weights CC BY-NC 4.0 (maintainer model)",
-    attribution="LitePT: Photogrammetry and Remote Sensing Lab, ETH Zurich. Model provided by GeoScITY Lab, University of Liege.",
+    attribution="LitePT architecture: Photogrammetry and Remote Sensing Lab, ETH Zurich. Model weights © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège.",
     homepage="https://github.com/prs-eth/LitePT",
     editable_codes=True,
 )
@@ -240,7 +240,7 @@ LITEPT_L_RAIL = ModelSpec(
     supported_devices=("cuda",),
     extra_packages=("spconv", "scipy"),
     licence="Code MIT (prs-eth/LitePT); weights CC BY-NC-SA 4.0 (maintainer model)",
-    attribution="LitePT: Photogrammetry and Remote Sensing Lab, ETH Zurich. Model provided by GeoScITY Lab, University of Liege.",
+    attribution="LitePT architecture: Photogrammetry and Remote Sensing Lab, ETH Zurich. Model weights © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège.",
     homepage="https://github.com/prs-eth/LitePT",
     editable_codes=True,
 )

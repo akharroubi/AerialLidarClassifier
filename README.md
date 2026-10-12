@@ -616,6 +616,7 @@ The weights download automatically. The URLs below are for offline machines.
 | SHA-256       | starts with `bd3356898bcf`; the full value is in `core/registry.py` and the plugin checks it automatically |
 | URL           | [release v1.3 of this repository](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.3) |
 | License       | [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) |
+| Copyright     | © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège |
 
 **LitePT-L Mobile Mapping (MLS, 5 cm)**: Mobile mapping classifier
 
@@ -626,6 +627,7 @@ The weights download automatically. The URLs below are for offline machines.
 | SHA-256       | starts with `d2fd555c9147`; the full value is in `core/registry.py` and the plugin checks it automatically |
 | URL           | [release v1.2 of this repository](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.2) |
 | License       | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) |
+| Copyright     | © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège |
 
 **LitePT-L Airborne (10 cm)**: Airborne classifier on NVIDIA GPUs
 
@@ -636,6 +638,7 @@ The weights download automatically. The URLs below are for offline machines.
 | SHA-256       | starts with `849ba5089e62`; the full value is in `core/registry.py` and the plugin checks it automatically |
 | URL           | [release v1.1 of this repository](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.1) |
 | License       | [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/) |
+| Copyright     | © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège |
 
 **SegFormer 3D Airborne (UrbanFiltering, 30 cm)**: Airborne classifier elsewhere
 
@@ -696,7 +699,8 @@ And, optionally, the plugin itself:
 - **Model weights**: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/),
   except LitePT-L Railway: [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) (non-commercial;
   shared modified versions, such as fine-tuned weights, must use the same
-  licence). The LitePT-L weights are provided by the plugin maintainer. The SegFormer 3D
+  licence). The LitePT-L weights (Airborne, Mobile Mapping, Railway) are
+  © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège. The SegFormer 3D
   weights are distributed unchanged from TreeAIBox, whose authors permitted
   their use in this plugin. See
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution and scope.
@@ -707,8 +711,9 @@ And, optionally, the plugin itself:
 
 **LitePT-L.** Architecture and reference implementation by the Photogrammetry
 and Remote Sensing Lab, ETH Zurich ([prs-eth/LitePT](https://github.com/prs-eth/LitePT)).
-Plugin integration and the airborne, mobile mapping and railway model weights
-provided by Abderrazzaq Kharroubi, GeoScITY Lab, University of Liege.
+Plugin integration by Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège.
+The LitePT-L Airborne, Mobile Mapping and Railway model weights are
+© 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège.
 
 **SegFormer 3D.** The UrbanFiltering 3D SegFormer was developed by
 **Zhouxin Xi** (tested by **Charumitha Selvaraj**) at the Canadian Forest

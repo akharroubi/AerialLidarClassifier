@@ -1,6 +1,7 @@
 {
   "id": "litept_l_mls_5cm",
   "display_name": "LitePT-L Mobile Mapping (MLS, 5 cm)",
+  "copyright": "© 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège",
   "family": "litept",
   "weights_file": "litept_l_mls_5cm_fp16.pth",
   "weights_dtype": "float16; loaded as float32 for inference",

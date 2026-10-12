@@ -24,6 +24,8 @@ and the project follows [Semantic Versioning](https://semver.org/).
   mobile mapping; Processing takes `OUTPUT_CODES_JSON` keyed 1 to 7.
 - The output-code editor shows the ASPRS meaning of each code as it is
   typed (standard class, reserved, or user-definable).
+- Copyright notice for the LitePT-L Airborne, Mobile Mapping and Railway
+  weights (© 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège) in About, the README, the notices and the model cards.
 
 ### Changed
 - The dock and Processing offer three **classifiers** instead of models:

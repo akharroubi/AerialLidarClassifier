@@ -1,6 +1,7 @@
 {
   "id": "litept_l_rail_5cm",
   "display_name": "LitePT-L Railway (5 cm)",
+  "copyright": "© 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège",
   "family": "litept",
   "weights_file": "litept_l_rail_5cm_fp16.pth",
   "weights_dtype": "float16; loaded as float32 for inference",

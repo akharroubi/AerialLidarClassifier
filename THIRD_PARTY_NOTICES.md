@@ -9,8 +9,7 @@ Architecture and vendored implementation: Photogrammetry and Remote Sensing
 Lab, ETH Zurich, https://github.com/prs-eth/LitePT. The upstream MIT notice is
 retained in `core/litept/LICENSE.upstream`.
 
-The LitePT-L Airborne weights are provided by Abderrazzaq Kharroubi /
-GeoScITY Lab, University of Liege. The release retains the maintainer's
+The LitePT-L Airborne weights are © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège. The release retains the maintainer's
 existing CC BY-NC 4.0 designation for these weights (research and other
 non-commercial use).
 
@@ -20,8 +19,7 @@ SHA-256: starts with `849ba5089e62` (full value in `core/registry.py`).
 
 ## LitePT-L Mobile Mapping
 
-The LitePT-L Mobile Mapping weights are provided by Abderrazzaq Kharroubi /
-GeoScITY Lab, University of Liege. They are released under CC BY-NC 4.0
+The LitePT-L Mobile Mapping weights are © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège. They are released under CC BY-NC 4.0
 (research and other non-commercial use).
 
 Weight file: `litept_l_mls_5cm_fp16.pth`
@@ -30,8 +28,7 @@ SHA-256: starts with `d2fd555c9147` (full value in `core/registry.py`).
 
 ## LitePT-L Railway
 
-The LitePT-L Railway weights are provided by Abderrazzaq Kharroubi /
-GeoScITY Lab, University of Liege. They are released under CC BY-NC-SA 4.0
+The LitePT-L Railway weights are © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège. They are released under CC BY-NC-SA 4.0
 (research and other non-commercial use; shared adaptations, such as
 fine-tuned weights, under the same licence), as is, without warranty.
 
