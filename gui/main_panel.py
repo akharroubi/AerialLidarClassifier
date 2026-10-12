@@ -6,6 +6,7 @@ native QGIS widgets where possible (QgsFileWidget, QgsCollapsibleGroupBox,
 QgsMessageBar) and stays out of the way when unused.
 """
 
+import html
 import sys
 import time
 from datetime import datetime
@@ -66,7 +67,9 @@ from ..core.registry import (
     CLASSIFIERS, DEFAULT_CLASSIFIER_ID, MODELS, classifier_for_model, get_classifier,
     get_model, select_engine,
 )
-from ..utils.class_mapping import output_codes_json, output_model_spec, supports_output_codes
+from ..utils.class_mapping import (
+    asprs_code_name, output_codes_json, output_model_spec, supports_output_codes,
+)
 from ..utils.helpers import get_gpu_info, truncate_name
 from ..utils.las_units import UNIT_OVERRIDES
 from ..utils.las_utils import find_las_files
@@ -1085,6 +1088,7 @@ class ClassifierDockWidget(QDockWidget):
                 f"{SETTINGS_PREFIX}/output_codes/{spec.id}", output_codes_json(selected)
             )
             self._update_output_codes_button()
+            self._check_model()
 
     def _on_gpu_toggled(self, _checked=None):
         # The device gate of the selected model depends on the checkbox.
@@ -1096,10 +1100,6 @@ class ClassifierDockWidget(QDockWidget):
         spec = select_engine(classifier, device, self._model_runs_here)
         self._update_output_codes_button()
         manager = ModelManager(spec)
-        self.model_combo.setToolTip(
-            f"{classifier.display_name}\n{classifier.description}\n"
-            f"On this computer: {spec.display_name}. {spec.description}"
-        )
         self.import_btn.setToolTip(
             f"Import a weights file for {spec.display_name} (offline computers); "
             "its SHA-256 is verified. Weights also download automatically on first use."
@@ -1139,12 +1139,54 @@ class ClassifierDockWidget(QDockWidget):
         self.model_label.setText(
             f"<span style='color:{colour};'>●</span> {status}")
         message = self.model_gate_message or self.engine_note
-        self.model_label.setToolTip(message)
+        classes = self._refresh_classifier_tooltips(device)
+        self.model_label.setToolTip(
+            (f"{html.escape(message, quote=False)}<hr>" if message else "") + classes)
         if message and message != getattr(self, "_last_model_gate_message", ""):
             # The log is selectable/copyable, unlike a transient tooltip.
             self._log(f"{classifier.display_name}: {message}")
         self._last_model_gate_message = message
         self._update_run_button()
+
+    def _refresh_classifier_tooltips(self, device):
+        """Class list of every classifier in the selector's item tooltips.
+
+        Returns the selected classifier's tooltip (also the selector's own).
+        Each list follows the engine that runs on this computer and the
+        output codes currently saved for the editable models.
+        """
+        current = ""
+        for index, classifier in enumerate(CLASSIFIERS):
+            text = self._classifier_tooltip(classifier, device)
+            self.model_combo.setItemData(index, text, Qt.ItemDataRole.ToolTipRole)
+            if classifier.id == self.model_combo.currentData():
+                current = text
+        self.model_combo.setToolTip(current)
+        return current
+
+    def _classifier_tooltip(self, classifier, device):
+        spec = select_engine(classifier, device, self._model_runs_here)
+        selected = (output_model_spec(spec, self._output_codes_by_model.get(spec.id))
+                    if supports_output_codes(spec) else spec)
+        rows = "".join(
+            f"<tr><td><span style='color:{info.color};'>&#9632;</span>&nbsp;"
+            f"{html.escape(info.name)}</td><td align='right'>&nbsp;&nbsp;{info.asprs_code}</td>"
+            f"<td>&nbsp;&nbsp;{html.escape(asprs_code_name(info.asprs_code))}</td></tr>"
+            for info in selected.class_mapping.values()
+        )
+        note = ("Codes are yours to change: Output &gt; Class codes."
+                if supports_output_codes(spec)
+                else "Written to the LAS classification field (ASPRS codes).")
+        return (
+            f"<b>{html.escape(classifier.display_name)}</b><br>"
+            f"{html.escape(classifier.description)}<br>"
+            f"On this computer: {html.escape(spec.display_name)}, "
+            f"{len(spec.class_mapping)} classes.<br>"
+            "<table cellspacing='0' cellpadding='1'>"
+            "<tr><th align='left'>Class</th><th align='right'>&nbsp;&nbsp;Code</th>"
+            "<th align='left'>&nbsp;&nbsp;ASPRS meaning</th></tr>"
+            f"{rows}</table>{note}"
+        )
 
     def _gate(self, spec, device):
         """(runs, colour, status, explanation) for ``spec`` on ``device``."""

@@ -432,6 +432,21 @@ class RailChecks(unittest.TestCase):
                     raise editor_error[0]
                 self.assertEqual(panel._output_codes_by_model[RAIL.id][6], 65)
                 self.assertEqual(panel._output_codes_by_model[MLS.id][5], 99)
+                # Class lists: every selector item, the selector and the status line.
+                from qgis.PyQt.QtCore import Qt
+                tips = [panel.model_combo.itemData(i, Qt.ItemDataRole.ToolTipRole) for i in range(3)]
+                self.assertIn('On this computer: SegFormer 3D Airborne (30 cm), 7 classes', tips[0])
+                self.assertIn('Building</td><td align=\'right\'>&nbsp;&nbsp;6<', tips[0])
+                self.assertIn('Pole like</td><td align=\'right\'>&nbsp;&nbsp;99<', tips[1])
+                self.assertIn('LitePT-L Railway (5 cm), 7 classes', tips[2])
+                self.assertIn("Rail</td><td align='right'>&nbsp;&nbsp;10</td><td>&nbsp;&nbsp;Rail<", tips[2])
+                # The saved custom fence code (65) shows at once, with its meaning.
+                self.assertIn("Fence</td><td align='right'>&nbsp;&nbsp;65</td><td>&nbsp;&nbsp;User definable", tips[2])
+                self.assertIn('#E31A1C', tips[2])
+                self.assertEqual(panel.model_combo.toolTip(), tips[2])
+                self.assertTrue(panel.model_label.toolTip().endswith(tips[2]))
+                self.assertTrue(panel.model_label.toolTip().startswith(
+                    'LitePT-L Railway (5 cm) runs on NVIDIA CUDA GPUs only.<hr>'))
                 saved = json.loads(settings[f'{prefix}/output_codes/{RAIL.id}'])
                 self.assertEqual(saved, {'1': 2, '2': 10, '3': 15, '4': 14, '5': 5, '6': 65, '7': 1})
                 panel.model_combo.setCurrentIndex(0)

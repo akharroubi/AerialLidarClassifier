@@ -83,7 +83,11 @@ class GpuReadiness(unittest.TestCase):
                 self.assertIn("GPU use is switched off", panel.engine_note)
                 self.assertIn("RTX 3500 Ada", panel.engine_note)
                 self.assertIn("Enable 'Use GPU'", panel.engine_note)
-                self.assertEqual(panel.model_label.toolTip(), panel.engine_note)
+                tooltip = panel.model_label.toolTip()
+                self.assertTrue(tooltip.startswith(panel.engine_note.replace("&", "&amp;")), tooltip)
+                # The class list follows the engine that runs: SegFormer 3D's seven classes.
+                self.assertIn("On this computer: SegFormer 3D Airborne (30 cm), 7 classes", tooltip)
+                self.assertIn("Transmission tower", tooltip)
                 panel.gpu_check.setChecked(True)
                 self.assertTrue(panel.model_gate_ok)
                 self.assertEqual(panel._current_spec(), registry.LITEPT_L_DALES)
