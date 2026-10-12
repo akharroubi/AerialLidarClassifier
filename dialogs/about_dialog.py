@@ -53,13 +53,14 @@ class AboutDialog(QDialog):
 
         # Description
         desc = QLabel(
-            "Semantic segmentation of airborne and mobile mapping LiDAR "
-            "(LAS / LAZ / COPC) with deep-learning models, written to the "
-            "LAS classification field.\n\n"
-            "Three models: LitePT-L Airborne and LitePT-L Mobile Mapping "
-            "(NVIDIA GPU), and SegFormer 3D Airborne (GPU or CPU). The "
-            "mobile mapping model has nine classes with editable codes; by "
-            "default poles, vehicles and fences get 64, 65 and 66."
+            "Semantic segmentation of airborne, mobile mapping and railway "
+            "LiDAR (LAS / LAZ / COPC) with deep-learning models, written to "
+            "the LAS classification field.\n\n"
+            "Three classifiers: Airborne, Mobile mapping and Railway, each a "
+            "LitePT-L model for NVIDIA GPUs. Without a compatible NVIDIA GPU "
+            "the Airborne classifier runs the SegFormer 3D engine (GPU or "
+            "CPU). Mobile mapping (nine classes) and Railway (seven classes) "
+            "have editable codes; rails get the ASPRS Rail code 10 by default."
         )
         desc.setWordWrap(True)
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)

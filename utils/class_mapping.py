@@ -5,21 +5,68 @@ import json
 
 
 MOBILE_MAPPING_MODEL_ID = "litept_l_mls_5cm"
+RAILWAY_MODEL_ID = "litept_l_rail_5cm"
+
+
+# ASPRS LAS 1.4 R15 standard classes (Table 17).
+ASPRS_CLASS_NAMES = {
+    0: "Created, never classified",
+    1: "Unclassified",
+    2: "Ground",
+    3: "Low vegetation",
+    4: "Medium vegetation",
+    5: "High vegetation",
+    6: "Building",
+    7: "Low point (noise)",
+    8: "Reserved",
+    9: "Water",
+    10: "Rail",
+    11: "Road surface",
+    12: "Reserved",
+    13: "Wire guard (shield)",
+    14: "Wire conductor (phase)",
+    15: "Transmission tower",
+    16: "Wire-structure connector (insulator)",
+    17: "Bridge deck",
+    18: "High noise",
+    19: "Overhead structure",
+    20: "Ignored ground",
+    21: "Snow",
+    22: "Temporal exclusion",
+}
+
+
+def asprs_code_name(code):
+    """ASPRS meaning of a LAS 1.4 classification code (0..255)."""
+    code = int(code)
+    if code in ASPRS_CLASS_NAMES:
+        return ASPRS_CLASS_NAMES[code]
+    if 23 <= code <= 63:
+        return "Reserved"
+    if 64 <= code <= 255:
+        return "User definable"
+    raise ValueError(f"{code} is not a LAS classification code (0-255)")
 
 
 def supports_output_codes(spec):
-    return spec.id == MOBILE_MAPPING_MODEL_ID
+    """True for models whose output codes the user can edit (registry flag)."""
+    return bool(getattr(spec, "editable_codes", False))
+
+
+def editable_model_names():
+    from ..core.registry import MODELS
+    return ", ".join(spec.short_name for spec in MODELS if supports_output_codes(spec))
 
 
 def validate_model_output_field(spec, field_name):
-    """Mobile Mapping writes only the existing standard classification field."""
+    """Models with editable codes write only the existing classification field."""
     field = (field_name or "classification").strip() or "classification"
     if field.lower() == "classification":
         return "classification"
     if supports_output_codes(spec):
         raise ValueError(
-            "Mobile Mapping writes to the existing LAS 'classification' field only. "
-            "Set Classification field to 'classification' and customize the MMS output codes."
+            f"{spec.short_name} writes to the existing LAS 'classification' field only. "
+            "Set Classification field to 'classification' and customize its output codes."
         )
     return field
 
@@ -54,7 +101,9 @@ def output_model_spec(spec, output_codes=None):
     if not isinstance(output_codes, dict):
         raise ValueError('Output codes must be a JSON object, for example {"5": 64}.')
     if output_codes and not supports_output_codes(spec):
-        raise ValueError("Custom output codes are available only for the Mobile Mapping LitePT model.")
+        raise ValueError(
+            "Custom output codes are available only for the models with editable codes "
+            f"({editable_model_names()}).")
 
     mapping = {key: replace(info) for key, info in spec.class_mapping.items()}
     seen = set()

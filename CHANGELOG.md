@@ -4,6 +4,47 @@ All notable changes to **LiDAR AI Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] - 2026-10-12
+
+### Added
+- **Railway classifier**, model **LitePT-L Railway (5 cm)**, for railway
+  corridor point clouds. Seven classes: ground (with track bed, ballast,
+  sleepers and platforms), rail, pole (catenary masts, portals and their
+  supports, utility poles), wire (contact and messenger wires, droppers,
+  feeders, power and telecom lines), vegetation, fence (fences, noise
+  barriers, guardrails) and other. Geometry only (XYZ), 5 cm voxels,
+  240,000-point / 12 m crops, NVIDIA CUDA, the same reduced crop budgets as
+  mobile mapping on smaller GPUs. The fp16 weights (172 MB) download
+  automatically during Setup or on first use and are SHA-256 verified.
+- Default railway codes follow ASPRS LAS 1.4 where a class exists: ground 2,
+  rail 10 (*Rail*), pole 15 (*Transmission Tower*), wire 14 (*Wire,
+  Conductor*), vegetation 5, other 1. Fences have no ASPRS code and get 64,
+  the first user-definable code. Every code is editable and saved, as for
+  mobile mapping; Processing takes `OUTPUT_CODES_JSON` keyed 1 to 7.
+- The output-code editor shows the ASPRS meaning of each code as it is
+  typed (standard class, reserved, or user-definable).
+
+### Changed
+- The dock and Processing offer three **classifiers** instead of models:
+  *Airborne*, *Mobile mapping* and *Railway*. SegFormer 3D is no longer a
+  separate choice: the Airborne classifier runs LitePT-L Airborne where it
+  can (NVIDIA CUDA GPU, *Use GPU* ticked, `spconv` loaded) and SegFormer 3D
+  otherwise (CPU, Apple Silicon, GPUs without `spconv`). The status line,
+  its tooltip and the log say which engine runs and why. Mobile mapping and
+  Railway are never replaced by an airborne model.
+- Processing: new `CLASSIFIER` parameter (0 Airborne, 1 Mobile mapping,
+  2 Railway). The `MODEL` parameter of 1.1 and 1.2 is still accepted
+  (hidden in the dialog) and runs exactly the model it names
+  (0 LitePT-L Airborne, 1 SegFormer 3D, 2 LitePT-L Mobile Mapping,
+  3 LitePT-L Railway), so saved models and scripts keep their results.
+- The dock's saved choice moves from the model to the classifier; the model
+  saved by 1.1 or 1.2 selects its classifier once.
+- The one-click "Use <other model>" button is gone: the Airborne classifier
+  now switches engine by itself, and the other classifiers keep their
+  acquisition type.
+- The Setup panel states the real size of the weights download (about
+  20 MB, or about 530 MB with an NVIDIA GPU).
+
 ## [1.2.1] - 2026-10-10
 
 ### Fixed

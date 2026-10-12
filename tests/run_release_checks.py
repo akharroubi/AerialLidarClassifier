@@ -6,7 +6,8 @@
    with the plugin's own environment (torch, spconv, laspy).
 2. The QGIS integration scripts (qgis_*_checks.py) under QGIS 3 and QGIS 4,
    with real Qt, Processing, LAS/LAZ readers and Untwine.
-3. Optionally the real GPU end-to-end check (qgis_mls_gpu.py) under each QGIS.
+3. Optionally the real GPU end-to-end checks (qgis_mls_gpu.py,
+   qgis_rail_gpu.py) under each QGIS.
 
 Defaults match the maintainer's Windows test machine; override the paths
 with the options or the ALC_QGIS3_PYTHON / ALC_QGIS4_PYTHON / ALC_VENV_PYTHON
@@ -21,9 +22,10 @@ import time
 from pathlib import Path
 
 TESTS = Path(__file__).resolve().parent
-QGIS_SCRIPTS = ("qgis_release_checks.py", "qgis_mls_checks.py",
+QGIS_SCRIPTS = ("qgis_release_checks.py", "qgis_mls_checks.py", "qgis_rail_checks.py",
                 "qgis_gpu_readiness_checks.py", "qgis_pointcloud_view_checks.py",
                 "qgis_numpy_host_checks.py")
+GPU_SCRIPTS = ("qgis_mls_gpu.py", "qgis_rail_gpu.py")
 DEFAULTS = {
     "venv": os.environ.get("ALC_VENV_PYTHON", str(
         Path.home() / ".qgis_aerial_lidar_classifier/venv_py3.12/Scripts/python.exe")),
@@ -75,7 +77,7 @@ def main():
         if not Path(launcher).is_file():
             rows.append((name, 1, "", f"launcher not found: {launcher}", None))
             continue
-        scripts = list(QGIS_SCRIPTS) + ([] if args.skip_gpu else ["qgis_mls_gpu.py"])
+        scripts = list(QGIS_SCRIPTS) + ([] if args.skip_gpu else list(GPU_SCRIPTS))
         for script in scripts:
             label = f"{name} {script[:-3]}"
             rows.append((label, *run(label, [launcher, str(TESTS / script)], log_dir)))

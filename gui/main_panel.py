@@ -62,7 +62,10 @@ from ..config import (
     SETTINGS_PREFIX,
     TILE_DEFAULT_BUFFER_M,
 )
-from ..core.registry import MODELS, FALLBACK_MODEL_ID, default_model_for_device, get_model
+from ..core.registry import (
+    CLASSIFIERS, DEFAULT_CLASSIFIER_ID, MODELS, classifier_for_model, get_classifier,
+    get_model, select_engine,
+)
 from ..utils.class_mapping import output_codes_json, output_model_spec, supports_output_codes
 from ..utils.helpers import get_gpu_info, truncate_name
 from ..utils.las_units import UNIT_OVERRIDES
@@ -145,7 +148,6 @@ class ClassifierDockWidget(QDockWidget):
         self.task = None
         self._running = False
         self._run_started = 0.0
-        self._fix_action = None
         self._loaders: list[FileInfoLoader] = []
         self._auto_output_set = False
         # Weights of the selected model present on disk, and the model
@@ -153,6 +155,8 @@ class ClassifierDockWidget(QDockWidget):
         self.model_ready = False
         self.model_gate_ok = True
         self.model_gate_message = ""
+        # Set when the selected classifier runs a fallback engine here.
+        self.engine_note = ""
 
         # Settings (load BEFORE building UI so defaults populate widgets)
         self._load_settings()
@@ -293,6 +297,8 @@ class ClassifierDockWidget(QDockWidget):
         self._saved_units = str(
             s.value(f"{SETTINGS_PREFIX}/input_units", "auto") or "auto"
         )
+        self._saved_classifier_id = str(s.value(f"{SETTINGS_PREFIX}/classifier_id", "") or "")
+        # 1.1 and 1.2 saved the model (engine) id; used once to pick its classifier.
         self._saved_model_id = str(s.value(f"{SETTINGS_PREFIX}/model_id", "") or "")
         self._airborne_field_name = str(s.value(
             f"{SETTINGS_PREFIX}/airborne_field_name", self._saved_field or "classification"
@@ -357,7 +363,7 @@ class ClassifierDockWidget(QDockWidget):
             self.units_combo.currentData() or "auto",
         )
         s.setValue(
-            f"{SETTINGS_PREFIX}/model_id", self.model_combo.currentData() or "",
+            f"{SETTINGS_PREFIX}/classifier_id", self.model_combo.currentData() or "",
         )
 
     # ------------------------------------------------------------------
@@ -429,9 +435,8 @@ class ClassifierDockWidget(QDockWidget):
 
     # ---- Status strip ----------------------------------------------------
     def _build_status_strip(self) -> QWidget:
-        """Two rows: the model selector with its weights actions, then a
-        one-line status (weights, device gate) with a fix button when
-        the selected model cannot run as things are."""
+        """Two rows: the classifier selector with its weights action, then a
+        one-line status (weights, device gate, engine used here)."""
         strip = QFrame()
         strip.setFrameShape(QFrame.Shape.StyledPanel)
         strip.setObjectName("AerialLidarStatusStrip")
@@ -439,13 +444,14 @@ class ClassifierDockWidget(QDockWidget):
         outer.setContentsMargins(8, 6, 8, 6)
         outer.setSpacing(4)
 
-        # Row 1: model selector (full names; the combo takes the width).
+        # Row 1: classifier selector, one per acquisition type (the combo
+        # takes the width).
         row = QHBoxLayout()
         row.setSpacing(6)
-        row.addWidget(QLabel("Model:"))
+        row.addWidget(QLabel("Classifier:"))
         self.model_combo = QComboBox()
-        for spec in MODELS:
-            self.model_combo.addItem(spec.display_name, spec.id)
+        for classifier in CLASSIFIERS:
+            self.model_combo.addItem(classifier.display_name, classifier.id)
         self.model_combo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.model_combo.setMinimumContentsLength(10)
@@ -471,17 +477,13 @@ class ClassifierDockWidget(QDockWidget):
         row.addWidget(self.import_btn)
         outer.addLayout(row)
 
-        # Row 2: status, optional one-click fix, device.
+        # Row 2: status, device.
         status_row = QHBoxLayout()
         status_row.setSpacing(6)
         self.model_label = QLabel("")
         self.model_label.setTextFormat(Qt.TextFormat.RichText)
         self.model_label.setWordWrap(True)
         status_row.addWidget(self.model_label, 1)
-        self.fix_btn = QToolButton()
-        self.fix_btn.clicked.connect(self._on_fix_clicked)
-        self.fix_btn.hide()
-        status_row.addWidget(self.fix_btn)
         status_row.addWidget(self._vline())
         self.device_label = QLabel("Device: detecting...")
         self.device_label.setStyleSheet(_secondary_text(self.device_label))
@@ -674,7 +676,7 @@ class ClassifierDockWidget(QDockWidget):
         self.mms_codes_row = QWidget()
         codes_layout = QHBoxLayout(self.mms_codes_row)
         codes_layout.setContentsMargins(0, 0, 0, 0)
-        codes_layout.addWidget(QLabel("MMS classes:"))
+        codes_layout.addWidget(QLabel("Class codes:"))
         self.mms_codes_btn = QPushButton("Edit output codes…")
         self.mms_codes_btn.clicked.connect(self._edit_output_codes)
         codes_layout.addWidget(self.mms_codes_btn, 1)
@@ -1000,32 +1002,33 @@ class ClassifierDockWidget(QDockWidget):
             return str(self.gpu_info.get("backend", "cuda"))
         return "cpu"
 
-    def _current_spec(self):
+    def _current_classifier(self):
         try:
-            return get_model(self.model_combo.currentData())
+            return get_classifier(self.model_combo.currentData())
         except KeyError:
-            return get_model(FALLBACK_MODEL_ID)
+            return get_classifier(DEFAULT_CLASSIFIER_ID)
+
+    def _current_spec(self):
+        """The engine the selected classifier uses on this computer now."""
+        return select_engine(self._current_classifier(), self._current_device(),
+                             self._model_runs_here)
 
     def _select_initial_model(self):
-        """Restore the saved choice, preserving the Mobile Mapping domain."""
-        device = self._current_device()
+        """Restore the saved classifier (1.1 and 1.2 saved a model id).
+
+        Mobile Mapping and Railway stay selected on a computer that cannot
+        run them: the gate explains what is missing instead of silently
+        switching to another acquisition type.
+        """
         chosen = None
-        if self._saved_model_id:
-            try:
-                chosen = get_model(self._saved_model_id)
-            except KeyError:
-                chosen = None
-        # Keep explicit saved choices. A device/dependency gate explains a
-        # missing requirement instead of silently substituting another model.
-        if chosen is None:
-            chosen = default_model_for_device(device)
-            if not self._model_runs_here(chosen, device):
-                # e.g. an RTX 50 card: CUDA works but spconv has no build
-                # for it yet, so propose the model that does run.
-                chosen = next(
-                    (m for m in MODELS if self._model_runs_here(m, device)),
-                    chosen,
-                )
+        for saved, lookup in ((self._saved_classifier_id, get_classifier),
+                              (self._saved_model_id, classifier_for_model)):
+            if saved and chosen is None:
+                try:
+                    chosen = lookup(saved)
+                except KeyError:
+                    chosen = None
+        chosen = chosen or get_classifier(DEFAULT_CLASSIFIER_ID)
         index = self.model_combo.findData(chosen.id)
         self.model_combo.blockSignals(True)
         self.model_combo.setCurrentIndex(max(index, 0))
@@ -1036,28 +1039,32 @@ class ClassifierDockWidget(QDockWidget):
 
     def _update_output_codes_button(self, _text=None):
         spec = self._current_spec()
-        mobile_mapping = supports_output_codes(spec)
+        editable = supports_output_codes(spec)
         previous_id = self._output_field_model_id
+        previous_editable = previous_id is not None and supports_output_codes(get_model(previous_id))
         self._output_field_model_id = spec.id
         self.field_edit.blockSignals(True)
-        if mobile_mapping:
-            if previous_id is not None and previous_id != spec.id:
+        if editable:
+            # Remember the airborne field only when leaving an airborne
+            # model; between two editable-code models it reads
+            # 'classification', which must not replace the user's name.
+            if previous_id is not None and previous_id != spec.id and not previous_editable:
                 self._airborne_field_name = self.field_edit.text().strip() or "classification"
             self.field_edit.setText("classification")
             self.field_edit.setToolTip(
-                "Mobile Mapping writes only to the existing LAS classification field. "
-                "Use Edit output codes to choose the code for each MMS class."
+                f"{spec.short_name} writes only to the existing LAS classification field. "
+                "Use Edit output codes to choose the code of each class."
             )
         else:
-            if previous_id is not None and supports_output_codes(get_model(previous_id)):
+            if previous_editable:
                 self.field_edit.setText(self._airborne_field_name)
             self._airborne_field_name = self.field_edit.text().strip() or "classification"
             self.field_edit.setToolTip(self._airborne_field_tooltip)
         self.field_edit.blockSignals(False)
-        self.field_edit.setEnabled(not mobile_mapping)
-        self.mms_codes_row.setVisible(mobile_mapping)
+        self.field_edit.setEnabled(not editable)
+        self.mms_codes_row.setVisible(editable)
         self.mms_codes_btn.setEnabled(True)
-        if mobile_mapping:
+        if editable:
             selected = output_model_spec(spec, self._output_codes_by_model.get(spec.id))
             self.mms_codes_btn.setToolTip("\n".join(
                 f"{info.name}: {info.asprs_code}" for info in selected.class_mapping.values()
@@ -1084,13 +1091,14 @@ class ClassifierDockWidget(QDockWidget):
         self._check_model()
 
     def _check_model(self):
-        spec = self._current_spec()
+        classifier = self._current_classifier()
+        device = self._current_device()
+        spec = select_engine(classifier, device, self._model_runs_here)
         self._update_output_codes_button()
         manager = ModelManager(spec)
-        device = self._current_device()
         self.model_combo.setToolTip(
-            f"{spec.display_name}\n{spec.description}\n"
-            f"{spec.device_requirement_text()}."
+            f"{classifier.display_name}\n{classifier.description}\n"
+            f"On this computer: {spec.display_name}. {spec.description}"
         )
         self.import_btn.setToolTip(
             f"Import a weights file for {spec.display_name} (offline computers); "
@@ -1107,88 +1115,81 @@ class ClassifierDockWidget(QDockWidget):
             status = (f"Weights download on first run "
                       f"({spec.weights_size_mb:.0f} MB)")
 
-        self.model_gate_ok = spec.supports_device(device)
-        dependency_message = ""
-        if self.model_gate_ok and spec.family == "litept":
-            from ..utils.backend_readiness import litept_dependency_status
-            self.model_gate_ok, dependency_message = litept_dependency_status()
-
-        # One-click way out when the selected model cannot run: switch to
-        # a model that runs here (Repair stays in the plugin menu).
-        self._fix_action = None
-        if self.model_gate_ok:
-            self.model_gate_message = ""
+        self.model_gate_ok, gate_colour, gate_status, gate_message = self._gate(spec, device)
+        self.engine_note = ""
+        if not self.model_gate_ok:
+            colour, status = gate_colour, gate_status
+            self.model_gate_message = gate_message
         else:
-            if dependency_message:
-                colour, status = _ERROR, "LitePT dependencies missing"
-                self.model_gate_message = dependency_message
-            elif (self.gpu_info.get("available")
-                  and self.gpu_info.get("backend", "cuda") == "cuda"
-                  and not self.gpu_check.isChecked()):
-                colour, status = _WARN, "GPU use is switched off"
-                self.model_gate_message = (
-                    f"{self.gpu_info.get('name', 'An NVIDIA CUDA GPU')} is detected. "
-                    f"Enable 'Use GPU' in Advanced parameters to run {spec.display_name}."
+            self.model_gate_message = ""
+            if spec is not classifier.primary:
+                # Airborne on a computer where LitePT-L cannot run: say which
+                # engine runs instead, and why.
+                _ok, _colour, why, reason = self._gate(classifier.primary, device)
+                self.engine_note = (
+                    f"{classifier.primary.display_name} cannot run here ({why}). "
+                    f"{reason} The {classifier.display_name} uses the "
+                    f"{spec.display_name} engine meanwhile ({len(spec.class_mapping)} classes)."
                 )
-            elif sys.platform == "darwin" or self.gpu_info.get("backend") == "mps":
-                colour, status = _ERROR, "Needs an NVIDIA GPU"
-                self.model_gate_message = (
-                    f"{spec.display_name} runs on NVIDIA CUDA GPUs only, which macOS "
-                    "does not support."
-                )
-            elif self.gpu_info.get("reason") == "no_cuda":
-                colour, status = _ERROR, "PyTorch is CPU-only"
-                self.model_gate_message = (
-                    f"{spec.display_name} runs on NVIDIA CUDA GPUs only, and the "
-                    "installed PyTorch build has no CUDA support. On a computer with "
-                    f"an NVIDIA GPU, use Plugins > {PLUGIN_NAME} > Repair dependencies "
-                    "(GPU installation), then restart QGIS."
-                )
-            elif self.gpu_info.get("reason") == "no_gpu":
-                colour, status = _ERROR, "No GPU visible"
-                self.model_gate_message = (
-                    f"{spec.display_name} runs on NVIDIA CUDA GPUs only. PyTorch has "
-                    "CUDA support but sees no GPU: update the NVIDIA driver, then "
-                    "restart QGIS."
-                )
-            elif self.gpu_info.get("reason") == "torch_import_failed":
-                colour, status = _ERROR, "PyTorch not loaded"
-                self.model_gate_message = (
-                    "PyTorch could not be loaded in QGIS (see the Log). Use "
-                    f"Plugins > {PLUGIN_NAME} > Repair dependencies, then restart QGIS."
-                )
-            else:
-                colour, status = _ERROR, "Needs an NVIDIA GPU"
-                self.model_gate_message = (
-                    f"{spec.display_name} runs on NVIDIA CUDA GPUs only."
-                )
-            fallback = next(
-                (m for m in MODELS
-                 if not supports_output_codes(spec)
-                 and m.id != spec.id and self._model_runs_here(m, device)),
-                None,
-            )
-            if fallback is not None:
-                self._fix_action = fallback.id
-                self.fix_btn.setText(f"Use {fallback.short_name}")
-                self.fix_btn.setToolTip(fallback.description)
-        self.fix_btn.setVisible(self._fix_action is not None)
+                status = f"{status} · {spec.short_name} engine ({spec.resolution})"
+                if self.gpu_info.get("available") and self.gpu_info.get("backend", "cuda") == "cuda":
+                    # An NVIDIA GPU is there: the faster engine is one step away.
+                    colour = _WARN
 
         self.model_label.setText(
             f"<span style='color:{colour};'>●</span> {status}")
-        self.model_label.setToolTip(self.model_gate_message)
-        if (self.model_gate_message
-                and self.model_gate_message != getattr(self, "_last_model_gate_message", "")):
+        message = self.model_gate_message or self.engine_note
+        self.model_label.setToolTip(message)
+        if message and message != getattr(self, "_last_model_gate_message", ""):
             # The log is selectable/copyable, unlike a transient tooltip.
-            self._log(f"{spec.display_name}: {self.model_gate_message}")
-        self._last_model_gate_message = self.model_gate_message
+            self._log(f"{classifier.display_name}: {message}")
+        self._last_model_gate_message = message
         self._update_run_button()
 
-    def _on_fix_clicked(self):
-        if self._fix_action:
-            index = self.model_combo.findData(self._fix_action)
-            if index >= 0:
-                self.model_combo.setCurrentIndex(index)
+    def _gate(self, spec, device):
+        """(runs, colour, status, explanation) for ``spec`` on ``device``."""
+        ok = spec.supports_device(device)
+        dependency_message = ""
+        if ok and spec.family == "litept":
+            from ..utils.backend_readiness import litept_dependency_status
+            ok, dependency_message = litept_dependency_status()
+        if ok:
+            return True, _OK, "", ""
+        if dependency_message:
+            return False, _ERROR, "LitePT dependencies missing", dependency_message
+        if (self.gpu_info.get("available")
+                and self.gpu_info.get("backend", "cuda") == "cuda"
+                and not self.gpu_check.isChecked()):
+            return False, _WARN, "GPU use is switched off", (
+                f"{self.gpu_info.get('name', 'An NVIDIA CUDA GPU')} is detected. "
+                f"Enable 'Use GPU' in Advanced parameters to run {spec.display_name}."
+            )
+        if sys.platform == "darwin" or self.gpu_info.get("backend") == "mps":
+            return False, _ERROR, "Needs an NVIDIA GPU", (
+                f"{spec.display_name} runs on NVIDIA CUDA GPUs only, which macOS "
+                "does not support."
+            )
+        if self.gpu_info.get("reason") == "no_cuda":
+            return False, _ERROR, "PyTorch is CPU-only", (
+                f"{spec.display_name} runs on NVIDIA CUDA GPUs only, and the "
+                "installed PyTorch build has no CUDA support. On a computer with "
+                f"an NVIDIA GPU, use Plugins > {PLUGIN_NAME} > Repair dependencies "
+                "(GPU installation), then restart QGIS."
+            )
+        if self.gpu_info.get("reason") == "no_gpu":
+            return False, _ERROR, "No GPU visible", (
+                f"{spec.display_name} runs on NVIDIA CUDA GPUs only. PyTorch has "
+                "CUDA support but sees no GPU: update the NVIDIA driver, then "
+                "restart QGIS."
+            )
+        if self.gpu_info.get("reason") == "torch_import_failed":
+            return False, _ERROR, "PyTorch not loaded", (
+                "PyTorch could not be loaded in QGIS (see the Log). Use "
+                f"Plugins > {PLUGIN_NAME} > Repair dependencies, then restart QGIS."
+            )
+        return False, _ERROR, "Needs an NVIDIA GPU", (
+            f"{spec.display_name} runs on NVIDIA CUDA GPUs only."
+        )
 
     @staticmethod
     def _model_runs_here(spec, device) -> bool:
@@ -1463,10 +1464,12 @@ class ClassifierDockWidget(QDockWidget):
         if missing:
             self.current_file_label.setText(missing)
             return
+        classifier = self._current_classifier()
         spec = self._current_spec()
         device = self._current_device()
         where = "CPU" if device == "cpu" else f"GPU ({device.upper()})"
-        text = (f"Ready: {len(self.files)} file(s), {spec.short_name} "
+        engine = "" if spec is classifier.primary else f", {spec.short_name} engine"
+        text = (f"Ready: {len(self.files)} file(s), {classifier.display_name}{engine} "
                 f"on {where}.")
         if not self.model_ready:
             text += (f" Its weights ({spec.weights_size_mb:.0f} MB) download "
@@ -1504,7 +1507,8 @@ class ClassifierDockWidget(QDockWidget):
             device = str(self.gpu_info.get("backend", "cuda"))
         else:
             device = "cpu"
-        spec = self._current_spec()
+        classifier = self._current_classifier()
+        spec = select_engine(classifier, device, self._model_runs_here)
         if not spec.supports_device(device):
             self.message_bar.pushMessage(
                 self.model_gate_message, Qgis.MessageLevel.Warning, duration=8,
@@ -1516,9 +1520,11 @@ class ClassifierDockWidget(QDockWidget):
         field = self.field_edit.text().strip() or "classification"
         is_asprs = field.lower() == "classification"
         self._log(
-            f"Starting {spec.display_name} on {device.upper()} with "
-            f"{len(self.files)} file(s)"
+            f"Starting the {classifier.display_name} ({spec.display_name}) on "
+            f"{device.upper()} with {len(self.files)} file(s)"
         )
+        if spec is not classifier.primary and self.engine_note:
+            self._log(self.engine_note)
         self._log(
             f"Output: {out_dir} - "
             f"suffix: {self.suffix_edit.text()} - "
@@ -1527,7 +1533,7 @@ class ClassifierDockWidget(QDockWidget):
         )
         if supports_output_codes(spec):
             selected = output_model_spec(spec, self._output_codes_by_model.get(spec.id))
-            self._log(f"Mobile Mapping output codes: {output_codes_json(selected)}")
+            self._log(f"{spec.short_name} output codes: {output_codes_json(selected)}")
 
         from ..workers.classifier_task import ClassificationTask
         self.task = ClassificationTask(

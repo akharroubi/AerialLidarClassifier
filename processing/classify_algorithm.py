@@ -1,4 +1,4 @@
-"""Processing algorithm: classify airborne or Mobile Mapping LiDAR.
+"""Processing algorithm: classify airborne, Mobile Mapping or railway LiDAR.
 
 Wraps the same classification pipeline used by the interactive dock so
 it can be invoked from the Processing Toolbox, the Graphical Modeler
@@ -28,7 +28,7 @@ from qgis.core import (
 )
 
 from ..config import PLUGIN_NAME, TILE_DEFAULT_BUFFER_M
-from ..core.registry import MODELS
+from ..core.registry import CLASSIFIERS, MODELS
 from ..utils.class_mapping import output_codes_json, output_model_spec, supports_output_codes, validate_model_output_field
 from ..utils.compat import scoped_enum
 from ..utils.las_units import UNIT_OVERRIDES, resolve_units
@@ -40,8 +40,10 @@ _LOG = logging.getLogger(__name__)
 try:
     from qgis.core import Qgis as _Qgis
     _FLAG_ADVANCED = _Qgis.ProcessingParameterFlag.Advanced
+    _FLAG_HIDDEN = _Qgis.ProcessingParameterFlag.Hidden
 except AttributeError:
     _FLAG_ADVANCED = scoped_enum(QgsProcessingParameterDefinition, "Flag", "FlagAdvanced")
+    _FLAG_HIDDEN = scoped_enum(QgsProcessingParameterDefinition, "Flag", "FlagHidden")
 try:
     _NUMBER_DOUBLE = _Qgis.ProcessingNumberParameterType.Double
 except AttributeError:
@@ -52,6 +54,10 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
     """Classify a LAS / LAZ / COPC point cloud with a deep-learning model."""
 
     INPUT = "INPUT"
+    CLASSIFIER = "CLASSIFIER"
+    # 1.1 / 1.2 parameter: an index into registry.MODELS (one engine).
+    # Hidden and optional; when given it wins, so saved models and scripts
+    # keep running the engine they chose.
     MODEL = "MODEL"
     OUTPUT_FOLDER = "OUTPUT_FOLDER"
     SUFFIX = "SUFFIX"
@@ -86,7 +92,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         return "classify_lidar"
 
     def displayName(self) -> str:  # noqa: N802
-        return self.tr("Classify airborne / Mobile Mapping LiDAR point cloud")
+        return self.tr("Classify airborne / Mobile Mapping / railway LiDAR point cloud")
 
     def group(self) -> str:
         return self.tr("Classification")
@@ -97,26 +103,37 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
     @staticmethod
     def _models_help() -> str:
         parts = []
-        for spec in MODELS:
-            rows = "".join(
-                f"<tr><td>{info.model_id}</td><td>{info.name}</td><td>{info.asprs_code}</td></tr>"
-                for info in spec.class_mapping.values()
-            )
-            parts.append(
-                f"<p><b>{spec.display_name}</b> ({spec.device_requirement_text()}): "
-                f"{spec.description} Licence: {spec.licence}.</p>"
-                "<table><tr><th align=left>Model ID</th><th align=left>Class</th><th align=left>Default output code</th></tr>"
-                f"{rows}</table>"
-            )
+        for index, classifier in enumerate(CLASSIFIERS):
+            parts.append(f"<p><b>{index} - {classifier.display_name}</b>: {classifier.description}</p>")
+            for spec in classifier.engines:
+                if len(classifier.engines) == 1:
+                    role = "Model"
+                elif spec is classifier.primary:
+                    role = "Engine on NVIDIA CUDA GPUs"
+                else:
+                    role = "Engine where LitePT-L cannot run (CPU, Apple Silicon, other GPUs)"
+                rows = "".join(
+                    f"<tr><td>{info.model_id}</td><td>{info.name}</td><td>{info.asprs_code}</td></tr>"
+                    for info in spec.class_mapping.values()
+                )
+                parts.append(
+                    f"<p>{role}: <i>{spec.display_name}</i> ({spec.device_requirement_text()}). "
+                    f"{spec.description} Licence: {spec.licence}.</p>"
+                    "<table><tr><th align=left>Model ID</th><th align=left>Class</th>"
+                    "<th align=left>Default output code</th></tr>"
+                    f"{rows}</table>"
+                )
         return "".join(parts)
 
     def shortHelpString(self) -> str:  # noqa: N802
         return self.tr(
             f"<h3>{PLUGIN_NAME}</h3>"
-            "<p>Deep-learning semantic segmentation of airborne and Mobile Mapping "
-            "point clouds (LAS / LAZ / COPC). Choose the model for the acquisition "
-            "type. The Mobile Mapping model has nine classes and editable output codes.</p>"
-            "<h4>Models</h4>"
+            "<p>Deep-learning semantic segmentation of airborne, Mobile Mapping and "
+            "railway point clouds (LAS / LAZ / COPC). Choose the model for the acquisition "
+            "type: Airborne, Mobile mapping or Railway classifier. The Mobile Mapping "
+            "(nine classes) and Railway (seven classes) models have editable output "
+            "codes.</p>"
+            "<h4>Classifiers</h4>"
             + self._models_help() +
             "<h4>ASPRS compliance</h4>"
             "<p>By default the classification is written to the standard "
@@ -125,29 +142,37 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "when an assigned code exceeds the 5-bit legacy limit of point "
             "formats 0-5, so any classification code 0-255 is encoded losslessly. "
             "Mobile Mapping defaults 64, 65 and 66 are project-defined codes for "
-            "pole-like objects, vehicles and fences/barriers.</p>"
+            "pole-like objects, vehicles and fences/barriers. Railway uses the ASPRS "
+            "classes Ground 2, Rail 10, Wire conductor 14 and Transmission tower 15 "
+            "(masts and poles), High vegetation 5 for vegetation, 64 for fences (no ASPRS "
+            "class; first user-definable code) and Unclassified 1 for other objects.</p>"
             "<h4>Parameters</h4>"
             "<ul>"
             "<li><b>Input point cloud</b> - a single LAS, LAZ or "
             "<code>.copc.laz</code> file.</li>"
-            "<li><b>Model</b> - LitePT-L Airborne or LitePT-L Mobile Mapping "
-            "(NVIDIA CUDA GPU required), or SegFormer 3D Airborne (GPU or CPU). "
+            "<li><b>Classifier</b> - Airborne (0), Mobile mapping (1) or Railway (2). "
+            "Mobile mapping and Railway need an NVIDIA CUDA GPU. Airborne uses "
+            "LitePT-L on NVIDIA CUDA GPUs and the SegFormer 3D engine elsewhere; "
+            "the log says which engine ran and why. "
             "The weights download automatically the first time a model is used "
-            "(SHA-256 verified).</li>"
+            "(SHA-256 verified). Scripts and models from versions 1.1 and 1.2 that "
+            "pass <code>MODEL</code> (0 LitePT-L Airborne, 1 SegFormer 3D, 2 Mobile "
+            "Mapping; 3 Railway) still run exactly that model.</li>"
             "<li><b>Output folder</b> - where the classified file is "
             "written.</li>"
             "<li><b>Output filename suffix</b> - appended before the "
             "extension. Default <code>_classified</code>.</li>"
             "<li><b>Classification field</b> - the dimension to write "
             "predictions into. Default <code>classification</code> "
-            "(ASPRS standard). Mobile Mapping always writes to this existing field. "
+            "(ASPRS standard). Mobile Mapping and Railway always write to this existing field. "
             "Airborne models also support a new name to store raw model IDs in an extra-byte field.</li>"
-            "<li><b>Mobile Mapping output codes (JSON)</b> - optional overrides keyed "
+            "<li><b>Output codes (JSON)</b> - optional overrides keyed "
             "by model class ID, for example <code>{\"5\": 64, \"6\": 65, \"7\": 66}</code>. "
-            "Use model IDs 1-9 from the Mobile Mapping table above. Values must be "
+            "Use the model IDs from the selected model's table above (1-9 for Mobile "
+            "Mapping, 1-7 for Railway). Values must be "
             "integers 0-255; omitted classes use model defaults. Repeated values "
-            "merge classes. This parameter applies only to the Mobile Mapping model "
-            "and the existing classification field. IDs 1-9 identify mapping rows; "
+            "merge classes. This parameter applies only to the Mobile Mapping and Railway "
+            "models and the existing classification field. Model IDs identify mapping rows; "
             "no extra label field is added. "
             "Processing uses this explicit parameter, independently of dock settings.</li>"
             "<li><b>Compute device</b> - <i>Auto</i> uses CUDA when "
@@ -190,7 +215,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             "<h4>Notes</h4>"
             "<ul>"
             "<li>Airborne model mappings retain their established defaults. "
-            "Mobile Mapping output codes can be customized with the JSON parameter. "
+            "Mobile Mapping and Railway output codes can be customized with the JSON parameter. "
             "The actual mapping and model identity are recorded in the output metadata.</li>"
             "</ul>")
 
@@ -207,9 +232,9 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         # the index): keep the registry order stable.
         self.addParameter(
             QgsProcessingParameterEnum(
-                self.MODEL,
-                self.tr("Model"),
-                options=[spec.display_name for spec in MODELS],
+                self.CLASSIFIER,
+                self.tr("Classifier"),
+                options=[classifier.display_name for classifier in CLASSIFIERS],
                 defaultValue=0,
             )
         )
@@ -257,7 +282,7 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         self._add_advanced(
             QgsProcessingParameterString(
                 self.OUTPUT_CODES_JSON,
-                self.tr("Mobile Mapping output codes (JSON; blank = model defaults)"),
+                self.tr("Mobile Mapping / Railway output codes (JSON; blank = model defaults)"),
                 defaultValue="",
                 optional=True,
             )
@@ -312,6 +337,15 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 defaultValue=0,
             )
         )
+        legacy = QgsProcessingParameterEnum(
+            self.MODEL,
+            self.tr("Model (1.1 / 1.2 parameter; use Classifier)"),
+            options=[spec.display_name for spec in MODELS],
+            optional=True,
+            defaultValue=None,
+        )
+        legacy.setFlags(legacy.flags() | _FLAG_HIDDEN)
+        self.addParameter(legacy)
         # The classified file itself, so the Graphical Modeler can chain
         # it into a next step (v1.0.2 only returned the folder).
         self.addOutput(
@@ -319,6 +353,56 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
                 self.OUTPUT_FILE, self.tr("Classified point cloud")
             )
         )
+
+    # ------------------------------------------------------------------
+    def _requested_engines(self, parameters, context, feedback):
+        """(classifier or None, engines in preference order) for this run."""
+        legacy = parameters.get(self.MODEL)
+        if legacy is not None and str(legacy).strip() != "":
+            # parameterAsEnum turns an out-of-range index into the default
+            # (0), which would silently run another model.
+            raw = str(legacy).strip()
+            index = (int(raw) if raw.lstrip("-").isdecimal()
+                     else self.parameterAsEnum(parameters, self.MODEL, context))
+            if not 0 <= index < len(MODELS):
+                raise QgsProcessingException(self.tr(
+                    f"MODEL must be 0 to {len(MODELS) - 1}; use CLASSIFIER instead."))
+            spec = MODELS[index]
+            feedback.pushInfo(self.tr(
+                f"MODEL={index} (parameter of versions 1.1 and 1.2) selects {spec.display_name}. "
+                "CLASSIFIER replaces it."))
+            return None, (spec,)
+        raw = str(parameters.get(self.CLASSIFIER, "")).strip()
+        index = (int(raw) if raw.lstrip("-").isdecimal()
+                 else self.parameterAsEnum(parameters, self.CLASSIFIER, context))
+        if not 0 <= index < len(CLASSIFIERS):
+            raise QgsProcessingException(self.tr(
+                f"CLASSIFIER must be 0 to {len(CLASSIFIERS) - 1} "
+                "(0 Airborne, 1 Mobile mapping, 2 Railway)."))
+        classifier = CLASSIFIERS[index]
+        return classifier, classifier.engines
+
+    def _select_engine(self, classifier, device, feedback):
+        """First engine of ``classifier`` that runs on ``device``, with the reason
+        logged when it is not the primary one."""
+        from ..utils.backend_readiness import litept_dependency_status
+        reasons = []
+        for spec in classifier.engines:
+            if not spec.supports_device(device):
+                reasons.append(f"{spec.display_name} does not run on '{device}' "
+                               f"({spec.device_requirement_text()})")
+                continue
+            if spec.family == "litept":
+                ready, why = litept_dependency_status()
+                if not ready:
+                    reasons.append(f"{spec.display_name} cannot run: {why}")
+                    continue
+            if spec is not classifier.primary:
+                feedback.pushWarning(self.tr(
+                    f"{classifier.display_name}: {'; '.join(reasons)}. Using the "
+                    f"{spec.display_name} engine ({len(spec.class_mapping)} classes)."))
+            return spec
+        return classifier.primary
 
     # ------------------------------------------------------------------
     def _add_advanced(self, param):
@@ -342,14 +426,11 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
     def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
         import numpy as np
 
-        model_idx = self.parameterAsEnum(parameters, self.MODEL, context)
-        if not 0 <= model_idx < len(MODELS):
-            model_idx = 0
+        classifier, engines = self._requested_engines(parameters, context, feedback)
+        output_codes = self.parameterAsString(parameters, self.OUTPUT_CODES_JSON, context)
         try:
-            spec = output_model_spec(
-                MODELS[model_idx],
-                self.parameterAsString(parameters, self.OUTPUT_CODES_JSON, context),
-            )
+            # Every engine of a classifier shares its output-code rules.
+            spec = output_model_spec(engines[0], output_codes)
             field_name = validate_model_output_field(
                 spec, self.parameterAsString(parameters, self.FIELD_NAME, context)
             )
@@ -380,8 +461,6 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             )
         # Make the venv site-packages importable from this Python process.
         ensure_venv_packages_available()
-
-        manager = ModelManager(spec)
 
         input_path = Path(
             self.parameterAsFile(parameters, self.INPUT, context)
@@ -440,12 +519,15 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
             device = "cuda" if cuda_available else (
                 "mps" if mps_available else "cpu"
             )
+        if classifier is not None and len(engines) > 1:
+            spec = output_model_spec(self._select_engine(classifier, device, feedback), output_codes)
         if not spec.supports_device(device):
             raise QgsProcessingException(self.tr(
                 f"{spec.display_name} does not run on '{device}' "
-                f"({spec.device_requirement_text()}). Choose another model "
+                f"({spec.device_requirement_text()}). Choose another classifier "
                 "or compute device."
             ))
+        manager = ModelManager(spec)
 
         # First use of a model: download its weights here (SHA-256
         # verified), so Processing and qgis_process need no manual step.
@@ -488,15 +570,17 @@ class ClassifyLidarAlgorithm(QgsProcessingAlgorithm):
         output_path = _resolve_output_path(input_path, output_folder, suffix)
         self._guard_input_output_collision(input_path, output_path)
 
-        # Snapshot includes explicit MMS output code overrides, independent
+        # Snapshot includes explicit output code overrides, independent
         # of interactive dock settings. Both writers record it in the VLR.
         class_mapping = spec.class_mapping
         if supports_output_codes(spec):
-            feedback.pushInfo(self.tr(f"Mobile Mapping output codes: {output_codes_json(spec)}"))
+            feedback.pushInfo(self.tr(f"{spec.short_name} output codes: {output_codes_json(spec)}"))
 
         backend = create_backend(
             spec, manager.get_model_path(), log=feedback.pushWarning,
         )
+        if classifier is not None:
+            feedback.pushInfo(self.tr(f"Classifier: {classifier.display_name}"))
         feedback.pushInfo(self.tr(f"Model: {spec.display_name}"))
         backend_loaded = False
         def predict_fn(xyz_m, progress_cb):

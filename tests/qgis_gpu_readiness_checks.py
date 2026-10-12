@@ -58,7 +58,7 @@ class GpuReadiness(unittest.TestCase):
         self.assertEqual(info["compute_cap"], 8.9)
         self.assertEqual(venv._select_cuda_index(info), "cu126")
 
-    def test_detected_but_unchecked_gpu_has_accurate_gate_and_saved_model(self):
+    def test_detected_but_unchecked_gpu_runs_airborne_on_segformer_and_says_why(self):
         panel_module = module("gui.main_panel")
         readiness = module("utils.backend_readiness")
         settings = {f"{config.SETTINGS_PREFIX}/settings_version": 2,
@@ -74,18 +74,26 @@ class GpuReadiness(unittest.TestCase):
              patch.object(readiness, "litept_dependency_status", return_value=(True, "")):
             panel = panel_module.ClassifierDockWidget(None)
             try:
-                self.assertEqual(panel.model_combo.currentData(), registry.LITEPT_L_DALES.id)
-                self.assertFalse(panel.model_gate_ok)
-                self.assertIn("GPU use is switched off", panel.model_label.text())
-                self.assertIn("RTX 3500 Ada", panel.model_gate_message)
-                self.assertIn("Enable 'Use GPU'", panel.model_gate_message)
+                # GPU off: the Airborne classifier runs its CPU engine and
+                # names the one-click way back to LitePT-L.
+                self.assertEqual(panel.model_combo.currentData(), "airborne")
+                self.assertEqual(panel._current_spec(), registry.SEGFORMER3D_URBANFILTERING)
+                self.assertTrue(panel.model_gate_ok)
+                self.assertIn("SegFormer 3D engine (30 cm)", panel.model_label.text())
+                self.assertIn("GPU use is switched off", panel.engine_note)
+                self.assertIn("RTX 3500 Ada", panel.engine_note)
+                self.assertIn("Enable 'Use GPU'", panel.engine_note)
+                self.assertEqual(panel.model_label.toolTip(), panel.engine_note)
                 panel.gpu_check.setChecked(True)
                 self.assertTrue(panel.model_gate_ok)
-                self.assertEqual(panel.model_combo.currentData(), registry.LITEPT_L_DALES.id)
+                self.assertEqual(panel._current_spec(), registry.LITEPT_L_DALES)
+                self.assertEqual(panel.engine_note, "")
+                self.assertNotIn("engine", panel.model_label.text())
+                self.assertEqual(panel.model_combo.currentData(), "airborne")
             finally:
                 panel.close()
 
-    def test_cpu_only_torch_is_not_reported_as_unsupported_card(self):
+    def test_cpu_only_torch_runs_airborne_on_segformer_and_is_not_an_unsupported_card(self):
         panel_module = module("gui.main_panel")
         settings = {f"{config.SETTINGS_PREFIX}/settings_version": 2,
                     f"{config.SETTINGS_PREFIX}/model_id": registry.LITEPT_L_DALES.id}
@@ -97,10 +105,13 @@ class GpuReadiness(unittest.TestCase):
              patch.object(panel_module.ModelManager, "is_model_available", return_value=True):
             panel = panel_module.ClassifierDockWidget(None)
             try:
-                self.assertFalse(panel.model_gate_ok)
-                self.assertIn("PyTorch is CPU-only", panel.model_label.text())
-                self.assertIn("GPU installation", panel.model_gate_message)
-                self.assertEqual(panel.model_combo.currentData(), registry.LITEPT_L_DALES.id)
+                self.assertTrue(panel.model_gate_ok)
+                self.assertEqual(panel._current_spec(), registry.SEGFORMER3D_URBANFILTERING)
+                self.assertIn("PyTorch is CPU-only", panel.engine_note)
+                self.assertIn("GPU installation", panel.engine_note)
+                self.assertIn("SegFormer 3D engine", panel.model_label.text())
+                self.assertEqual(panel.model_combo.currentData(), "airborne")
+                self.assertTrue(panel.run_btn.isEnabled() or "Add LAS" in panel.run_btn.toolTip())
             finally:
                 panel.close()
 
@@ -137,9 +148,8 @@ class GpuReadiness(unittest.TestCase):
                 self.assertIn(status, panel.model_label.text())
                 self.assertIn(advice, panel.model_gate_message)
                 self.assertNotIn("Tick 'Use GPU'", panel.model_gate_message)
-                # The mobile mapping model is kept, never swapped for an airborne one.
-                self.assertEqual(panel.model_combo.currentData(), registry.LITEPT_L_MLS.id)
-                self.assertFalse(panel.fix_btn.isVisibleTo(panel))
+                # The mobile mapping classifier is kept, never swapped for airborne.
+                self.assertEqual(panel.model_combo.currentData(), "mobile_mapping")
                 self.assertFalse(panel.run_btn.isEnabled())
 
     def test_closing_the_dock_during_a_run_lets_the_reopened_dock_run(self):

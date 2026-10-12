@@ -28,6 +28,16 @@ Weight file: `litept_l_mls_5cm_fp16.pth`
 
 SHA-256: starts with `d2fd555c9147` (full value in `core/registry.py`).
 
+## LitePT-L Railway
+
+The LitePT-L Railway weights are provided by Abderrazzaq Kharroubi /
+GeoScITY Lab, University of Liege. They are released under CC BY-NC 4.0
+(research and other non-commercial use).
+
+Weight file: `litept_l_rail_5cm_fp16.pth`
+
+SHA-256: starts with `bd3356898bcf` (full value in `core/registry.py`).
+
 ## SegFormer 3D / UrbanFiltering
 
 Model and reference implementation: Zhouxin Xi, Natural Resources Canada,

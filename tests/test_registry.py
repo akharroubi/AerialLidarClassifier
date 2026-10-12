@@ -87,6 +87,76 @@ def test_mobile_mapping_card_and_enum_compatibility():
         c.name.lower().replace(" ", "_") for c in spec.class_mapping.values()]
 
 
+
+def test_railway_card_codes_and_enum_compatibility():
+    import json
+    spec = registry.LITEPT_L_RAIL
+    # Append-only: the 1.1 / 1.2 MODEL indexes 0-2 keep their models.
+    assert [s.id for s in registry.MODELS] == [
+        "litept_l_dales_10cm", "segformer3d_urbanfiltering", "litept_l_mls_5cm", "litept_l_rail_5cm"]
+    card = json.loads(spec.config_path.read_text(encoding="utf-8"))
+    assert card["id"] == spec.id
+    assert card["num_classes"] == len(spec.class_mapping) == 7
+    assert card["grid_size"] == .05
+    assert card["weights_file"] == spec.weights_filename
+    assert round(card["weights_bytes"] / 1e6, 1) == spec.weights_size_mb
+    assert "weights_sha256" not in card
+    assert spec.weights_urls == (
+        "https://github.com/akharroubi/AerialLidarClassifier/releases/download/v1.3/"
+        + spec.weights_filename,)
+    assert card["class_names"] == [c.name.lower() for c in spec.class_mapping.values()]
+    # ASPRS where a class exists (Ground 2, Rail 10, Wire 14, Tower 15, High
+    # vegetation 5, Unclassified 1); fences take the first user-definable code.
+    assert {i: c.asprs_code for i, c in spec.class_mapping.items()} == {
+        1: 2, 2: 10, 3: 15, 4: 14, 5: 5, 6: 64, 7: 1}
+    assert spec.editable_codes and registry.LITEPT_L_MLS.editable_codes
+    assert not registry.LITEPT_L_DALES.editable_codes
+    assert not registry.SEGFORMER3D_URBANFILTERING.editable_codes
+    assert spec.supported_devices == ("cuda",)
+    assert spec.extra_packages == ("spconv", "scipy")
+    assert "CC BY-NC 4.0" in spec.licence
+
+
+def test_user_defined_default_codes_start_at_64_without_gaps():
+    for spec in registry.MODELS:
+        user = sorted({c.asprs_code for c in spec.class_mapping.values() if c.asprs_code >= 64})
+        assert user == list(range(64, 64 + len(user))), (spec.id, user)
+
+
+def test_classifiers_cover_every_model_once():
+    assert [c.id for c in registry.CLASSIFIERS] == ["airborne", "mobile_mapping", "railway"]
+    assert registry.DEFAULT_CLASSIFIER_ID == "airborne"
+    engines = [spec.id for c in registry.CLASSIFIERS for spec in c.engines]
+    assert sorted(engines) == sorted(spec.id for spec in registry.MODELS)
+    assert registry.AIRBORNE.primary is registry.LITEPT_L_DALES
+    for spec in registry.MODELS:
+        classifier = registry.classifier_for_model(spec.id)
+        assert spec in classifier.engines
+    assert registry.get_classifier("railway") is registry.RAILWAY
+    for bad in (None, "", "unknown"):
+        for lookup in (registry.get_classifier, registry.classifier_for_model):
+            try:
+                lookup(bad)
+            except KeyError:
+                pass
+            else:
+                raise AssertionError(f"{lookup.__name__}({bad!r}) did not raise")
+
+
+def test_select_engine_prefers_litept_and_falls_back_only_for_airborne():
+    def runs(ready):
+        return lambda spec, device: spec.supports_device(device) and (spec.family != "litept" or ready)
+
+    airborne, mls, rail = registry.CLASSIFIERS
+    assert registry.select_engine(airborne, "cuda", runs(True)) is registry.LITEPT_L_DALES
+    for device, ready in (("cuda", False), ("cpu", True), ("mps", True), ("cpu", False)):
+        assert registry.select_engine(airborne, device, runs(ready)) is registry.SEGFORMER3D_URBANFILTERING
+    # No airborne model ever replaces the mobile mapping or railway model:
+    # the primary engine comes back so its gate can explain what is missing.
+    for classifier, spec in ((mls, registry.LITEPT_L_MLS), (rail, registry.LITEPT_L_RAIL)):
+        for device, ready in (("cuda", True), ("cuda", False), ("cpu", True), ("mps", False)):
+            assert registry.select_engine(classifier, device, runs(ready)) is spec
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

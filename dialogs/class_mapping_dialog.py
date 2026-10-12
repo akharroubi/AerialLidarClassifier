@@ -1,4 +1,5 @@
-"""Edit the LAS classification output codes for the Mobile Mapping model."""
+"""Edit the LAS classification output codes of a model with editable codes
+(LitePT-L Mobile Mapping, LitePT-L Railway)."""
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
@@ -6,14 +7,14 @@ from qgis.PyQt.QtWidgets import (
     QPushButton, QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout,
 )
 
-from ..utils.class_mapping import output_model_spec
+from ..utils.class_mapping import asprs_code_name, output_model_spec
 
 
 class ClassMappingDialog(QDialog):
     def __init__(self, spec, output_codes=None, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Mobile Mapping (MMS) output class codes")
-        self.resize(620, 590)
+        self.setWindowTitle(f"{spec.short_name} output class codes")
+        self.resize(760, 560)
         self._defaults = spec
         selected = output_model_spec(spec, output_codes)
         layout = QVBoxLayout(self)
@@ -23,13 +24,15 @@ class ClassMappingDialog(QDialog):
             "The values are saved for this model. Repeated codes merge classes.\n"
             "Codes above 31 automatically upgrade legacy LAS files to LAS 1.4. "
             "Use codes 64–255 for your own class definitions.\n\n"
-            "Mobile Mapping writes these codes to the existing LAS classification field. "
-            "Model IDs 1–9 identify the classes in this table; no extra label field is added."
+            f"{spec.short_name} writes these codes to the existing LAS classification field. "
+            f"Model IDs 1–{len(spec.class_mapping)} identify the classes in this table; "
+            "no extra label field is added."
         )
         label.setWordWrap(True)
         layout.addWidget(label)
-        self.table = QTableWidget(len(spec.class_mapping), 4)
-        self.table.setHorizontalHeaderLabels(["Model ID", "Mobile Mapping class", "Default", "Output code"])
+        self.table = QTableWidget(len(spec.class_mapping), 5)
+        self.table.setHorizontalHeaderLabels(
+            ["Model ID", "Class", "Default", "Output code", "ASPRS meaning"])
         self.table.verticalHeader().hide()
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
@@ -40,9 +43,14 @@ class ClassMappingDialog(QDialog):
                 item = QTableWidgetItem(str(value))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self.table.setItem(row, column, item)
+            meaning = QTableWidgetItem()
+            meaning.setFlags(meaning.flags() & ~Qt.ItemFlag.ItemIsEditable)
+            self.table.setItem(row, 4, meaning)
             spin = QSpinBox()
             spin.setRange(0, 255)
+            spin.valueChanged.connect(lambda value, item=meaning: item.setText(asprs_code_name(value)))
             spin.setValue(selected.class_mapping[class_id].asprs_code)
+            meaning.setText(asprs_code_name(spin.value()))
             spin.setToolTip(f"Output classification code for {info.name}")
             self.table.setCellWidget(row, 3, spin)
             self._spins[class_id] = spin

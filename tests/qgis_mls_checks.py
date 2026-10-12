@@ -150,7 +150,9 @@ class MlsChecks(unittest.TestCase):
         self.assertEqual(list(MLS.class_mapping), list(range(1, 10)))
         algorithm = processing.ClassifyLidarAlgorithm()
         algorithm.initAlgorithm()
+        # MODEL (1.1 / 1.2) keeps its engine indexes; CLASSIFIER index 1 is mobile mapping.
         self.assertEqual(algorithm.parameterDefinition('MODEL').options()[2], MLS.display_name)
+        self.assertEqual(registry.CLASSIFIERS[1].engines, (MLS,))
         self.assertIsNotNone(algorithm.parameterDefinition('OUTPUT_CODES_JSON'))
 
     def test_extra_dimension_descriptions_fit_utf8_byte_limit(self):
@@ -473,9 +475,10 @@ class MlsChecks(unittest.TestCase):
              patch.object(manager_module.ModelManager, 'is_model_available', return_value=True):
             panel = panel_module.ClassifierDockWidget(None)
             try:
-                self.assertEqual(panel.model_combo.currentData(), MLS.id)
+                # 1.2 saved the model id; it selects the Mobile mapping classifier.
+                self.assertEqual(panel.model_combo.currentData(), 'mobile_mapping')
+                self.assertEqual(panel._current_spec(), MLS)
                 self.assertFalse(panel.model_gate_ok)
-                self.assertIsNone(panel._fix_action)
                 self.assertFalse(panel.mms_codes_row.isHidden())
                 self.assertEqual(panel.field_edit.text(), 'classification')
                 self.assertFalse(panel.field_edit.isEnabled())
@@ -506,13 +509,14 @@ class MlsChecks(unittest.TestCase):
                 self.assertEqual(saved['6'], 17)
                 panel.model_combo.setCurrentIndex(0)
                 self.assertTrue(panel.mms_codes_row.isHidden())
-                panel.model_combo.setCurrentIndex(2)
+                panel.model_combo.setCurrentIndex(1)
                 self.assertEqual(panel._output_codes_by_model[MLS.id][5], 255)
             finally:
                 panel.close()
             restored = panel_module.ClassifierDockWidget(None)
             try:
-                self.assertEqual(restored.model_combo.currentData(), MLS.id)
+                self.assertEqual(restored.model_combo.currentData(), 'mobile_mapping')
+                self.assertEqual(settings[f'{config.SETTINGS_PREFIX}/classifier_id'], 'mobile_mapping')
                 self.assertEqual(restored._output_codes_by_model[MLS.id][5], 255)
                 dialog = dialog_module.ClassMappingDialog(MLS, restored._output_codes_by_model[MLS.id])
                 capture_dir = os.environ.get('ALC_UI_CAPTURE_DIR')

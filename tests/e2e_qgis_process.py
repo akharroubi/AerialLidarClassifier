@@ -1,14 +1,17 @@
 """Release acceptance test of the built ZIP in fresh QGIS 3 and 4 profiles.
 
-    python tests/e2e_mls_qgis_process.py --zip dist/lidar_ai_classifier_v1.2.0.zip \
-        --input <reference LAS> --work <scratch parent> [--qgis3 BAT] [--qgis4 BAT]
+    python tests/e2e_qgis_process.py --model rail --zip dist/lidar_ai_classifier_v1.3.0.zip \
+        --input <reference LAS> --work <scratch parent> [--public] [--qgis3 BAT] [--qgis4 BAT]
 
-Both runtimes are required. Each run gets a new private directory below
---work; existing files and profiles are never removed. The test serves the
-released weights on localhost, checks the real first-use download and its
-SHA-256, then runs MODEL=2 on CUDA with default codes in memory (QGIS 3)
-and custom codes in streaming mode (QGIS 4). It verifies file integrity and
-cross-runtime class IDs. No reference-label field is required.
+--model is mls (Mobile mapping) or rail (Railway). Both runtimes are
+required. Each run gets a new private directory below --work; existing files
+and profiles are never removed. The test serves the released weights on
+localhost (or, with --public, lets the plugin download them from the URL in
+the ZIP's registry), checks the real first-use download and its SHA-256, then
+runs on CUDA with default codes in memory on QGIS 3, selected with the 1.2
+MODEL index, and custom codes in streaming mode on QGIS 4, selected with
+CLASSIFIER. It verifies file integrity and cross-runtime class IDs. No
+reference-label field is required.
 
 The plugin environment comes from AERIAL_LIDAR_CLASSIFIER_CACHE_DIR (an
 existing install). Reports and logs remain in the printed work directory.
@@ -35,10 +38,27 @@ import numpy as np
 HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parent
 NAME = "Aerial_LiDAR_Classifier"
-WEIGHTS = "litept_l_mls_5cm_fp16.pth"
-DEFAULT_CODES = {1: 2, 2: 3, 3: 5, 4: 6, 5: 64, 6: 65, 7: 66, 8: 14, 9: 1}
-CUSTOM_CODES = {**DEFAULT_CODES, 5: 200, 6: 201, 7: 255}
+_MLS_CODES = {1: 2, 2: 3, 3: 5, 4: 6, 5: 64, 6: 65, 7: 66, 8: 14, 9: 1}
+_RAIL_CODES = {1: 2, 2: 10, 3: 15, 4: 14, 5: 5, 6: 64, 7: 1}
+TARGETS = {
+    "mls": {"id": "litept_l_mls_5cm", "registry": "LITEPT_L_MLS",
+            "weights": "litept_l_mls_5cm_fp16.pth", "model_index": 2, "classifier_index": 1,
+            "default": _MLS_CODES, "custom": {**_MLS_CODES, 5: 200, 6: 201, 7: 255}},
+    "rail": {"id": "litept_l_rail_5cm", "registry": "LITEPT_L_RAIL",
+             "weights": "litept_l_rail_5cm_fp16.pth", "model_index": 3, "classifier_index": 2,
+             "default": _RAIL_CODES, "custom": {**_RAIL_CODES, 2: 200, 6: 17, 7: 255}},
+}
+TARGET = TARGETS["mls"]
+WEIGHTS = TARGET["weights"]
+DEFAULT_CODES = TARGET["default"]
+CUSTOM_CODES = TARGET["custom"]
 MIN_AGREEMENT = 0.9995
+
+
+def select_target(name):
+    global TARGET, WEIGHTS, DEFAULT_CODES, CUSTOM_CODES
+    TARGET = TARGETS[name]
+    WEIGHTS, DEFAULT_CODES, CUSTOM_CODES = TARGET["weights"], TARGET["default"], TARGET["custom"]
 
 
 def sha256(path):
@@ -49,22 +69,30 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def release_weights_hash(zip_path):
+def release_weights(zip_path):
+    """(SHA-256, first download URL) of the selected model in the ZIP's registry."""
     with zipfile.ZipFile(zip_path) as archive:
         source = archive.read(f"{NAME}/core/registry.py").decode("utf-8")
-    for node in ast.walk(ast.parse(source)):
+    tree = ast.parse(source)
+    base = next(ast.literal_eval(node.value) for node in ast.walk(tree)
+                if isinstance(node, ast.Assign) and any(
+                    isinstance(t, ast.Name) and t.id == "_GITHUB_RELEASES" for t in node.targets))
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
             continue
-        if any(isinstance(target, ast.Name) and target.id == "LITEPT_L_MLS"
+        if any(isinstance(target, ast.Name) and target.id == TARGET["registry"]
                for target in node.targets):
             fields = {item.arg: item.value for item in node.value.keywords}
             if ast.literal_eval(fields["weights_filename"]) != WEIGHTS:
-                raise ValueError("The ZIP specifies a different mobile mapping weights file")
+                raise ValueError("The ZIP specifies a different weights file")
             value = ast.literal_eval(fields["weights_sha256"])
             if len(value) != 64 or any(c not in "0123456789abcdef" for c in value):
-                raise ValueError("Invalid mobile mapping SHA-256 in the ZIP")
-            return value
-    raise ValueError("Mobile mapping model not found in the ZIP registry")
+                raise ValueError("Invalid SHA-256 in the ZIP")
+            first = fields["weights_urls"].elts[0]
+            url = "".join(base if isinstance(part, ast.FormattedValue) else part.value
+                          for part in first.values) if isinstance(first, ast.JoinedStr) else first.value
+            return value, url
+    raise ValueError(f"{TARGET['registry']} not found in the ZIP registry")
 
 
 def serve(folder):
@@ -100,8 +128,7 @@ def make_profile(root, zip_path, ini_name, weights_url):
     ini.write_text(
         "[PythonPlugins]\n"
         f"{NAME}=true\n\n"
-        "[AerialLidarClassifier]\n"
-        f"model_url\\litept_l_mls_5cm={weights_url}\n",
+        + (f"[AerialLidarClassifier]\nmodel_url\\{TARGET['id']}={weights_url}\n" if weights_url else ""),
         encoding="utf-8")
 
 
@@ -179,7 +206,7 @@ def check(source_path, out_path, codes):
     records = [json.loads(bytes(record.record_data_bytes())) for record in output.header.vlrs
                if record.user_id == "AerialLiDAR" and record.record_id == 1]
     mappings = [record for record in records if record.get("field") == "classification"]
-    if len(mappings) != 1 or mappings[0].get("model") != "litept_l_mls_5cm":
+    if len(mappings) != 1 or mappings[0].get("model") != TARGET["id"]:
         problems.append("classification provenance VLR missing or ambiguous")
     else:
         written = {int(k): value["asprs"] for k, value in mappings[0]["classes"].items()}
@@ -200,6 +227,9 @@ def class_ids(labels, codes):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--model", choices=sorted(TARGETS), default="mls")
+    parser.add_argument("--public", action="store_true",
+                        help="download the weights from the published URL in the ZIP")
     parser.add_argument("--zip", required=True)
     parser.add_argument("--input", required=True)
     parser.add_argument("--work", required=True)
@@ -209,6 +239,7 @@ def main():
     parser.add_argument("--qgis3", default=r"C:\Program Files\QGIS 3.44.10\bin\qgis_process-qgis-ltr.bat")
     parser.add_argument("--qgis4", default=r"C:\Users\user\qgis4_test\app\bin\qgis_process-qgis.bat")
     args = parser.parse_args()
+    select_target(args.model)
     work_parent = Path(args.work).resolve()
     work_parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="qgis_e2e_", dir=work_parent)).resolve()
@@ -216,7 +247,8 @@ def main():
         raise RuntimeError("Private work directory escaped the requested parent")
     report_path = work / "e2e_report.json"
     report = {"work_dir": str(work), "report": str(report_path), "input": str(Path(args.input).resolve()),
-              "zip": str(Path(args.zip).resolve()), "passed": False}
+              "zip": str(Path(args.zip).resolve()), "model": TARGET["id"], "public": args.public,
+              "passed": False}
     print(f"Work directory: {work}", flush=True)
     server, source_hash = None, None
     labels = {}
@@ -228,10 +260,12 @@ def main():
             raise ValueError("Both QGIS launchers are required; missing: " + "; ".join(missing))
         source_path = Path(args.input).resolve(strict=True)
         zip_path = Path(args.zip).resolve(strict=True)
-        weights_dir = Path(args.weights_dir).resolve(strict=True)
-        expected_hash = release_weights_hash(zip_path)
-        if sha256(weights_dir / WEIGHTS) != expected_hash:
-            raise ValueError("Release weights do not match the built ZIP's SHA-256")
+        expected_hash, public_url = release_weights(zip_path)
+        report["registry_url"] = public_url
+        if not args.public:
+            weights_dir = Path(args.weights_dir).resolve(strict=True)
+            if sha256(weights_dir / WEIGHTS) != expected_hash:
+                raise ValueError("Release weights do not match the built ZIP's SHA-256")
         source_hash = sha256(source_path)
         report.update(input_sha256=source_hash, zip_sha256=sha256(zip_path), weights_sha256=expected_hash)
         with laspy.open(source_path) as reader:
@@ -242,34 +276,40 @@ def main():
             if not np.isfinite(span):
                 raise ValueError("Reference LAS has non-finite bounds")
         tile_size = max(1.0, span * 2.0 + 1.0)
-        server = serve(weights_dir)
-        url = f"http://127.0.0.1:{server.server_address[1]}/{WEIGHTS}"
+        if args.public:
+            url = ""
+        else:
+            server = serve(weights_dir)
+            url = f"http://127.0.0.1:{server.server_address[1]}/{WEIGHTS}"
         runs = (
-            ("qgis3", "QGIS3.ini", DEFAULT_CODES, ["TILE_ENABLED=false"]),
+            ("qgis3", "QGIS3.ini", DEFAULT_CODES,
+             [f"MODEL={TARGET['model_index']}", "TILE_ENABLED=false"]),
             ("qgis4", "QGIS4.ini", CUSTOM_CODES,
-             ["TILE_ENABLED=true", "TILE_STREAMING=true", f"TILE_SIZE_M={tile_size}", "TILE_BUFFER_M=0"]),
+             [f"CLASSIFIER={TARGET['classifier_index']}", "TILE_ENABLED=true", "TILE_STREAMING=true",
+              f"TILE_SIZE_M={tile_size}", "TILE_BUFFER_M=0"]),
         )
         for label, ini, codes, extra in runs:
             profile, out_dir = work / f"profile_{label}", work / f"out_{label}"
             entry = {"launcher": str(launchers[label]), "log": str(work / f"{label}.log")}
             try:
                 make_profile(profile, zip_path, ini, url)
-                params = [f"INPUT={source_path}", f"OUTPUT_FOLDER={out_dir}", "MODEL=2", "DEVICE=1",
+                params = [f"INPUT={source_path}", f"OUTPUT_FOLDER={out_dir}", "DEVICE=1",
                           "LOAD_AS_LAYER=false", "UNITS=0", *extra]
                 if codes != DEFAULT_CODES:
                     params.append("OUTPUT_CODES_JSON=" + json.dumps({str(k): v for k, v in codes.items()},
                                                                       separators=(",", ":")))
-                requests_before = len(server.weight_requests)
+                requests_before = len(server.weight_requests) if server else 0
                 code, seconds = run_qgis_process(launchers[label], profile, Path(args.cache).resolve(),
                                                  params, work / f"{label}.log")
                 entry.update(exit_code=code, seconds=round(seconds, 1))
                 if code:
                     raise ValueError(f"qgis_process exited with status {code}; see {entry['log']}")
-                cached = profile / "profiles" / "default" / "AerialLidarClassifier" / "models" / "litept_l_mls_5cm" / WEIGHTS
-                downloaded = f"/{WEIGHTS}" in server.weight_requests[requests_before:]
-                entry["weights_downloaded_from_localhost"] = downloaded
+                cached = (profile / "profiles" / "default" / "AerialLidarClassifier" / "models"
+                          / TARGET["id"] / WEIGHTS)
+                downloaded = args.public or f"/{WEIGHTS}" in server.weight_requests[requests_before:]
+                entry["weights_source"] = public_url if args.public else "localhost"
                 if not downloaded or not cached.is_file() or sha256(cached) != expected_hash:
-                    raise ValueError("Fresh-profile localhost download or cached SHA-256 verification failed")
+                    raise ValueError("Fresh-profile download or cached SHA-256 verification failed")
                 entry["cached_weights_sha256"] = expected_hash
                 outputs = sorted(out_dir.glob("*_classified.la*")) if out_dir.exists() else []
                 if len(outputs) != 1:

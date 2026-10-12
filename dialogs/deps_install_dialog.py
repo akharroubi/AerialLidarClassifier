@@ -65,7 +65,8 @@ class DepsInstallDockWidget(QDockWidget):
             "  \u2022 Download a fast package installer (~15 MB)\n"
             "  \u2022 Install PyTorch + LiDAR packages "
             "(~1\u20133 GB depending on CUDA)\n"
-            "  \u2022 Download the model weights (~20\u2013190 MB)\n\n"
+            "  \u2022 Download the model weights (about 20 MB, or about "
+            "530 MB with an NVIDIA GPU)\n\n"
             "QGIS stays usable while it runs (usually 5 to 15 minutes)."
         )
         welcome_text.setWordWrap(True)

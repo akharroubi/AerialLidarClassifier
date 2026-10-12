@@ -12,10 +12,10 @@ Runs spatial inference on one tile at a time:
 4. average the softmax probabilities of every visit per representative,
    argmax, and project to the raw points.
 
-Returns plugin model class ids 1..num_classes. Airborne has 8 classes; Mobile
-Mapping has 9. These are always the zero-based network output indices plus
-one, including Mobile Mapping's ground and unknown classes. Zero remains
-reserved for no prediction; coverage is complete or an error is raised.
+Returns plugin model class ids 1..num_classes. Airborne has 8 classes, Mobile
+Mapping 9 and Railway 7. These are always the zero-based network output
+indices plus one, including Mobile Mapping's ground and unknown classes. Zero
+remains reserved for no prediction; coverage is complete or an error is raised.
 
 CUDA only: the sparse convolutions come from spconv, which ships no CPU or
 macOS build.
