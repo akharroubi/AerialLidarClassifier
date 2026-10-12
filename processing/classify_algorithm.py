@@ -39,6 +39,8 @@ from qgis.core import (
     QgsProcessingUtils,
 )
 
+from qgis.PyQt.QtCore import QVariant
+
 from ..config import PLUGIN_NAME, TILE_DEFAULT_BUFFER_M
 from ..core.registry import CLASSIFIERS, MODELS
 from ..utils.class_mapping import output_codes_json, output_model_spec, supports_output_codes, validate_model_output_field
@@ -353,20 +355,28 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
 
         parameterAsEnum turns an out-of-range index, also one computed by an
         expression, into the default, which would silently run another
-        model: evaluate and check the value here instead. A missing value
-        takes the parameter's default.
+        model: evaluate and check the value here instead. Only an omitted
+        value (missing, None, an empty literal or an inactive property)
+        takes the parameter's default; whatever an active expression or
+        property returns must itself be a valid index.
         """
         value = parameters.get(name)
+        if isinstance(value, QgsProperty) and not value.isActive():
+            value = None
         if isinstance(value, QgsProperty):
+            source = value.expressionString() or value.field() or value.asExpression()
             evaluated = value.value(context.expressionContext(), None)
             value, ok = evaluated if isinstance(evaluated, tuple) else (evaluated, True)
-            if not ok:
+            if not ok or value is None or (isinstance(value, QVariant) and value.isNull()):
+                # Never the default: an active property must give an index.
                 raise QgsProcessingException(self.tr(
-                    f"{name}: the expression {value!r} could not be evaluated."))
+                    f"{name} must be an integer from 0 to {count - 1} ({meaning}); "
+                    f"'{source}' returned no value."))
+        elif (value is None or (isinstance(value, str) and not value.strip())
+              or (isinstance(value, QVariant) and value.isNull())):
+            return int(self.parameterDefinition(name).defaultValue() or 0)
         if isinstance(value, (list, tuple)) and len(value) == 1:
             value = value[0]
-        if value is None or str(value).strip() in ("", "NULL"):
-            return int(self.parameterDefinition(name).defaultValue() or 0)
         index = None
         if isinstance(value, bool):
             index = None

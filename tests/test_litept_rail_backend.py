@@ -102,7 +102,11 @@ def test_recovery_advice_offers_segformer_only_for_airborne_data():
             messages[card] = str(exc)
         else:
             raise AssertionError(f"{card} loaded on the CPU")
-    assert "Airborne classifier can run its SegFormer 3D engine" in messages["litept_l_dales_10cm"]
+    airborne = messages["litept_l_dales_10cm"]
+    assert "Airborne classifier can run its SegFormer 3D engine" in airborne
+    # Both Processing interfaces get their own instruction.
+    assert "aeriallidar:classify_point_cloud) on the CPU device" in airborne
+    assert "(aeriallidar:classify_lidar) choose MODEL=1" in airborne
     for card in ("litept_l_mls_5cm", "litept_l_rail_5cm"):
         assert "SegFormer" not in messages[card], messages[card]
         assert "Airborne" not in messages[card], messages[card]

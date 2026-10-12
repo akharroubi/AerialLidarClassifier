@@ -206,8 +206,10 @@ class LitePTBackend:
         if not others:
             return ""
         return (f" The {classifier.display_name} can run its {others[0].short_name} "
-                "engine instead: untick Use GPU in the dock, or choose the CPU device "
-                "in Processing.")
+                "engine instead: untick Use GPU in the dock; in Processing, run "
+                "'Classify LiDAR point cloud' (aeriallidar:classify_point_cloud) on the "
+                "CPU device, or with the 1.0-1.2 algorithm (aeriallidar:classify_lidar) "
+                "choose MODEL=1.")
 
     def unload(self) -> None:
         self.model = None

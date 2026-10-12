@@ -378,16 +378,30 @@ class RailChecks(unittest.TestCase):
             params = dict(self.processing_params(algorithm, source, folder, codes=''),
                           **{algorithm.FIELD_NAME: 'classification'})
             legacy = {k: v for k, v in params.items() if k != 'CLASSIFIER'}
-            bad = (3, '9', -2, '2.9', 2.5, 'garbage', True, QgsProperty.fromExpression('99'),
-                   QgsProperty.fromExpression("'text'"))
+            # Expression results are never "omitted": empty or 'NULL' text and a
+            # NULL result are refused like any other invalid value.
+            expression_blanks = (QgsProperty.fromExpression("''"), QgsProperty.fromExpression("'NULL'"),
+                                 QgsProperty.fromExpression("'  '"), QgsProperty.fromExpression('NULL'))
+            bad = (3, '9', -2, '2.9', 2.5, 'garbage', 'NULL', True, QgsProperty.fromExpression('99'),
+                   QgsProperty.fromExpression("'text'")) + expression_blanks
             for value in bad:
                 with self.subTest(classifier=value), \
                         self.assertRaisesRegex(QgsProcessingException, 'CLASSIFIER must be an integer from 0 to 2'):
                     self.run_processing(dict(params, CLASSIFIER=value))
-            for value in (4, '7', -1, QgsProperty.fromExpression('4'), QgsProperty.fromExpression('1 + 3')):
+            for value in (4, '7', -1, QgsProperty.fromExpression('4'),
+                          QgsProperty.fromExpression('1 + 3')) + expression_blanks:
                 with self.subTest(model=value), \
                         self.assertRaisesRegex(QgsProcessingException, 'MODEL must be an integer from 0 to 3'):
                     self.run_processing(dict(legacy, MODEL=value), legacy=True)
+            from qgis.PyQt.QtCore import QVariant
+            inactive = QgsProperty.fromExpression('2')
+            inactive.setActive(False)
+            for omitted in (None, '', '  ', inactive, QVariant()):
+                with self.subTest(omitted=omitted):
+                    engine, _, _ = self.run_processing(dict(params, CLASSIFIER=omitted))
+                    self.assertEqual(engine, 'litept_l_dales_10cm')
+                    engine, _, _ = self.run_processing(dict(legacy, MODEL=omitted), legacy=True)
+                    self.assertEqual(engine, 'litept_l_dales_10cm')
             # Valid expressions select what they compute.
             engine, _, _ = self.run_processing(dict(params, CLASSIFIER=QgsProperty.fromExpression('1 + 1')))
             self.assertEqual(engine, RAIL.id)
