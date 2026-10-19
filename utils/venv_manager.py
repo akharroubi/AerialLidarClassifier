@@ -134,6 +134,9 @@ _MIN_COMPUTE_CAP_FOR_CU128 = 12.0
 
 # Cache for detect_nvidia_gpu() â€” avoids re-running nvidia-smi.
 _gpu_detect_cache = None  # type: Optional[Tuple[bool, dict]]
+# Seconds nvidia-smi gets to answer: a laptop GPU in its power-saving
+# state can take several seconds to wake up.
+_NVIDIA_SMI_TIMEOUT = 20
 
 
 def _log(message: str, level=Qgis.MessageLevel.Info):
@@ -313,6 +316,11 @@ def _find_nvidia_smi() -> Optional[str]:
         return found
 
     if sys.platform != "win32":
+        # QGIS started from a desktop launcher can have a reduced PATH.
+        for path in ("/usr/bin/nvidia-smi", "/usr/local/bin/nvidia-smi",
+                     "/usr/lib/wsl/lib/nvidia-smi"):
+            if os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
         return None
 
     candidates = []
@@ -343,12 +351,224 @@ def _find_nvidia_smi() -> Optional[str]:
     return None
 
 
-def detect_nvidia_gpu() -> Tuple[bool, dict]:
-    """Detect if an NVIDIA GPU is present by querying nvidia-smi.
+def _running_in_flatpak() -> bool:
+    """True inside a Flatpak sandbox (e.g. the Flathub QGIS)."""
+    return sys.platform.startswith("linux") and os.path.exists("/.flatpak-info")
 
-    Results are cached for the lifetime of the QGIS session. Every
-    failure path is logged so users can diagnose "GPU not detected"
-    without having to instrument the code themselves.
+
+def _best_gpu(gpus: List[dict]) -> dict:
+    """The GPU with the highest compute capability (first one on ties)."""
+    best_gpu = {}
+    best_compute_cap = -1.0
+    for gpu_info in gpus:
+        cc = gpu_info.get("compute_cap", 0.0)
+        if cc > best_compute_cap:
+            best_compute_cap = cc
+            best_gpu = gpu_info
+    return best_gpu
+
+
+def _detect_with_nvidia_smi() -> Tuple[List[dict], bool]:
+    """Query nvidia-smi. Returns (gpus, transient_failure)."""
+    smi_path = _find_nvidia_smi()
+    if smi_path is None:
+        _log(
+            "GPU detection: nvidia-smi not found on PATH or in the usual "
+            "NVIDIA install locations. Asking the NVIDIA driver library "
+            "(NVML) instead.",
+            Qgis.MessageLevel.Info,
+        )
+        return [], False
+
+    _log(f"GPU detection: using nvidia-smi at {smi_path}", Qgis.MessageLevel.Info)
+
+    try:
+        subprocess_kwargs = _get_subprocess_kwargs()
+        # A laptop GPU in its power-saving state can take several seconds
+        # to wake up and answer.
+        result = proc.run(
+            [
+                smi_path,
+                "--query-gpu=name,compute_cap,driver_version,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            timeout=_NVIDIA_SMI_TIMEOUT,
+            **subprocess_kwargs,
+        )
+    except proc.TimeoutExpired:
+        _log(f"nvidia-smi timed out after {_NVIDIA_SMI_TIMEOUT}s", Qgis.MessageLevel.Warning)
+        return [], True
+    except Exception as e:
+        _log(f"nvidia-smi check failed: {e}", Qgis.MessageLevel.Warning)
+        return [], True
+
+    if result.returncode != 0:
+        err_tail = (result.stderr or result.stdout or "").strip()[:300]
+        _log(
+            f"nvidia-smi exited with code {result.returncode}: "
+            f"{err_tail or '(no output)'}",
+            Qgis.MessageLevel.Warning,
+        )
+        return [], False
+
+    if not result.stdout.strip():
+        _log(
+            "nvidia-smi returned no output - the driver may be "
+            "installed but no GPU is currently visible to it "
+            "(check Optimus power-saving / GPU disabled in BIOS).",
+            Qgis.MessageLevel.Warning,
+        )
+        return [], False
+
+    gpus = []
+    for line in result.stdout.strip().split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        parts = [p.strip() for p in line.split(",")]
+
+        gpu_info = {}
+        if len(parts) >= 1 and parts[0]:
+            gpu_info["name"] = parts[0]
+        if len(parts) >= 2 and parts[1]:
+            try:
+                gpu_info["compute_cap"] = float(parts[1])
+            except ValueError:
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
+        if len(parts) >= 3 and parts[2]:
+            gpu_info["driver_version"] = parts[2]
+        if len(parts) >= 4 and parts[3]:
+            try:
+                gpu_info["memory_mb"] = int(float(parts[3]))
+            except ValueError:
+                _LOG.debug("Ignored non-fatal error", exc_info=True)
+        if gpu_info:
+            gpus.append(gpu_info)
+
+    if not gpus:
+        _log(
+            f"nvidia-smi output parsed to empty GPU info: "
+            f"{result.stdout.strip()[:300]}",
+            Qgis.MessageLevel.Warning,
+        )
+    return gpus, False
+
+
+def _nvml_library_candidates() -> List[str]:
+    """Where the NVIDIA Management Library (NVML) of the driver lives."""
+    if sys.platform == "win32":
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        candidates = [os.path.join(system_root, "System32", "nvml.dll")]
+        for env_key in ("ProgramW6432", "ProgramFiles"):
+            base = os.environ.get(env_key)
+            if base:
+                candidates.append(os.path.join(
+                    base, "NVIDIA Corporation", "NVSMI", "nvml.dll"))
+        return candidates
+    if sys.platform.startswith("linux"):
+        # Found through the loader cache. Inside a Flatpak this is the
+        # NVIDIA driver extension (org.freedesktop.Platform.GL.nvidia-*),
+        # which ships the driver libraries but not the nvidia-smi program.
+        return ["libnvidia-ml.so.1", "libnvidia-ml.so"]
+    return []
+
+
+def _detect_with_nvml() -> List[dict]:
+    """Query the NVIDIA driver through NVML (the library behind nvidia-smi).
+
+    Used when nvidia-smi is missing or fails, which is the case inside the
+    Flathub QGIS sandbox: the GPU and the driver libraries are visible
+    there, the host's nvidia-smi program is not.
+    """
+    import ctypes
+
+    lib = None
+    for name in _nvml_library_candidates():
+        try:
+            lib = ctypes.CDLL(name)
+            break
+        except OSError:
+            continue
+    if lib is None:
+        _log("GPU detection: no NVIDIA driver library (NVML) found.", Qgis.MessageLevel.Info)
+        return []
+
+    def nvml(name, *fallbacks):
+        for candidate in (name,) + fallbacks:
+            function = getattr(lib, candidate, None)
+            if function is not None:
+                return function
+        raise AttributeError(name)
+
+    class _Memory(ctypes.Structure):
+        _fields_ = [("total", ctypes.c_ulonglong),
+                    ("free", ctypes.c_ulonglong),
+                    ("used", ctypes.c_ulonglong)]
+
+    try:
+        rc = nvml("nvmlInit_v2", "nvmlInit")()
+    except Exception as exc:
+        _log(f"GPU detection: NVML could not start: {exc}", Qgis.MessageLevel.Warning)
+        return []
+    if rc != 0:
+        _log(
+            f"GPU detection: NVML could not start (error {rc}). The NVIDIA "
+            "driver is not reachable from QGIS.",
+            Qgis.MessageLevel.Warning,
+        )
+        return []
+
+    gpus = []
+    try:
+        text = ctypes.create_string_buffer(96)
+        driver = None
+        if nvml("nvmlSystemGetDriverVersion")(text, ctypes.c_uint(96)) == 0:
+            driver = text.value.decode("ascii", "replace")
+        count = ctypes.c_uint(0)
+        if nvml("nvmlDeviceGetCount_v2", "nvmlDeviceGetCount")(ctypes.byref(count)) != 0:
+            count.value = 0
+        get_handle = nvml("nvmlDeviceGetHandleByIndex_v2", "nvmlDeviceGetHandleByIndex")
+        for index in range(count.value):
+            handle = ctypes.c_void_p()
+            if get_handle(ctypes.c_uint(index), ctypes.byref(handle)) != 0:
+                continue
+            gpu_info = {}
+            text = ctypes.create_string_buffer(96)
+            if nvml("nvmlDeviceGetName")(handle, text, ctypes.c_uint(96)) == 0:
+                gpu_info["name"] = text.value.decode("utf-8", "replace")
+            major, minor = ctypes.c_int(0), ctypes.c_int(0)
+            if nvml("nvmlDeviceGetCudaComputeCapability")(
+                    handle, ctypes.byref(major), ctypes.byref(minor)) == 0:
+                gpu_info["compute_cap"] = float(f"{major.value}.{minor.value}")
+            memory = _Memory()
+            if nvml("nvmlDeviceGetMemoryInfo")(handle, ctypes.byref(memory)) == 0:
+                gpu_info["memory_mb"] = int(memory.total // (1024 * 1024))
+            if driver:
+                gpu_info["driver_version"] = driver
+            if gpu_info:
+                gpus.append(gpu_info)
+    except Exception as exc:
+        _log(f"GPU detection: NVML query failed: {exc}", Qgis.MessageLevel.Warning)
+    finally:
+        try:
+            nvml("nvmlShutdown")()
+        except Exception:
+            _LOG.debug("Ignored non-fatal error", exc_info=True)
+
+    if gpus:
+        _log(f"GPU detection: found through NVML: {gpus}", Qgis.MessageLevel.Info)
+    else:
+        _log("GPU detection: NVML reports no usable NVIDIA GPU.", Qgis.MessageLevel.Info)
+    return gpus
+
+
+def detect_nvidia_gpu() -> Tuple[bool, dict]:
+    """Detect if an NVIDIA GPU is present (nvidia-smi, then NVML).
+
+    Results are cached for the lifetime of the QGIS session, except a
+    transient nvidia-smi failure (timeout) that NVML could not make up
+    for. Every failure path is logged so users can diagnose "GPU not
+    detected" without having to instrument the code themselves.
 
     Returns:
         Tuple of (has_gpu, info_dict). info_dict keys: name, compute_cap,
@@ -358,110 +578,31 @@ def detect_nvidia_gpu() -> Tuple[bool, dict]:
     if _gpu_detect_cache is not None:
         return _gpu_detect_cache
 
-    smi_path = _find_nvidia_smi()
-    if smi_path is None:
+    gpus, transient = _detect_with_nvidia_smi()
+    if not gpus:
+        gpus = _detect_with_nvml()
+
+    best_gpu = _best_gpu(gpus)
+    if best_gpu:
         _log(
-            "GPU detection: nvidia-smi not found on PATH or in the "
-            "usual NVIDIA install locations "
-            "(C:\\Windows\\System32 / Program Files\\NVIDIA "
-            "Corporation\\NVSMI). If you have an NVIDIA GPU, install "
-            "the official driver from nvidia.com - the plugin will "
-            "fall back to CPU until nvidia-smi is reachable.",
-            Qgis.MessageLevel.Warning,
-        )
-        _gpu_detect_cache = (False, {})
-        return _gpu_detect_cache
-
-    _log(f"GPU detection: using nvidia-smi at {smi_path}", Qgis.MessageLevel.Info)
-
-    try:
-        subprocess_kwargs = _get_subprocess_kwargs()
-        result = proc.run(
-            [
-                smi_path,
-                "--query-gpu=name,compute_cap,driver_version,memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            timeout=5,
-            **subprocess_kwargs,
-        )
-
-        if result.returncode != 0:
-            err_tail = (result.stderr or result.stdout or "").strip()[:300]
-            _log(
-                f"nvidia-smi exited with code {result.returncode}: "
-                f"{err_tail or '(no output)'}",
-                Qgis.MessageLevel.Warning,
-            )
-            _gpu_detect_cache = (False, {})
-            return _gpu_detect_cache
-
-        if not result.stdout.strip():
-            _log(
-                "nvidia-smi returned no output - the driver may be "
-                "installed but no GPU is currently visible to it "
-                "(check Optimus power-saving / GPU disabled in BIOS).",
-                Qgis.MessageLevel.Warning,
-            )
-            _gpu_detect_cache = (False, {})
-            return _gpu_detect_cache
-
-        lines = result.stdout.strip().split("\n")
-        best_gpu = {}
-        best_compute_cap = -1.0
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            parts = [p.strip() for p in line.split(",")]
-
-            gpu_info = {}
-            if len(parts) >= 1 and parts[0]:
-                gpu_info["name"] = parts[0]
-            if len(parts) >= 2 and parts[1]:
-                try:
-                    gpu_info["compute_cap"] = float(parts[1])
-                except ValueError:
-                    _LOG.debug("Ignored non-fatal error", exc_info=True)
-            if len(parts) >= 3 and parts[2]:
-                gpu_info["driver_version"] = parts[2]
-            if len(parts) >= 4 and parts[3]:
-                try:
-                    gpu_info["memory_mb"] = int(float(parts[3]))
-                except ValueError:
-                    _LOG.debug("Ignored non-fatal error", exc_info=True)
-
-            cc = gpu_info.get("compute_cap", 0.0)
-            if cc > best_compute_cap:
-                best_compute_cap = cc
-                best_gpu = gpu_info
-
-        if not best_gpu:
-            _log(
-                f"nvidia-smi output parsed to empty GPU info: "
-                f"{result.stdout.strip()[:300]}",
-                Qgis.MessageLevel.Warning,
-            )
-            _gpu_detect_cache = (False, {})
-            return _gpu_detect_cache
-
-        _log(
-            "NVIDIA GPU detected (best of {}): {}".format(
-                len(lines),
-                best_gpu),
+            "NVIDIA GPU detected (best of {}): {}".format(len(gpus), best_gpu),
             Qgis.MessageLevel.Info,
         )
         _gpu_detect_cache = (True, best_gpu)
         return _gpu_detect_cache
 
-    except proc.TimeoutExpired:
-        _log("nvidia-smi timed out after 5s", Qgis.MessageLevel.Warning)
-    except Exception as e:
-        _log(f"nvidia-smi check failed: {e}", Qgis.MessageLevel.Warning)
-
-    # A transient timeout/error must not disable GPU detection for the session.
-    return False, {}
+    if _running_in_flatpak():
+        _log(
+            "GPU detection: QGIS runs as a Flatpak. The GPU is visible inside "
+            "it only with the NVIDIA Flatpak driver that matches the system "
+            "driver (installed by 'flatpak update').",
+            Qgis.MessageLevel.Info,
+        )
+    if transient:
+        # A transient timeout/error must not disable GPU detection for the session.
+        return False, {}
+    _gpu_detect_cache = (False, {})
+    return _gpu_detect_cache
 
 
 def _cuda_candidates(needs_cu128: bool) -> list:
@@ -2031,7 +2172,186 @@ def _host_numpy_pin(venv_dir: str = None) -> Optional[str]:
     return f"numpy=={public}"
 
 
-def _write_torch_constraints(venv_dir: str, versions: dict) -> Optional[str]:
+# Installed after torch and torchvision; resolved against QGIS's NumPy
+# when that exact NumPy cannot be installed (see _host_numpy_constraints).
+_TORCH_FAMILY = ("torch", "torchvision", "timm")
+
+
+def _write_numpy_stand_in(folder: str, version: str) -> str:
+    """Write a metadata-only ``numpy-<version>`` wheel into ``folder``.
+
+    It is only ever given to a dry-run resolution, never installed: it lets
+    the resolver treat QGIS's own NumPy as present even when no real wheel
+    of that version exists for the plugin's Python.
+    """
+    import zipfile
+
+    dist_info = f"numpy-{version}.dist-info"
+    files = {
+        f"{dist_info}/METADATA":
+            f"Metadata-Version: 2.1\nName: numpy\nVersion: {version}\n",
+        f"{dist_info}/WHEEL":
+            "Wheel-Version: 1.0\nGenerator: aerial-lidar-classifier\n"
+            "Root-Is-Purelib: true\nTag: py3-none-any\n",
+    }
+    files[f"{dist_info}/RECORD"] = "".join(
+        f"{name},,\n" for name in list(files) + [f"{dist_info}/RECORD"])
+    path = os.path.join(folder, f"numpy-{version}-py3-none-any.whl")
+    with zipfile.ZipFile(path, "w") as wheel:
+        for name, text in files.items():
+            wheel.writestr(name, text)
+    return path
+
+
+def _numpy_wheel_installable(
+    pin: str, python_path: str, env: dict, subprocess_kwargs: dict,
+    use_uv: bool, uv_path: Optional[str],
+) -> Tuple[bool, str]:
+    """Dry-run ``pin`` (``numpy==X``) binary-only for the plugin's Python."""
+    if use_uv:
+        cmd = [uv_path, "pip", "install", "--python", python_path,
+               "--dry-run", "--no-deps"]
+        cmd.extend(_get_uv_install_policy_flags())
+    else:
+        cmd = [python_path, "-m", "pip", "install", "--dry-run", "--no-deps",
+               "--ignore-installed", "--quiet", "--disable-pip-version-check"]
+        cmd.extend(_get_pip_install_policy_flags())
+        cmd.extend(_get_pip_proxy_args())
+    cmd.append(pin)
+    try:
+        result = proc.run(cmd, timeout=300, env=env, **subprocess_kwargs)
+    except Exception as exc:
+        return False, str(exc)
+    return result.returncode == 0, (result.stderr or "") + (result.stdout or "")
+
+
+def _resolve_against_host_numpy(
+    host_version: str, venv_dir: str, python_path: str, env: dict,
+    subprocess_kwargs: dict, use_uv: bool, uv_path: Optional[str],
+) -> Tuple[Optional[List[str]], str]:
+    """Pins for the packages installed after torch, chosen for QGIS's NumPy.
+
+    Dry-run resolution of those packages with ``numpy==<host_version>``
+    supplied by a metadata-only stand-in wheel. Every resolved package
+    except NumPy is returned as ``name==version``; NumPy itself is left
+    free, so the plugin environment receives a NumPy that has a wheel for
+    its Python while SciPy & co. are versions that run with QGIS's NumPy.
+
+    Returns (pins, "") or (None, error output).
+    """
+    import json
+
+    specs = [f"{name}{spec}" for name, spec in _get_required_packages()
+             if name not in _TORCH_FAMILY]
+    with tempfile.TemporaryDirectory(prefix="numpy_host_") as work:
+        _write_numpy_stand_in(work, host_version)
+        requirements = os.path.join(work, "requirements.txt")
+        constraints = os.path.join(work, "constraints.txt")
+        report = os.path.join(work, "report.json")
+        with open(requirements, "w", encoding="utf-8") as f:
+            f.write("\n".join(specs) + "\n")
+        with open(constraints, "w", encoding="utf-8") as f:
+            f.write(f"numpy=={host_version}\n")
+        if use_uv:
+            cmd = [uv_path, "pip", "compile", requirements,
+                   "--python", python_path, "--constraint", constraints,
+                   "--find-links", work, "--no-header", "--no-annotate",
+                   "--quiet"]
+            cmd.extend(_get_uv_install_policy_flags())
+        else:
+            cmd = [python_path, "-m", "pip", "install", "--dry-run",
+                   "--ignore-installed", "--quiet",
+                   "--disable-pip-version-check", "--report", report,
+                   "--find-links", work, "--constraint", constraints,
+                   "--requirement", requirements]
+            cmd.extend(_get_pip_install_policy_flags())
+            cmd.extend(_get_pip_proxy_args())
+        try:
+            result = proc.run(cmd, timeout=600, env=env, **subprocess_kwargs)
+        except Exception as exc:
+            return None, str(exc)
+        if result.returncode != 0:
+            return None, (result.stderr or "") + (result.stdout or "")
+        resolved = {}
+        try:
+            if use_uv:
+                for line in result.stdout.splitlines():
+                    name, sep, version = line.strip().partition("==")
+                    if sep and not name.startswith("#"):
+                        resolved[name.strip()] = version.split(";")[0].strip()
+            else:
+                with open(report, "r", encoding="utf-8") as f:
+                    for item in json.load(f).get("install", []):
+                        meta = item.get("metadata", {})
+                        resolved[meta["name"]] = meta["version"]
+        except Exception as exc:
+            return None, f"Could not read the resolution result: {exc}"
+    pins = [f"{name}=={version}" for name, version in sorted(resolved.items())
+            if name.lower().replace("_", "-") != "numpy"]
+    if not pins:
+        return None, "The resolution returned no packages."
+    return pins, ""
+
+
+def _host_numpy_constraints(
+    venv_dir: str, python_path: str, env: dict, subprocess_kwargs: dict,
+    use_uv: bool, uv_path: Optional[str],
+) -> Tuple[List[str], str]:
+    """Constraint lines that keep the plugin environment usable with QGIS's NumPy.
+
+    Nothing for a QGIS with NumPy 2. With NumPy 1.x the environment gets
+    the same NumPy as QGIS when a wheel of it exists for the plugin's
+    Python. When none does (NumPy 1.x has no wheels for Python 3.13 and
+    later, and Linux distributions build their own versions), the
+    packages installed after torch are pinned to versions that support
+    QGIS's NumPy instead; QGIS keeps importing its own NumPy first.
+
+    Returns (lines, "") or ([], error message) when no such set exists.
+    """
+    pin = _host_numpy_pin(venv_dir)
+    if not pin:
+        return [], ""
+    host_version = pin.split("==", 1)[1]
+    installable, output = _numpy_wheel_installable(
+        pin, python_path, env, subprocess_kwargs, use_uv, uv_path)
+    if installable:
+        _log(
+            f"QGIS provides NumPy {host_version}: the plugin environment is "
+            "pinned to it so SciPy and the other compiled packages match "
+            "QGIS's NumPy.",
+            Qgis.MessageLevel.Info,
+        )
+        return [pin], ""
+    if _is_network_error(output):
+        return [], "Failed to check NumPy {}: network error".format(host_version)
+    _log(
+        f"QGIS provides NumPy {host_version}, which has no wheel for the "
+        f"plugin's Python {sys.version_info.major}.{sys.version_info.minor}. "
+        "Choosing package versions that support it.",
+        Qgis.MessageLevel.Info,
+    )
+    pins, error = _resolve_against_host_numpy(
+        host_version, venv_dir, python_path, env, subprocess_kwargs,
+        use_uv, uv_path)
+    if pins is None:
+        if _is_network_error(error):
+            return [], "Failed to resolve packages for NumPy {}: network error".format(
+                host_version)
+        return [], (
+            f"QGIS provides NumPy {host_version}, and no set of the plugin's "
+            "packages supports it on this Python. Updating QGIS (or its "
+            "NumPy) to NumPy 2 solves this. Details: " + error[:1200]
+        )
+    _log(
+        f"Packages chosen for QGIS's NumPy {host_version}: " + ", ".join(pins),
+        Qgis.MessageLevel.Info,
+    )
+    return pins, ""
+
+
+def _write_torch_constraints(
+    venv_dir: str, versions: dict, host_lines: Optional[List[str]] = None,
+) -> Optional[str]:
     """Write a pip/uv constraints file pinning torch and torchvision.
 
     Every install that runs after the CUDA phase passes this file with
@@ -2041,8 +2361,9 @@ def _write_torch_constraints(venv_dir: str, versions: dict) -> Optional[str]:
     keeps the local version segment (``2.12.0+cu126``): a bare
     ``==2.12.0`` would still match PyPI's ``2.12.0``.
 
-    On QGIS builds whose own NumPy is 1.x the file also pins NumPy to that
-    version (see ``_host_numpy_pin``).
+    On QGIS builds whose own NumPy is 1.x the file also carries
+    ``host_lines`` from ``_host_numpy_constraints`` (when None: the exact
+    NumPy pin of ``_host_numpy_pin``).
 
     Returns the file path, or None when there is nothing to pin.
     """
@@ -2051,9 +2372,10 @@ def _write_torch_constraints(venv_dir: str, versions: dict) -> Optional[str]:
         for name, version in versions.items()
         if name in ("torch", "torchvision") and version
     ]
-    host_pin = _host_numpy_pin(venv_dir)
-    if host_pin:
-        pins.append(host_pin)
+    if host_lines is None:
+        host_pin = _host_numpy_pin(venv_dir)
+        host_lines = [host_pin] if host_pin else []
+    pins.extend(host_lines)
     if not pins:
         return None
     path = os.path.join(venv_dir, "torch_constraints.txt")
@@ -2297,17 +2619,14 @@ def install_dependencies(
     # Set once torch is installed: every later install in this phase
     # resolves under a torch pin.
     phase_a_constraint_args: List[str] = []
-    # QGIS with its own NumPy 1.x: pin NumPy from the first install on
+    # QGIS with its own NumPy 1.x: constrain from the first install on
     # (torchvision already pulls NumPy in). Nothing changes elsewhere.
-    host_pin = _host_numpy_pin(venv_dir)
-    if host_pin:
-        _log(
-            f"QGIS provides NumPy {host_pin.split('==', 1)[1]}: the plugin "
-            "environment is pinned to it so SciPy and the other compiled "
-            "packages match QGIS's NumPy.",
-            Qgis.MessageLevel.Info,
-        )
-        constraints_path = _write_torch_constraints(venv_dir, {})
+    host_lines, host_error = _host_numpy_constraints(
+        venv_dir, python_path, env, subprocess_kwargs, use_uv, uv_path)
+    if host_error:
+        return False, host_error
+    if host_lines:
+        constraints_path = _write_torch_constraints(venv_dir, {}, host_lines)
         if constraints_path:
             phase_a_constraint_args = ["--constraint", constraints_path]
     if cuda_packages:
@@ -2647,7 +2966,7 @@ def install_dependencies(
                 installed = _get_installed_versions(
                     python_path, ("torch",), env, subprocess_kwargs,
                 )
-                constraints_path = _write_torch_constraints(venv_dir, installed)
+                constraints_path = _write_torch_constraints(venv_dir, installed, host_lines)
                 if constraints_path:
                     phase_a_constraint_args = ["--constraint", constraints_path]
 
@@ -2681,7 +3000,7 @@ def install_dependencies(
             installed = _get_installed_versions(
                 python_path, ("torch", "torchvision"), env, subprocess_kwargs
             )
-            constraints_path = _write_torch_constraints(venv_dir, installed)
+            constraints_path = _write_torch_constraints(venv_dir, installed, host_lines)
             if constraints_path:
                 constraint_args = ["--constraint", constraints_path]
             if not installed.get("torch"):
@@ -3660,6 +3979,14 @@ def create_venv_and_install(
         if cancel_check and cancel_check():
             return False, "Installation cancelled"
         if not _verify_cuda_in_venv(VENV_DIR):
+            if _running_in_flatpak():
+                return False, (
+                    "PyTorch was installed but its GPU (CUDA) test failed inside "
+                    "the QGIS Flatpak. In a terminal, run 'flatpak update' (it "
+                    "installs the NVIDIA Flatpak driver matching the system "
+                    "driver) and 'sudo nvidia-modprobe -u -c=0' (it creates the "
+                    "CUDA device the sandbox needs), restart QGIS and click "
+                    "Reinstall Dependencies, or install the CPU version (button below).")
             return False, ("PyTorch was installed but its GPU (CUDA) test failed on this computer. Update the NVIDIA driver and click Reinstall Dependencies, or install the CPU version (button below).")
 
     if not is_valid:
@@ -3708,6 +4035,8 @@ def create_venv_and_install(
         "packages": [name for name, _ in _get_required_packages()]
         + [name for name in spconv_names if name in spconv_versions],
         "spconv_version": next(iter(spconv_versions.values()), None),
+        # QGIS's NumPy the packages were chosen for (None: no constraint).
+        "host_numpy": (_host_numpy_pin(VENV_DIR) or "==").split("==", 1)[1] or None,
     })
 
     if progress_callback:

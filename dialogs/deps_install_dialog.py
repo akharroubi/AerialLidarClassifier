@@ -192,7 +192,8 @@ class DepsInstallDockWidget(QDockWidget):
         """Detect GPU and update the GPU info label."""
         self._gpu_detected = False
         try:
-            from ..utils.venv_manager import detect_nvidia_gpu
+            from ..utils.venv_manager import (
+                _select_cuda_index, _spconv_extra_for, detect_nvidia_gpu)
 
             has_gpu, gpu_info = detect_nvidia_gpu()
             self._gpu_detected = bool(has_gpu)
@@ -202,11 +203,21 @@ class DepsInstallDockWidget(QDockWidget):
                 name = gpu_info.get("name", "Unknown GPU")
                 memory_mb = gpu_info.get("memory_mb")
                 memory_str = f" ({memory_mb} MB)" if memory_mb else ""
-                self.gpu_label.setText(
-                    f"GPU detected: {name}{memory_str}\n"
-                    "The GPU (CUDA) version will be installed: LitePT-L "
-                    "and SegFormer 3D will both be available."
-                )
+                cuda_index = _select_cuda_index(gpu_info)
+                if cuda_index and not _spconv_extra_for(cuda_index):
+                    # RTX 50 series (CUDA 12.8 builds): spconv has no build yet.
+                    models = (
+                        "The GPU (CUDA) version will be installed. On this "
+                        "GPU generation the Airborne classifier runs with "
+                        "SegFormer 3D on the GPU. LitePT-L (Mobile mapping, "
+                        "Railway) needs spconv, which has no build for it yet."
+                    )
+                else:
+                    models = (
+                        "The GPU (CUDA) version will be installed: LitePT-L "
+                        "and SegFormer 3D will both be available."
+                    )
+                self.gpu_label.setText(f"GPU detected: {name}{memory_str}\n{models}")
                 self.gpu_group.setStyleSheet(
                     "QGroupBox { border: 1px solid #4CAF50; "
                     "border-radius: 4px; padding: 8px; margin-top: 8px; }"

@@ -95,9 +95,11 @@ class HostNumpy(unittest.TestCase):
                                  ["torch==2.14.0+cu126", "torchvision==0.29.0+cu126"])
                 self.assertIsNone(vm._write_torch_constraints(venv, {}))
 
-    def run_install(self, host_numpy):
+    def run_install(self, host_numpy, proc_run=None, expect_ok=True):
         """install_dependencies with every external step replaced; returns the commands."""
         commands = []
+        if proc_run is None:
+            proc_run = lambda cmd, **kwargs: types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
         def fake_pip(cmd, **kwargs):
             cmd = list(cmd)
@@ -121,8 +123,11 @@ class HostNumpy(unittest.TestCase):
              patch.object(vm, "_select_cuda_index", return_value="cu126"), \
              patch.object(vm, "_get_installed_versions", return_value=dict(INSTALLED)), \
              patch.object(vm, "_run_pip_install", side_effect=fake_pip), \
-             patch.object(vm.proc, "run", return_value=types.SimpleNamespace(returncode=0, stdout="", stderr="")):
+             patch.object(vm.proc, "run", side_effect=proc_run):
             ok, message = vm.install_dependencies(venv_dir=venv, cuda_enabled=True)
+        if not expect_ok:
+            self.assertFalse(ok)
+            return message
         self.assertTrue(ok, message)
         return commands
 
@@ -149,6 +154,98 @@ class HostNumpy(unittest.TestCase):
         self.assertEqual([cmd for cmd, _ in no_numpy], [cmd for cmd, _ in commands])
 
 
+COMPILED = "laspy==2.7.0\nlazrs==0.8.2\nnumpy==1.26.4\nnumpy-indexed==0.3.7\nscipy==1.17.1\n"
+CHOSEN = ["laspy==2.7.0", "lazrs==0.8.2", "numpy-indexed==0.3.7", "scipy==1.17.1"]
+
+
+def no_wheel_for_host_numpy(compile_result=None):
+    """proc.run where numpy==1.26.4 has no wheel (QGIS on Python 3.13)."""
+    calls = []
+
+    def run(cmd, **kwargs):
+        cmd = list(cmd)
+        calls.append(cmd)
+        if "--dry-run" in cmd and "numpy==1.26.4" in cmd:
+            return types.SimpleNamespace(returncode=1, stdout="", stderr=(
+                "No solution found: numpy==1.26.4 has no usable wheels"))
+        if cmd[1:3] == ["pip", "compile"]:
+            return compile_result or types.SimpleNamespace(returncode=0, stdout=COMPILED, stderr="")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    run.calls = calls
+    return run
+
+
+class HostNumpyWithoutWheel(unittest.TestCase):
+    """QGIS's NumPy 1.x has no wheel for the plugin's Python (Python 3.13+)."""
+    run_install = HostNumpy.run_install
+
+    def test_packages_are_chosen_for_qgis_numpy(self):
+        run = no_wheel_for_host_numpy()
+        commands = self.run_install("1.26.4", proc_run=run)
+        compile_cmd = next(c for c in run.calls if c[1:3] == ["pip", "compile"])
+        self.assertIn("--only-binary=:all:", compile_cmd)
+        self.assertIn("--find-links", compile_cmd)
+        for cmd, pins in commands:
+            self.assertIsNotNone(pins, cmd)
+            self.assertNotIn("numpy==1.26.4", pins, cmd)    # no wheel: never asked for
+            for pin in CHOSEN:
+                self.assertIn(pin, pins, cmd)
+        self.assertEqual(commands[0][1], CHOSEN)             # torch already constrained
+        self.assertEqual(commands[1][1], list(INSTALLED_PINS) + CHOSEN)
+
+    def test_stand_in_wheel_resolves_with_compile_flags(self):
+        """The resolution input: the packages after torch, and a NumPy stand-in."""
+        seen = {}
+
+        def run(cmd, **kwargs):
+            cmd = list(cmd)
+            if cmd[1:3] == ["pip", "compile"]:
+                folder = cmd[cmd.index("--find-links") + 1]
+                seen["wheels"] = sorted(os.listdir(folder))
+                seen["requirements"] = Path(cmd[3]).read_text().split()
+                seen["constraints"] = Path(cmd[cmd.index("--constraint") + 1]).read_text().split()
+                import zipfile
+                with zipfile.ZipFile(os.path.join(folder, "numpy-1.26.4-py3-none-any.whl")) as z:
+                    seen["metadata"] = z.read("numpy-1.26.4.dist-info/METADATA").decode()
+            return types.SimpleNamespace(returncode=0, stdout=COMPILED, stderr="")
+        with patch.object(vm.proc, "run", side_effect=run):
+            pins, error = vm._resolve_against_host_numpy("1.26.4", "venv", "python", {}, {}, True, "uv")
+        self.assertEqual((pins, error), (CHOSEN, ""))
+        self.assertIn("numpy-1.26.4-py3-none-any.whl", seen["wheels"])
+        self.assertIn("Version: 1.26.4", seen["metadata"])
+        self.assertEqual(seen["constraints"], ["numpy==1.26.4"])
+        self.assertFalse(any(r.startswith(("torch", "timm")) for r in seen["requirements"]))
+        self.assertIn("scipy>=1.10", seen["requirements"])
+
+    def test_pip_report_is_read(self):
+        def run(cmd, **kwargs):
+            cmd = list(cmd)
+            if "--report" in cmd:
+                import json
+                Path(cmd[cmd.index("--report") + 1]).write_text(json.dumps({"install": [
+                    {"metadata": {"name": n, "version": v}}
+                    for n, v in (line.split("==") for line in COMPILED.split())]}))
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        with patch.object(vm.proc, "run", side_effect=run):
+            pins, error = vm._resolve_against_host_numpy("1.26.4", "venv", "python", {}, {}, False, None)
+        self.assertEqual((pins, error), (CHOSEN, ""))
+
+    def test_unresolvable_stops_with_a_clear_message(self):
+        failed = types.SimpleNamespace(returncode=1, stdout="", stderr="No solution found")
+        message = self.run_install("1.26.4", proc_run=no_wheel_for_host_numpy(failed), expect_ok=False)
+        self.assertIn("QGIS provides NumPy 1.26.4", message)
+        self.assertIn("NumPy 2", message)
+
+    def test_wheel_available_keeps_the_exact_pin(self):
+        commands = self.run_install("1.26.4")
+        for cmd, pins in commands:
+            self.assertIn("numpy==1.26.4", pins, cmd)
+            self.assertNotIn("scipy==1.17.1", pins, cmd)
+
+
+INSTALLED_PINS = ("torch==2.14.0+cu126", "torchvision==0.29.0+cu126")
+
+
 class ReadinessMessage(unittest.TestCase):
     def check(self, host, ours):
         with tempfile.TemporaryDirectory() as site:
@@ -165,6 +262,12 @@ class ReadinessMessage(unittest.TestCase):
         self.assertEqual(self.check("2.4.4", "2.5.2"), "")
         self.assertEqual(self.check("1.26.4", "1.26.4"), "")
         self.assertEqual(self.check(None, "2.5.2"), "")
+
+    def test_no_hint_when_packages_were_chosen_for_this_numpy(self):
+        with patch.object(vm, "_read_install_marker", return_value={"host_numpy": "1.26.4"}):
+            self.assertEqual(self.check("1.26.4", "2.5.2"), "")
+        with patch.object(vm, "_read_install_marker", return_value={"host_numpy": "1.24.2"}):
+            self.assertIn("QGIS provides NumPy 1.26.4", self.check("1.26.4", "2.5.2"))
 
     def test_status_puts_the_hint_first_and_keeps_details(self):
         failure = (False, "LitePT cannot import scipy.spatial in the plugin environment. "

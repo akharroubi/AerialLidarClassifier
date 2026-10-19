@@ -4,6 +4,34 @@ All notable changes to **LiDAR AI Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] - 2026-10-19
+
+### Fixed
+- **Setup failed on the Flathub QGIS** (QGIS 4.2 on Python 3.13 with its own
+  NumPy 1.26.4) with "Failed to install torchvision: No solution found when
+  resolving dependencies". Since 1.2.1 Setup pinned the plugin environment to
+  QGIS's NumPy 1.x, and NumPy 1.x has no wheel for Python 3.13. When that
+  exact NumPy cannot be installed, Setup now resolves SciPy, laspy, lazrs and
+  numpy_indexed against QGIS's NumPy (with a metadata-only stand-in, never
+  installed) and pins those versions, for example SciPy 1.17.1 for NumPy
+  1.26.4. QGIS keeps importing its own NumPy. Where the exact NumPy has a
+  wheel, the 1.2.1 behaviour is unchanged.
+- **NVIDIA GPU not detected inside the Flathub QGIS.** The sandbox has the GPU
+  and the NVIDIA driver libraries but not the nvidia-smi program. Detection now
+  falls back to the driver's NVML library (`libnvidia-ml.so.1`, `nvml.dll`)
+  when nvidia-smi is missing, fails or times out. nvidia-smi gets 20 s instead
+  of 5 s, enough for a laptop GPU to wake up, and is also looked for in
+  `/usr/bin` and `/usr/local/bin` when QGIS's PATH is reduced.
+- A failed CUDA test inside a Flatpak explains the Flatpak steps (matching
+  NVIDIA Flatpak driver, CUDA device node) instead of "update the driver".
+
+### Changed
+- On RTX 50 series GPUs, Setup says that the Airborne classifier runs with
+  SegFormer 3D on the GPU and that LitePT-L (Mobile mapping, Railway) needs
+  spconv, which has no CUDA 12.8 build yet.
+- The LitePT status no longer asks for a Repair when the environment's NumPy 2
+  was chosen on purpose for QGIS's NumPy 1.x.
+
 ## [1.3.0] - 2026-10-12
 
 ### Added

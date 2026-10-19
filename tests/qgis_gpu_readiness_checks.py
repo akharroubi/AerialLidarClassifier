@@ -58,6 +58,65 @@ class GpuReadiness(unittest.TestCase):
         self.assertEqual(info["compute_cap"], 8.9)
         self.assertEqual(venv._select_cuda_index(info), "cu126")
 
+    RTX5080 = {"name": "NVIDIA GeForce RTX 5080 Laptop GPU", "compute_cap": 12.0,
+               "memory_mb": 16303, "driver_version": "595.99.02"}
+
+    def test_flatpak_without_nvidia_smi_finds_the_gpu_through_nvml(self):
+        """Flathub QGIS: the sandbox has the driver libraries but no nvidia-smi."""
+        with patch.object(venv, "_gpu_detect_cache", None), \
+             patch.object(venv, "_find_nvidia_smi", return_value=None), \
+             patch.object(venv, "_detect_with_nvml", return_value=[dict(self.RTX5080)]) as nvml:
+            self.assertEqual(venv.detect_nvidia_gpu(), (True, self.RTX5080))
+            self.assertEqual(venv.detect_nvidia_gpu(), (True, self.RTX5080))   # cached
+        self.assertEqual(nvml.call_count, 1)
+        index = venv._select_cuda_index(self.RTX5080)
+        self.assertEqual(index, "cu128")
+        self.assertEqual(venv._spconv_extra_for(index), [])
+
+    def test_nvidia_smi_failure_falls_back_to_nvml(self):
+        failed = types.SimpleNamespace(returncode=9, stdout="", stderr="NVML: Unknown Error")
+        for run in ({"return_value": failed},
+                    {"side_effect": venv.proc.TimeoutExpired("nvidia-smi", 20)}):
+            with self.subTest(run=run), patch.object(venv, "_gpu_detect_cache", None), \
+                 patch.object(venv, "_find_nvidia_smi", return_value="nvidia-smi"), \
+                 patch.object(venv.proc, "run", **run), \
+                 patch.object(venv, "_detect_with_nvml", return_value=[dict(self.RTX5080)]):
+                self.assertEqual(venv.detect_nvidia_gpu(), (True, self.RTX5080))
+
+    def test_timeout_without_nvml_is_not_cached(self):
+        with patch.object(venv, "_gpu_detect_cache", None), \
+             patch.object(venv, "_find_nvidia_smi", return_value="nvidia-smi"), \
+             patch.object(venv.proc, "run", side_effect=venv.proc.TimeoutExpired("nvidia-smi", 20)), \
+             patch.object(venv, "_detect_with_nvml", return_value=[]):
+            self.assertEqual(venv.detect_nvidia_gpu(), (False, {}))
+            self.assertIsNone(venv._gpu_detect_cache)
+        with patch.object(venv, "_gpu_detect_cache", None), \
+             patch.object(venv, "_find_nvidia_smi", return_value=None), \
+             patch.object(venv, "_detect_with_nvml", return_value=[]):
+            self.assertEqual(venv.detect_nvidia_gpu(), (False, {}))
+            self.assertEqual(venv._gpu_detect_cache, (False, {}))
+
+    def test_nvml_matches_nvidia_smi_on_this_computer(self):
+        smi, _ = venv._detect_with_nvidia_smi()
+        if not smi:
+            self.skipTest("no NVIDIA GPU on this computer")
+        self.assertEqual(venv._detect_with_nvml(), smi)
+
+    def test_setup_text_for_rtx50_does_not_promise_litept(self):
+        dialog_module = module("dialogs.deps_install_dialog")
+        texts = {}
+        for name, info in (("rtx50", self.RTX5080),
+                           ("ada", {"name": "NVIDIA RTX 3500 Ada Generation Laptop GPU",
+                                    "compute_cap": 8.9, "driver_version": "580.97"})):
+            with patch.object(venv, "detect_nvidia_gpu", return_value=(True, info)):
+                dock = dialog_module.DepsInstallDockWidget()
+                texts[name] = dock.gpu_label.text()
+                dock.deleteLater()
+        self.assertIn("RTX 5080 Laptop GPU (16303 MB)", texts["rtx50"])
+        self.assertIn("SegFormer 3D on the GPU", texts["rtx50"])
+        self.assertNotIn("will both be available", texts["rtx50"])
+        self.assertIn("will both be available", texts["ada"])
+
     def test_detected_but_unchecked_gpu_runs_airborne_on_segformer_and_says_why(self):
         panel_module = module("gui.main_panel")
         readiness = module("utils.backend_readiness")

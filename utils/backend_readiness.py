@@ -47,9 +47,14 @@ def _numpy_mismatch_hint():
     """Explain an environment built for NumPy 2 inside a QGIS with NumPy 1.x."""
     try:
         from importlib import metadata
-        from .venv_manager import _host_numpy_version, get_venv_site_packages
+        from .venv_manager import (
+            _host_numpy_version, _read_install_marker, get_venv_site_packages)
         host = _host_numpy_version()
         if not host or int(host.split(".", 1)[0]) >= 2:
+            return ""
+        # Packages chosen for this NumPy: a NumPy 2 in the environment is
+        # expected where NumPy 1.x has no wheel for the plugin's Python.
+        if (_read_install_marker() or {}).get("host_numpy") == host.split("+", 1)[0]:
             return ""
         ours = next((d.version for d in metadata.distributions(
             name="numpy", path=[get_venv_site_packages()])), None)
