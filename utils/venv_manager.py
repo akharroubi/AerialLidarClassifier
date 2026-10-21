@@ -1352,11 +1352,10 @@ def ensure_venv_packages_available() -> bool:
             f"Added venv site-packages to sys.path: {site_packages}",
             Qgis.MessageLevel.Info)
 
-    # Read by torch when its CUDA allocator starts: expandable segments
-    # keep "reserved" close to "allocated" for the LitePT-L model, whose
-    # sparse-conv and attention temporaries otherwise fragment the cache
-    # (16 GB reserved for 4.5 GB used). Harmless where unsupported.
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    # The CUDA allocator mode (expandable segments or not) is decided by
+    # core/cuda_allocator.py when LitePT-L loads, from what the GPU driver
+    # supports; a process-wide environment default would also fail on
+    # shared vGPUs that have no virtual memory management.
 
     # On Windows, register DLL directories for native packages (torch,
     # etc.) so that the OS loader can find their DLLs when importing

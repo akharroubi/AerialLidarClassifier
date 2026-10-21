@@ -11,7 +11,6 @@ from ..config import PLUGIN_NAME, PLUGIN_VERSION
 REPO_URL = "https://github.com/akharroubi/AerialLidarClassifier"
 TREEAIBOX_URL = "https://github.com/NRCan/TreeAIBox"
 LICENSE_URL = "https://creativecommons.org/licenses/by-nc/4.0/"
-LICENSE_SA_URL = "https://creativecommons.org/licenses/by-nc-sa/4.0/"
 
 
 class AboutDialog(QDialog):
@@ -54,14 +53,13 @@ class AboutDialog(QDialog):
 
         # Description
         desc = QLabel(
-            "Semantic segmentation of airborne, mobile mapping and railway "
+            "Semantic segmentation of airborne and mobile mapping "
             "LiDAR (LAS / LAZ / COPC) with deep-learning models, written to "
             "the LAS classification field.\n\n"
-            "Three classifiers: Airborne, Mobile mapping and Railway, each a "
+            "Two classifiers: Airborne and Mobile mapping, each a "
             "LitePT-L model for NVIDIA GPUs. Without a compatible NVIDIA GPU "
             "the Airborne classifier runs the SegFormer 3D engine (GPU or "
-            "CPU). Mobile mapping (nine classes) and Railway (seven classes) "
-            "have editable codes; rails get the ASPRS Rail code 10 by default."
+            "CPU). Mobile mapping (nine classes) has editable codes."
         )
         desc.setWordWrap(True)
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -95,8 +93,7 @@ class AboutDialog(QDialog):
         license_lbl = QLabel(
             f'<small>Model weights are licensed under <a href="{LICENSE_URL}">'
             "Creative Commons Attribution-NonCommercial 4.0 International "
-            "(CC BY-NC 4.0)</a>, the railway weights under "
-            f'<a href="{LICENSE_SA_URL}">CC BY-NC-SA 4.0</a>; the 3D SegFormer '
+            "(CC BY-NC 4.0)</a>; the 3D SegFormer "
             f'weights are the unchanged <a href="{TREEAIBOX_URL}">TreeAIBox</a> '
             "release.</small>"
         )

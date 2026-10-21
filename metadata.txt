@@ -2,28 +2,26 @@
 name=LiDAR AI Classifier
 qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
-description=Classify airborne, mobile mapping and railway LiDAR point clouds with deep learning (LitePT-L).
-version=1.3.1
+description=Classify airborne and mobile mapping LiDAR point clouds with deep learning (LitePT-L).
+version=1.2.3
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
 email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
 
-about=Classifies airborne, mobile mapping and railway LiDAR point clouds
-    (LAS / LAZ / COPC) with deep-learning models. Three classifiers:
+about=Classifies airborne and mobile mapping LiDAR point clouds
+    (LAS / LAZ / COPC) with deep-learning models. Two classifiers:
     Airborne (LitePT-L at 10 cm on NVIDIA GPUs, the UrbanFiltering 3D
     SegFormer from NRCan's TreeAIBox on other computers; standard ASPRS
-    codes), Mobile mapping (LitePT-L at 5 cm: ground, low and high
+    codes) and Mobile mapping (LitePT-L at 5 cm: ground, low and high
     vegetation, buildings, pole-like objects, vehicles, fences and
-    barriers, wires) and Railway (LitePT-L at 5 cm: ground and track bed,
-    rails, masts and poles, overhead wires, vegetation, fences). Mobile
-    mapping and railway class codes are editable; both need an NVIDIA
-    CUDA GPU.
+    barriers, wires). Mobile mapping class codes are editable; this
+    classifier needs an NVIDIA CUDA GPU.
     External dependencies: PyTorch, laspy, lazrs, timm, scipy and, on
     NVIDIA GPUs, spconv. A one-click setup installs them into a separate
     per-user folder on first use (no admin rights, nothing to
     configure), and the model weights download automatically. Files in
     feet are converted from their CRS; tiling and streaming handle files
-    larger than RAM. Model weights are CC BY-NC 4.0 (railway: CC BY-NC-SA 4.0). Documentation:
+    larger than RAM. Model weights are CC BY-NC 4.0. Documentation:
     https://github.com/akharroubi/AerialLidarClassifier
     The plugin author teaches a live cohort, LiDAR Point Clouds
     Processing in QGIS: https://maven.com/geomatics/qgis3d?utm_source=plugins.qgis.org&utm_medium=listing&utm_campaign=qgis3d
@@ -32,7 +30,7 @@ tracker=https://github.com/akharroubi/AerialLidarClassifier/issues
 repository=https://github.com/akharroubi/AerialLidarClassifier
 homepage=https://github.com/akharroubi/AerialLidarClassifier
 
-tags=lidar,point cloud,classification,semantic segmentation,deep learning,litept,point transformer,segformer,machine learning,pytorch,asprs,las,laz,copc,aerial,treeaibox,mobile mapping,mls,mms,railway,rail,catenary
+tags=lidar,point cloud,classification,semantic segmentation,deep learning,litept,point transformer,segformer,machine learning,pytorch,asprs,las,laz,copc,aerial,treeaibox,mobile mapping,mls,mms
 
 category=Analysis
 icon=icon.png
@@ -43,7 +41,27 @@ hasProcessingProvider=yes
 server=False
 
 changelog=
-    1.3.1
+    1.2.3
+        - Fix: on shared NVIDIA vGPU profiles (an A10-8Q on a cloud
+          desktop, for example) every classification failed at the first
+          GPU allocation with "CUDA driver error: operation not
+          supported". The plugin forced PyTorch's expandable-segments
+          allocator, which needs CUDA virtual memory management; it now
+          asks the driver first and keeps PyTorch's standard allocator
+          where that feature is missing (the log says so).
+        - The dock and Processing offer two classifiers: Airborne and
+          Mobile mapping. SegFormer 3D is no longer a separate choice:
+          the Airborne classifier runs it where LitePT-L cannot (no NVIDIA
+          GPU, "Use GPU" unticked, Apple Silicon, GPUs without spconv) and
+          the status and log say so.
+        - Processing: new algorithm "Classify LiDAR point cloud"
+          (aeriallidar:classify_point_cloud, CLASSIFIER 0 Airborne,
+          1 Mobile mapping). The algorithm of 1.0 to 1.2
+          (aeriallidar:classify_lidar, MODEL) still runs exactly the model
+          it names and is hidden from the Toolbox, so saved models and
+          scripts keep their results.
+        - The output-code editor shows the ASPRS meaning of every code.
+        - Setup states the real download size of the model weights.
         - Setup on the Flathub QGIS (and other QGIS builds with their own
           NumPy 1.x on Python 3.13): installing torchvision failed with
           "No solution found when resolving dependencies", because NumPy 1.x
@@ -56,28 +74,6 @@ changelog=
         - Setup on RTX 50 series GPUs says that the Airborne classifier runs
           with SegFormer 3D on the GPU there (spconv, needed by LitePT-L, has
           no CUDA 12.8 build yet).
-    1.3.0
-        - New Railway classifier: LitePT-L Railway (5 cm, XYZ only) with
-          seven classes: ground and track bed, rail, pole (catenary masts,
-          portals, supports), wire, vegetation, fence, other. Default codes
-          follow ASPRS where a class exists (Rail 10, Wire conductor 14,
-          Transmission tower 15 for masts); fences get 64, the first
-          user-definable code. Every code is editable, as for mobile
-          mapping. NVIDIA CUDA GPU. The weights download automatically
-          and are SHA-256 verified.
-        - The dock and Processing offer three classifiers: Airborne, Mobile
-          mapping and Railway. SegFormer 3D is no longer a separate choice:
-          the Airborne classifier runs it where LitePT-L cannot (no NVIDIA
-          GPU, Apple Silicon, GPUs without spconv) and the status and log
-          say so.
-        - Processing: new algorithm "Classify LiDAR point cloud"
-          (aeriallidar:classify_point_cloud, CLASSIFIER 0 Airborne,
-          1 Mobile mapping, 2 Railway). The algorithm of 1.0 to 1.2
-          (aeriallidar:classify_lidar, MODEL) still runs exactly the model
-          it names (3 is LitePT-L Railway) and is hidden from the Toolbox,
-          so saved models and scripts keep their results.
-        - The output-code editor shows the ASPRS meaning of every code.
-        - Setup states the real download size of the model weights.
     1.2.1
         - Fix: on QGIS builds that ship NumPy 1.x, the LitePT-L models
           could not load ("module 'numpy' has no attribute 'long'"):

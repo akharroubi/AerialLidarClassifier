@@ -1,5 +1,5 @@
 """Edit the LAS classification output codes of a model with editable codes
-(LitePT-L Mobile Mapping, LitePT-L Railway)."""
+(LitePT-L Mobile Mapping)."""
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (

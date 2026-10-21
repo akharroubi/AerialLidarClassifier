@@ -1019,8 +1019,8 @@ class ClassifierDockWidget(QDockWidget):
     def _select_initial_model(self):
         """Restore the saved classifier (1.1 and 1.2 saved a model id).
 
-        Mobile Mapping and Railway stay selected on a computer that cannot
-        run them: the gate explains what is missing instead of silently
+        Mobile Mapping stays selected on a computer that cannot
+        run it: the gate explains what is missing instead of silently
         switching to another acquisition type.
         """
         chosen = None

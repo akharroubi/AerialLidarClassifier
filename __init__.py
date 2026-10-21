@@ -1,9 +1,9 @@
 """LiDAR AI Classifier - QGIS Plugin.
 
-Deep-learning semantic segmentation of airborne, mobile mapping and railway
+Deep-learning semantic segmentation of airborne and mobile mapping
 LiDAR with separate LitePT-L models (prs-eth/LitePT) or the 3D SegFormer from the
 TreeAIBox project (NRCan, Crown Copyright, Government of Canada). Model
-weights are CC BY-NC 4.0 (railway: CC BY-NC-SA 4.0); see core/registry.py.
+weights are CC BY-NC 4.0; see core/registry.py.
 """
 
 import os

@@ -12,9 +12,9 @@ Runs spatial inference on one tile at a time:
 4. average the softmax probabilities of every visit per representative,
    argmax, and project to the raw points.
 
-Returns plugin model class ids 1..num_classes. Airborne has 8 classes, Mobile
-Mapping 9 and Railway 7. These are always the zero-based network output
-indices plus one, including Mobile Mapping's ground and unknown classes. Zero
+Returns plugin model class ids 1..num_classes. Airborne has 8 classes and
+Mobile Mapping 9. These are always the zero-based network output indices
+plus one, including Mobile Mapping's ground and unknown classes. Zero
 remains reserved for no prediction; coverage is complete or an error is raised.
 
 CUDA only: the sparse convolutions come from spconv, which ships no CPU or
@@ -136,6 +136,12 @@ class LitePTBackend:
         )
         head.load_state_dict({k: v.float() for k, v in head_state.items()}, strict=True)
 
+        # Before the first GPU allocation: expandable segments where the
+        # driver supports them (they keep "reserved" close to "allocated" on
+        # this model), the standard allocator elsewhere (shared vGPUs).
+        from ..cuda_allocator import configure_cuda_allocator
+        configure_cuda_allocator(torch, log=self.log)
+
         backbone.to(device).eval()
         head.to(device).eval()
         # Disable every serialization shuffle, including GridPooling's,
@@ -145,16 +151,6 @@ class LitePTBackend:
                 module.shuffle_orders = False
         self.model = (backbone, head)
         self.device = device
-
-        # Fragmentation from the sparse-conv and attention temporaries
-        # makes the caching allocator reserve far more than it uses (16 GB
-        # reserved for 4.5 GB allocated on the validated 70k-point crops).
-        # Expandable segments keep reserved close to allocated, which is
-        # what smaller cards need. Best effort: a private torch API.
-        try:
-            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
-        except Exception:
-            _LOG.debug("Ignored non-fatal error", exc_info=True)
 
         # Each model has its own spatial context and memory requirements.
         # Retain the Airborne policy when no card profiles are present.
@@ -196,7 +192,7 @@ class LitePTBackend:
 
     def _fallback_hint(self) -> str:
         """Advice for when this model cannot run: only the Airborne classifier
-        has another engine; mobile mapping and railway data need this model."""
+        has another engine; mobile mapping data needs this model."""
         try:
             from ..registry import classifier_for_model
             classifier = classifier_for_model(self.card.get("id"))

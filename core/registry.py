@@ -6,7 +6,7 @@ which LAS dimensions and compute devices it needs, and how it is licensed.
 The dock, the Processing algorithm, the model manager and the installer
 all read this table; nothing else in the plugin hard-codes a model.
 
-Users choose a classifier (Airborne, Mobile mapping, Railway), declared at
+Users choose a classifier (Airborne, Mobile mapping), declared at
 the end of this file; each classifier runs the first of its models
 (engines) that works on the computer.
 """
@@ -197,58 +197,10 @@ LITEPT_L_MLS = ModelSpec(
 )
 
 
-# Railway logits 0..6 become plugin model IDs 1..7. Default codes follow the
-# ASPRS LAS 1.4 table where a class exists: ground 2, rail 10, wire 14
-# (conductor), mast/pole 15 (transmission tower, the structure that carries
-# the conductors), vegetation 5 as in the airborne models. Fences have no
-# ASPRS class and take 64, the first user-definable code; other objects are
-# 1 (unclassified). All codes are editable.
-_RAIL_MAPPING: Dict[int, ClassInfo] = {
-    1: ClassInfo(1, "Ground", 2, "#A87E55"),
-    2: ClassInfo(2, "Rail", 10, "#E31A1C"),
-    3: ClassInfo(3, "Pole", 15, "#FF00FF"),
-    4: ClassInfo(4, "Wire", 14, "#FFA500"),
-    5: ClassInfo(5, "Vegetation", 5, "#228B22"),
-    6: ClassInfo(6, "Fence", 64, "#00CED1"),
-    7: ClassInfo(7, "Other", 1, "#C0C0C0"),
-}
-
-LITEPT_L_RAIL = ModelSpec(
-    id="litept_l_rail_5cm",
-    display_name="LitePT-L Railway (5 cm)",
-    family="litept",
-    short_name="LitePT-L Railway",
-    description=(
-        "Point transformer for railway corridor LiDAR at 5 cm, using XYZ only. "
-        "Seven classes: ground (with track bed and platforms), rails, poles "
-        "(catenary masts, portals and their supports), overhead wires, "
-        "vegetation, fences and barriers, and other objects. Output codes are editable."
-    ),
-    resolution="5 cm",
-    weights_filename="litept_l_rail_5cm_fp16.pth",
-    weights_urls=(
-        f"{_GITHUB_RELEASES}/v1.3/litept_l_rail_5cm_fp16.pth",
-    ),
-    weights_sha256="bd3356898bcf79b04996493a89f45393f8c1868a0fd2e712792179d298f27237",  # noqa: E501  # pragma: allowlist secret
-    weights_size_mb=171.8,
-    config_filename="litept_l_rail_5cm.json",
-    class_mapping=_RAIL_MAPPING,
-    class_summary=(
-        "Ground 2, Rail 10, Pole 15, Wire 14, Vegetation 5, Fence 64, Other 1; "
-        "every code is editable (64 is user-defined)"
-    ),
-    supported_devices=("cuda",),
-    extra_packages=("spconv", "scipy"),
-    licence="Code MIT (prs-eth/LitePT); weights CC BY-NC-SA 4.0 (maintainer model)",
-    attribution="LitePT architecture: Photogrammetry and Remote Sensing Lab, ETH Zurich. Model weights © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège.",
-    homepage="https://github.com/prs-eth/LitePT",
-    editable_codes=True,
-)
-
 # Every model (engine). Append only: the legacy Processing MODEL parameter
 # of 1.1 and 1.2 stores an index into this tuple.
 MODELS: Tuple[ModelSpec, ...] = (
-    LITEPT_L_DALES, SEGFORMER3D_URBANFILTERING, LITEPT_L_MLS, LITEPT_L_RAIL,
+    LITEPT_L_DALES, SEGFORMER3D_URBANFILTERING, LITEPT_L_MLS,
 )
 DEFAULT_MODEL_ID = LITEPT_L_DALES.id
 FALLBACK_MODEL_ID = SEGFORMER3D_URBANFILTERING.id
@@ -303,15 +255,9 @@ MOBILE_MAPPING = Classifier(
     description="Street mobile mapping LiDAR (MLS). LitePT-L at 5 cm, NVIDIA CUDA GPU.",
     engines=(LITEPT_L_MLS,),
 )
-RAILWAY = Classifier(
-    id="railway",
-    display_name="Railway classifier",
-    description="Railway corridor LiDAR. LitePT-L at 5 cm, NVIDIA CUDA GPU.",
-    engines=(LITEPT_L_RAIL,),
-)
 
 # Processing saves CLASSIFIER as an index: append only.
-CLASSIFIERS: Tuple[Classifier, ...] = (AIRBORNE, MOBILE_MAPPING, RAILWAY)
+CLASSIFIERS: Tuple[Classifier, ...] = (AIRBORNE, MOBILE_MAPPING)
 DEFAULT_CLASSIFIER_ID = AIRBORNE.id
 
 

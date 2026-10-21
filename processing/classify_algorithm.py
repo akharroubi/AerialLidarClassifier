@@ -1,4 +1,4 @@
-"""Processing algorithms: classify airborne, Mobile Mapping or railway LiDAR.
+"""Processing algorithms: classify airborne or Mobile Mapping LiDAR.
 
 Wrap the same classification pipeline used by the interactive dock so it
 can be invoked from the Processing Toolbox, the Graphical Modeler and the
@@ -6,9 +6,9 @@ can be invoked from the Processing Toolbox, the Graphical Modeler and the
 
 Two algorithms share everything but the model choice:
 
-* ``aeriallidar:classify_point_cloud`` (1.3): ``CLASSIFIER`` picks Airborne,
-  Mobile mapping or Railway; Airborne runs the first of its engines that
-  works on the computer.
+* ``aeriallidar:classify_point_cloud`` (1.2.3): ``CLASSIFIER`` picks Airborne
+  or Mobile mapping; Airborne runs the first of its engines that works on
+  the computer.
 * ``aeriallidar:classify_lidar`` (1.0 to 1.2): ``MODEL`` picks one model
   (engine) by its registry index. Kept unchanged for saved models, scripts
   and ``qgis_process`` calls, flagged deprecated so the Toolbox lists only
@@ -155,10 +155,7 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             "when an assigned code exceeds the 5-bit legacy limit of point "
             "formats 0-5, so any classification code 0-255 is encoded losslessly. "
             "Mobile Mapping defaults 64, 65 and 66 are project-defined codes for "
-            "pole-like objects, vehicles and fences/barriers. Railway uses the ASPRS "
-            "classes Ground 2, Rail 10, Wire conductor 14 and Transmission tower 15 "
-            "(masts and poles), High vegetation 5 for vegetation, 64 for fences (no ASPRS "
-            "class; first user-definable code) and Unclassified 1 for other objects.</p>"
+            "pole-like objects, vehicles and fences/barriers.</p>"
             "<h4>Parameters</h4>"
             "<ul>"
             "<li><b>Input point cloud</b> - a single LAS, LAZ or "
@@ -170,15 +167,15 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             "extension. Default <code>_classified</code>.</li>"
             "<li><b>Classification field</b> - the dimension to write "
             "predictions into. Default <code>classification</code> "
-            "(ASPRS standard). Mobile Mapping and Railway always write to this existing field. "
+            "(ASPRS standard). Mobile Mapping always writes to this existing field. "
             "Airborne models also support a new name to store raw model IDs in an extra-byte field.</li>"
             "<li><b>Output codes (JSON)</b> - optional overrides keyed "
             "by model class ID, for example <code>{\"5\": 64, \"6\": 65, \"7\": 66}</code>. "
             "Use the model IDs from the selected model's table above (1-9 for Mobile "
-            "Mapping, 1-7 for Railway). Values must be "
+            "Mapping). Values must be "
             "integers 0-255; omitted classes use model defaults. Repeated values "
-            "merge classes. This parameter applies only to the Mobile Mapping and Railway "
-            "models and the existing classification field. Model IDs identify mapping rows; "
+            "merge classes. This parameter applies only to the Mobile Mapping "
+            "model and the existing classification field. Model IDs identify mapping rows; "
             "no extra label field is added. "
             "Processing uses this explicit parameter, independently of dock settings.</li>"
             "<li><b>Compute device</b> - <i>Auto</i> uses CUDA when "
@@ -221,7 +218,7 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             "<h4>Notes</h4>"
             "<ul>"
             "<li>Airborne model mappings retain their established defaults. "
-            "Mobile Mapping and Railway output codes can be customized with the JSON parameter. "
+            "Mobile Mapping output codes can be customized with the JSON parameter. "
             "The actual mapping and model identity are recorded in the output metadata.</li>"
             "</ul>")
 
@@ -279,7 +276,7 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
         self._add_advanced(
             QgsProcessingParameterString(
                 self.OUTPUT_CODES_JSON,
-                self.tr("Mobile Mapping / Railway output codes (JSON; blank = model defaults)"),
+                self.tr("Mobile Mapping output codes (JSON; blank = model defaults)"),
                 defaultValue="",
                 optional=True,
             )
@@ -864,7 +861,7 @@ class _PointCloud3DPostProcessor(QgsProcessingLayerPostProcessorInterface):
 
 
 class ClassifyPointCloudAlgorithm(_ClassifyAlgorithmBase):
-    """Version 1.3 interface: choose a classifier (acquisition type)."""
+    """Version 1.2.3 interface: choose a classifier (acquisition type)."""
 
     def createInstance(self):  # noqa: N802
         return ClassifyPointCloudAlgorithm()
@@ -873,15 +870,14 @@ class ClassifyPointCloudAlgorithm(_ClassifyAlgorithmBase):
         return "classify_point_cloud"
 
     def displayName(self) -> str:  # noqa: N802
-        return self.tr("Classify LiDAR point cloud (airborne, mobile mapping, railway)")
+        return self.tr("Classify LiDAR point cloud (airborne, mobile mapping)")
 
     def _intro_help(self) -> str:
         return (
-            "<p>Deep-learning semantic segmentation of airborne, Mobile Mapping and "
-            "railway point clouds (LAS / LAZ / COPC). Choose the classifier for the "
-            "acquisition type: Airborne, Mobile mapping or Railway. The Mobile Mapping "
-            "(nine classes) and Railway (seven classes) models have editable output "
-            "codes.</p>"
+            "<p>Deep-learning semantic segmentation of airborne and Mobile Mapping "
+            "point clouds (LAS / LAZ / COPC). Choose the classifier for the "
+            "acquisition type: Airborne or Mobile mapping. The Mobile Mapping "
+            "model (nine classes) has editable output codes.</p>"
         )
 
     def _models_help(self) -> str:
@@ -889,8 +885,8 @@ class ClassifyPointCloudAlgorithm(_ClassifyAlgorithmBase):
 
     def _choice_help(self) -> str:
         return (
-            "<li><b>Classifier</b> - Airborne (0), Mobile mapping (1) or Railway (2). "
-            "Mobile mapping and Railway need an NVIDIA CUDA GPU. Airborne uses "
+            "<li><b>Classifier</b> - Airborne (0) or Mobile mapping (1). "
+            "Mobile mapping needs an NVIDIA CUDA GPU. Airborne uses "
             "LitePT-L on NVIDIA CUDA GPUs and the SegFormer 3D engine elsewhere; "
             "the log says which engine ran and why. "
             "The weights download automatically the first time a model is used "
@@ -913,7 +909,7 @@ class ClassifyPointCloudAlgorithm(_ClassifyAlgorithmBase):
 
     def _requested_engines(self, parameters, context, feedback):
         index = self._enum_index(parameters, self.CLASSIFIER, context, len(CLASSIFIERS),
-                                 "0 Airborne, 1 Mobile mapping, 2 Railway")
+                                 "0 Airborne, 1 Mobile mapping")
         classifier = CLASSIFIERS[index]
         return classifier, classifier.engines
 
@@ -958,7 +954,7 @@ class ClassifyLidarAlgorithm(_ClassifyAlgorithmBase):
     def _choice_help(self) -> str:
         return (
             "<li><b>Model</b> - 0 LitePT-L Airborne, 1 SegFormer 3D Airborne, "
-            "2 LitePT-L Mobile Mapping, 3 LitePT-L Railway. The LitePT-L models need an "
+            "2 LitePT-L Mobile Mapping. The LitePT-L models need an "
             "NVIDIA CUDA GPU. The weights download automatically the first time a model "
             "is used (SHA-256 verified).</li>"
         )
@@ -977,5 +973,5 @@ class ClassifyLidarAlgorithm(_ClassifyAlgorithmBase):
     def _requested_engines(self, parameters, context, feedback):
         index = self._enum_index(
             parameters, self.MODEL, context, len(MODELS),
-            "0 LitePT-L Airborne, 1 SegFormer 3D, 2 LitePT-L Mobile Mapping, 3 LitePT-L Railway")
+            "0 LitePT-L Airborne, 1 SegFormer 3D, 2 LitePT-L Mobile Mapping")
         return None, (MODELS[index],)

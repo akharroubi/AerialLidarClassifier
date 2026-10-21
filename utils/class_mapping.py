@@ -5,7 +5,6 @@ import json
 
 
 MOBILE_MAPPING_MODEL_ID = "litept_l_mls_5cm"
-RAILWAY_MODEL_ID = "litept_l_rail_5cm"
 
 
 # ASPRS LAS 1.4 R15 standard classes (Table 17).

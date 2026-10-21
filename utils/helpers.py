@@ -26,8 +26,8 @@ def enable_point_cloud_3d_rendering(layer, class_mapping=None, classify_2d=False
     """Style actual classification codes, or mirror existing styling for raw fields.
 
     Pass the completed run's mapping only when it wrote the standard LAS
-    classification field. Models with editable codes (Mobile Mapping,
-    Railway) also use these categories in 2D.
+    classification field. Models with editable codes (Mobile Mapping)
+    also use these categories in 2D.
     No point data is changed. Missing optional 3D support leaves 2D usable.
     """
     source_2d = None

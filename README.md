@@ -2,8 +2,8 @@
 
 <p align="center"><img src="assets/logo_128.png" alt="LiDAR AI Classifier logo" width="128" height="128"></p>
 
-Deep-learning semantic segmentation of airborne, mobile mapping and railway
-LiDAR (LAS / LAZ / COPC) inside QGIS 3.34+ and QGIS 4, with three classifiers:
+Deep-learning semantic segmentation of airborne and mobile mapping
+LiDAR (LAS / LAZ / COPC) inside QGIS 3.34+ and QGIS 4, with two classifiers:
 
 - **Airborne classifier**: LitePT-L Airborne, a point transformer from
   [prs-eth/LitePT](https://github.com/prs-eth/LitePT) using 10 cm voxels and
@@ -16,9 +16,6 @@ LiDAR (LAS / LAZ / COPC) inside QGIS 3.34+ and QGIS 4, with three classifiers:
   architecture with 5 cm voxels. Nine classes (ground, low vegetation,
   high vegetation, building, pole-like, vehicle, fence/barrier, wire, unknown),
   XYZ only, with editable output codes. NVIDIA GPU required.
-- **Railway classifier** (new in 1.3): LitePT-L Railway, 5 cm voxels. Seven
-  classes (ground and track bed, rail, pole, wire, vegetation, fence, other),
-  XYZ only, with editable output codes. NVIDIA GPU required.
 
 Until version 1.1 the plugin was called **Aerial LiDAR Classifier**. The
 installation folder is still `Aerial_LiDAR_Classifier`, so an update keeps
@@ -27,14 +24,14 @@ saved settings, downloaded weights and Processing models.
 [![QGIS](https://img.shields.io/badge/QGIS-3.34%20to%204.x-1f9b4e)](https://qgis.org)
 [![Python](https://img.shields.io/badge/python-3.9%E2%80%933.13-3776AB)](https://www.python.org)
 [![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-blue)](LICENSE)
-[![Models: CC BY-NC 4.0 / BY-NC-SA 4.0](https://img.shields.io/badge/models-CC%20BY--NC%20%2F%20BY--NC--SA%204.0-lightgrey)](#model-weights)
+[![Models: CC BY-NC 4.0](https://img.shields.io/badge/models-CC%20BY--NC%204.0-lightgrey)](#model-weights)
 [![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20Linux%20%7C%20macOS-555)](#hardware-and-platform-support)
 
 Every input point is written back with a LAS classification code. The airborne
 classifier uses the [ASPRS LAS 1.4](https://www.asprs.org/divisions-committees/lidar-division/laser-las-file-format-exchange-activities)
-codes. The mobile mapping and railway classifiers use ASPRS codes where they
-exist (rails get the ASPRS *Rail* code 10) and the first user-definable codes,
-from 64 up, for the rest; every code is editable.
+codes. The mobile mapping classifier uses ASPRS codes where they exist and
+the first user-definable codes, from 64 up, for the rest; every code is
+editable.
 The classified output is an ordinary LAS or LAZ file. For QGIS builds that
 reject files with existing extra attributes, the plugin can prepare a COPC
 viewing copy when loading the result.
@@ -69,11 +66,11 @@ viewing copy when loading the result.
 
 ## Features
 
-- **Three classifiers, one interface.** Pick Airborne, Mobile mapping or
-  Railway in the dock or with the `CLASSIFIER` parameter in Processing. If the
+- **Two classifiers, one interface.** Pick Airborne or Mobile mapping in
+  the dock or with the `CLASSIFIER` parameter in Processing. If the
   selected classifier cannot run on the computer, the dock says why; the
   Airborne classifier then runs its SegFormer 3D engine and says so.
-- **Your class codes for mobile mapping and railway.** Each class gets the
+- **Your class codes for mobile mapping.** Each class gets the
   code you choose (0 to 255), saved per classifier, or merged with another
   class by giving both the same code. The editor shows the ASPRS meaning of
   every code.
@@ -138,8 +135,8 @@ downloads:
   [`uv`](https://github.com/astral-sh/uv), a fast package installer,
 - PyTorch and the LiDAR packages (~1 to 3 GB depending on CUDA), plus `spconv`
   (~100 MB) on NVIDIA GPUs,
-- the model weights: LitePT-L Airborne, Mobile Mapping and Railway (~172 MB
-  each) on NVIDIA GPUs, SegFormer 3D (~18 MB) everywhere.
+- the model weights: LitePT-L Airborne and Mobile Mapping (~172 MB each)
+  on NVIDIA GPUs, SegFormer 3D (~18 MB) everywhere.
 
 It usually takes 5 to 15 minutes, and QGIS stays usable meanwhile. Everything
 is stored under `~/.qgis_aerial_lidar_classifier/` (the weights under the
@@ -157,9 +154,9 @@ never switches from GPU to CPU by itself.
 2. Drag `.las` / `.laz` / `.copc.laz` files into the input list, or pick point
    cloud layers already loaded in the project.
 3. Choose the classifier for the acquisition: **Airborne** for aerial LiDAR,
-   **Mobile mapping** for street mobile mapping (vehicle, backpack) data,
-   **Railway** for railway corridors. For mobile mapping and railway,
-   *Class codes: Edit output codes...* sets the code of each class.
+   **Mobile mapping** for street mobile mapping (vehicle, backpack) data.
+   For mobile mapping, *Class codes: Edit output codes...* sets the code of
+   each class.
 4. Choose an output folder (it defaults to the folder of the first file).
 5. Click **Run classification**.
 
@@ -182,7 +179,7 @@ time and an *Open folder* button.
   pickers.
 - **Output**: folder, filename suffix (default `_classified`), label field
   (default `classification`; Airborne only), *Class codes: Edit output
-  codes...* (Mobile mapping and Railway), and *Load classified files in QGIS*.
+  codes...* (Mobile mapping), and *Load classified files in QGIS*.
 - **Advanced parameters** (collapsed): *Use GPU*, *Clear GPU memory*, tiling
   (auto size or tile size in metres, buffer in metres), *Streaming I/O*, and
   *Input units*.
@@ -204,11 +201,11 @@ qgis_process run aeriallidar:classify_point_cloud -- \
 | Parameter | Values |
 |-----------|--------|
 | `INPUT` | LAS, LAZ or COPC file |
-| `CLASSIFIER` | `0` Airborne, `1` Mobile mapping, `2` Railway |
+| `CLASSIFIER` | `0` Airborne, `1` Mobile mapping |
 | `OUTPUT_FOLDER`, `SUFFIX` | output location, default suffix `_classified` |
 | `DEVICE` | `0` Auto, `1` GPU (CUDA), `2` CPU, `3` GPU (Apple MPS) |
 | `FIELD_NAME` | `classification` (default). The Airborne classifier also accepts a new name (raw model classes in an extra field) |
-| `OUTPUT_CODES_JSON` | mobile mapping and railway, optional: codes keyed by model class ID, e.g. `{"5":70,"6":71,"7":72}`; blank keeps the defaults |
+| `OUTPUT_CODES_JSON` | mobile mapping, optional: codes keyed by model class ID, e.g. `{"5":70,"6":71,"7":72}`; blank keeps the defaults |
 | `LOAD_AS_LAYER` | add the result to the project |
 | `TILE_ENABLED`, `TILE_SIZE_M`, `TILE_BUFFER_M` | tiling; size `0` is automatic (about 10 M points per tile), buffer default 50 m |
 | `TILE_STREAMING` | streaming I/O for files larger than RAM |
@@ -223,15 +220,6 @@ qgis_process run aeriallidar:classify_point_cloud -- \
   'OUTPUT_CODES_JSON={"5":70,"6":71,"7":72}'
 ```
 
-or railway, with fences written as 70 and other objects as 71 (both
-user-defined codes):
-
-```bash
-qgis_process run aeriallidar:classify_point_cloud -- \
-  INPUT=/data/line.laz OUTPUT_FOLDER=/data/classified CLASSIFIER=2 \
-  'OUTPUT_CODES_JSON={"6":70,"7":71}'
-```
-
 With the Airborne classifier the log names the engine that ran, and why when
 it is SegFormer 3D. The weights download automatically on the first run of a
 model. The dependencies themselves are installed once from the dock's Setup
@@ -240,7 +228,7 @@ panel.
 **Scripts and models from versions 1.0 to 1.2** keep working: they use the
 algorithm `aeriallidar:classify_lidar`, whose `MODEL` parameter selects one
 model by index (`0` LitePT-L Airborne, `1` SegFormer 3D Airborne, `2` LitePT-L
-Mobile Mapping, and now `3` LitePT-L Railway) and runs exactly that model. It is
+Mobile Mapping) and runs exactly that model. It is
 hidden from the Toolbox but still runs from saved models, Python and
 `qgis_process`, and a saved model step keeps its model when edited.
 
@@ -248,9 +236,9 @@ hidden from the Toolbox but still runs from saved models, Python and
 
 ## Hardware and platform support
 
-| Environment | Status for 1.3.0 |
+| Environment | Status for 1.2.3 |
 |-------------|------------------|
-| Windows 10, QGIS 3.44.10 LTR (Qt 5.15), Python 3.12, RTX 3090 | Tested: the three classifiers and all four models on CUDA, the Airborne classifier's SegFormer 3D engine on the CPU, dock, Processing, Graphical Modeler, `qgis_process`, data-integrity suite |
+| Windows 10, QGIS 3.44.10 LTR (Qt 5.15), Python 3.12, RTX 3090 | Tested: the two classifiers and all three models on CUDA, the Airborne classifier's SegFormer 3D engine on the CPU, dock, Processing, Graphical Modeler, `qgis_process`, data-integrity suite |
 | Windows 10, QGIS 4.2.2 (Qt 6.11, PyQt 6.11), Python 3.12, RTX 3090 | Tested: the same as QGIS 3.44 |
 | Linux x86_64 (Ubuntu under WSL), Python 3.10 | Installer and runtime tested outside the QGIS GUI |
 | macOS, Apple Silicon (MPS) | Code path present, not tested; reports welcome |
@@ -261,11 +249,11 @@ This installer selects `spconv` packages for its `cu118`, `cu121`, `cu124`
 and `cu126` setup paths. Its Blackwell setup path uses `cu128` and does not
 install `spconv`. The dock checks the installed packages and reports why a
 selected classifier is unavailable. The Airborne classifier then runs its
-SegFormer 3D engine; the Mobile mapping and Railway classifiers need LitePT-L.
+SegFormer 3D engine; the Mobile mapping classifier needs LitePT-L.
 
 LitePT-L Airborne processes crops of up to 70,000 points within 30 m; cards
-under 8 GB use 35,000-point / 20 m crops. LitePT-L Mobile Mapping and
-LitePT-L Railway process crops of up to 240,000 points within 12 m; cards
+under 8 GB use 35,000-point / 20 m crops. LitePT-L Mobile Mapping
+processes crops of up to 240,000 points within 12 m; cards
 under 16 GB use 120,000 points / 9 m and cards with 8 GB or less 50,000
 points / 6 m. A crop that runs
 out of memory is retried with half as many points, down to 5,000. Smaller crops give
@@ -285,23 +273,6 @@ You never need to install CUDA yourself: the PyTorch wheels carry it.
 
 With the default `classification` field, points get the codes below.
 
-**Railway classifier**, LitePT-L Railway (editable codes):
-
-| Model class | Name       | Default code | Meaning |
-|------------:|------------|-------------:|---------|
-| 1           | Ground     | 2            | Ground (terrain, track bed, ballast, sleepers, platforms, roads) |
-| 2           | Rail       | 10           | Rail (running rails) |
-| 3           | Pole       | 15           | Transmission Tower (catenary masts, portals, cantilevers, utility poles) |
-| 4           | Wire       | 14           | Wire, Conductor (contact and messenger wires, droppers, feeders, power and telecom lines) |
-| 5           | Vegetation | 5            | High Vegetation (trees, shrubs and low vegetation) |
-| 6           | Fence      | 64           | user-defined (fences, noise barriers, guardrails) |
-| 7           | Other      | 1            | Unclassified (buildings, signals, signs, cabinets, trains, vehicles, people) |
-
-ASPRS LAS 1.4 has a *Rail* class (10), and masts and poles carry the overhead
-conductors as a *Transmission Tower* (15) does, so these codes are used by
-default. There is no ASPRS code for fences: they get 64, the first
-user-definable code.
-
 **Mobile mapping classifier**, LitePT-L Mobile Mapping (editable codes):
 
 | Model class | Name            | Default code | Meaning                         |
@@ -319,7 +290,7 @@ user-definable code.
 ASPRS LAS 1.4 has no code for poles, vehicles or fences, so they get the
 first codes of the user-definable range 64 to 255 by default.
 
-To change any code, choose the Mobile mapping or Railway classifier and click
+To change any code, choose the Mobile mapping classifier and click
 *Class codes: Edit output codes...*: the table takes values from 0 to 255,
 shows the ASPRS meaning of each value, is saved per classifier, and *Reset to
 model defaults* restores it. Giving two classes the same code merges them (for
@@ -327,7 +298,7 @@ example vehicles and unknown both to 1). In Processing, pass the codes as
 `OUTPUT_CODES_JSON` keyed by model class, for example `{"5":70,"6":71,"7":72}`;
 omitted classes keep their default, and the dock's saved table is not used.
 
-The mobile mapping and railway classifiers always write to the
+The mobile mapping classifier always writes to the
 `classification` field. Codes above 31 need LAS 1.4; legacy files are upgraded
 automatically (see below).
 
@@ -373,7 +344,7 @@ What the output keeps:
 - the point format, unless a code above 31 needs LAS 1.4 (formats 0/1 become
   6, 2/3 become 7, 4 becomes 9, 5 becomes 10; RGB is kept). The legacy scan
   angle becomes the LAS 1.4 scan angle (rounded to at most 0.003 degrees); the
-  mobile mapping and railway classifiers add no extra dimension, the airborne
+  mobile mapping classifier adds no extra dimension, the airborne
   classifier also keeps the original value in a `scan_angle_rank` extra field.
 
 A small VLR (`AerialLiDAR`, record 1) records the model, its weights hash, the
@@ -462,9 +433,9 @@ voxelised on a 0.3 x 0.3 x 0.2 m grid (occupancy only), the grid is cut into
 overlapping blocks of 112 x 112 x 256 voxels, the network labels every occupied
 voxel (7 classes), and each point takes the label of its voxel.
 
-**LitePT-L Mobile Mapping** and **LitePT-L Railway** use the same
+**LitePT-L Mobile Mapping** uses the same
 architecture and the same steps with 5 cm voxels and crops of at most 240,000
-points within 12 m (centres 11 m apart), one pass. Their features are
+points within 12 m (centres 11 m apart), one pass. Its features are
 geometric only (height above the crop), so intensity, colour and returns are
 not needed.
 
@@ -473,22 +444,6 @@ CUDA GPU, *Use GPU* ticked, `spconv` loaded) and SegFormer 3D otherwise. The
 VLR of each output records which model wrote it.
 
 All models run inside a QGIS background task, so QGIS stays responsive.
-
-### Railway classifier: scope and limits
-
-- Made for railway corridors scanned by mobile mapping systems (train-mounted
-  or similar). Dense helicopter LiDAR and static terrestrial scans of tracks
-  and stations gave usable results in visual checks.
-- Not tested on sparse airborne LiDAR (below about 50 points/m²) or in tunnels.
-- Fences that stand in hedges, and barriers that look like fences, are the
-  hardest class: check them where they matter.
-- *Other* collects every remaining object (buildings, signals, cabinets,
-  trains...), so it is a broad class.
-- Very large files: use tiling (a buffer of 10 m or more keeps context at the
-  tile edges) or streaming.
-- The results are provided as is, without warranty (see the licences). Check
-  them before using them for asset management, maintenance planning or any
-  safety-related work.
 
 ---
 
@@ -514,8 +469,8 @@ Dependencies*, or click *Install the CPU version instead*.
 ### "Needs an NVIDIA GPU", "GPU use is switched off", "LitePT dependencies missing" or "SegFormer 3D engine"
 
 The LitePT-L models run only on NVIDIA GPUs, with the `spconv` library of the
-plugin's environment. Where they cannot run, the Mobile mapping and Railway
-classifiers are unavailable and the Airborne classifier uses SegFormer 3D; the
+plugin's environment. Where they cannot run, the Mobile mapping classifier
+is unavailable and the Airborne classifier uses SegFormer 3D; the
 status tooltip and the log say why.
 
 - *GPU use is switched off*: tick *Use GPU* in *Advanced parameters*.
@@ -607,17 +562,6 @@ PDAL (the official Windows and macOS installers do).
 
 The weights download automatically. The URLs below are for offline machines.
 
-**LitePT-L Railway (5 cm)**: Railway classifier
-
-| Field         | Value |
-|---------------|-------|
-| File          | `litept_l_rail_5cm_fp16.pth` (stored as float16, run in float32) |
-| Size          | ~172 MB |
-| SHA-256       | starts with `bd3356898bcf`; the full value is in `core/registry.py` and the plugin checks it automatically |
-| URL           | [release v1.3 of this repository](https://github.com/akharroubi/AerialLidarClassifier/releases/tag/v1.3) |
-| License       | [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) |
-| Copyright     | © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège |
-
 **LitePT-L Mobile Mapping (MLS, 5 cm)**: Mobile mapping classifier
 
 | Field         | Value |
@@ -680,11 +624,11 @@ And, optionally, the plugin itself:
 @software{kharroubi_aerial_lidar_classifier,
   author       = {Kharroubi, Abderrazzaq},
   title        = {{LiDAR AI Classifier}: a QGIS plugin for deep-learning
-                  semantic segmentation of airborne, mobile mapping and
-                  railway LiDAR point clouds},
+                  semantic segmentation of airborne and mobile mapping
+                  LiDAR point clouds},
   year         = {2026},
   url          = {https://github.com/akharroubi/AerialLidarClassifier},
-  version      = {1.3.0},
+  version      = {1.2.3},
   note         = {GPL-3.0-or-later}
 }
 ```
@@ -696,10 +640,8 @@ And, optionally, the plugin itself:
 - **Plugin source code**: [GPL-3.0-or-later](LICENSE). The vendored LitePT
   model code (`core/litept/`) is MIT, (c) Photogrammetry and Remote Sensing Lab,
   ETH Zurich (see `core/litept/LICENSE.upstream`).
-- **Model weights**: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/),
-  except LitePT-L Railway: [CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/) (non-commercial;
-  shared modified versions, such as fine-tuned weights, must use the same
-  licence). The LitePT-L weights (Airborne, Mobile Mapping, Railway) are
+- **Model weights**: [CC BY-NC 4.0](https://creativecommons.org/licenses/by-nc/4.0/)
+  (non-commercial). The LitePT-L weights (Airborne, Mobile Mapping) are
   © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège. The SegFormer 3D
   weights are distributed unchanged from TreeAIBox, whose authors permitted
   their use in this plugin. See
@@ -712,7 +654,7 @@ And, optionally, the plugin itself:
 **LitePT-L.** Architecture and reference implementation by the Photogrammetry
 and Remote Sensing Lab, ETH Zurich ([prs-eth/LitePT](https://github.com/prs-eth/LitePT)).
 Plugin integration by Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège.
-The LitePT-L Airborne, Mobile Mapping and Railway model weights are
+The LitePT-L Airborne and Mobile Mapping model weights are
 © 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège.
 
 **SegFormer 3D.** The UrbanFiltering 3D SegFormer was developed by

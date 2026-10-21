@@ -1,9 +1,9 @@
 """Release acceptance test of the built ZIP in fresh QGIS 3 and 4 profiles.
 
-    python tests/e2e_qgis_process.py --model rail --zip dist/lidar_ai_classifier_v1.3.0.zip \
+    python tests/e2e_qgis_process.py --model mls --zip dist/lidar_ai_classifier_v1.2.3.zip \
         --input <reference LAS> --work <scratch parent> [--public] [--qgis3 BAT] [--qgis4 BAT]
 
---model is mls (Mobile mapping) or rail (Railway). Both runtimes are
+--model is mls (Mobile mapping). Both runtimes are
 required. Each run gets a new private directory below --work; existing files
 and profiles are never removed. The test serves the released weights on
 localhost (or, with --public, lets the plugin download them from the URL in
@@ -40,14 +40,10 @@ HERE = Path(__file__).resolve().parent
 PLUGIN = HERE.parent
 NAME = "Aerial_LiDAR_Classifier"
 _MLS_CODES = {1: 2, 2: 3, 3: 5, 4: 6, 5: 64, 6: 65, 7: 66, 8: 14, 9: 1}
-_RAIL_CODES = {1: 2, 2: 10, 3: 15, 4: 14, 5: 5, 6: 64, 7: 1}
 TARGETS = {
     "mls": {"id": "litept_l_mls_5cm", "registry": "LITEPT_L_MLS",
             "weights": "litept_l_mls_5cm_fp16.pth", "model_index": 2, "classifier_index": 1,
             "default": _MLS_CODES, "custom": {**_MLS_CODES, 5: 200, 6: 201, 7: 255}},
-    "rail": {"id": "litept_l_rail_5cm", "registry": "LITEPT_L_RAIL",
-             "weights": "litept_l_rail_5cm_fp16.pth", "model_index": 3, "classifier_index": 2,
-             "default": _RAIL_CODES, "custom": {**_RAIL_CODES, 2: 200, 6: 17, 7: 255}},
 }
 TARGET = TARGETS["mls"]
 WEIGHTS = TARGET["weights"]

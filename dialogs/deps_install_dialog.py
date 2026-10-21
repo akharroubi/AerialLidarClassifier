@@ -66,7 +66,7 @@ class DepsInstallDockWidget(QDockWidget):
             "  \u2022 Install PyTorch + LiDAR packages "
             "(~1\u20133 GB depending on CUDA)\n"
             "  \u2022 Download the model weights (about 20 MB, or about "
-            "530 MB with an NVIDIA GPU)\n\n"
+            "370 MB with an NVIDIA GPU)\n\n"
             "QGIS stays usable while it runs (usually 5 to 15 minutes)."
         )
         welcome_text.setWordWrap(True)
@@ -209,8 +209,8 @@ class DepsInstallDockWidget(QDockWidget):
                     models = (
                         "The GPU (CUDA) version will be installed. On this "
                         "GPU generation the Airborne classifier runs with "
-                        "SegFormer 3D on the GPU. LitePT-L (Mobile mapping, "
-                        "Railway) needs spconv, which has no build for it yet."
+                        "SegFormer 3D on the GPU. LitePT-L (Mobile mapping) "
+                        "needs spconv, which has no build for it yet."
                     )
                 else:
                     models = (

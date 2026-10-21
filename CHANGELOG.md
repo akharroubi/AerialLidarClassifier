@@ -4,9 +4,20 @@ All notable changes to **LiDAR AI Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
-## [1.3.1] - 2026-10-19
+## [1.2.3] - 2026-10-21
 
 ### Fixed
+- **"CUDA driver error: operation not supported" on shared NVIDIA vGPU
+  profiles** (an A10-8Q on an Azure virtual desktop, for example): every
+  classification failed at the first GPU allocation, in `backbone.to(device)`.
+  Since 1.1.0 the plugin forced PyTorch's expandable-segments allocator
+  (`PYTORCH_CUDA_ALLOC_CONF`), which maps memory through CUDA's virtual
+  memory management API; fractional vGPU profiles do not provide it. The
+  plugin now asks the driver (`CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED`),
+  confirms with a 1 MB probe allocation when LitePT-L loads, and keeps
+  PyTorch's standard allocator where expandable segments cannot work; the log
+  says which allocator is used. Where they work, nothing changes. A user's own
+  `PYTORCH_CUDA_ALLOC_CONF` is left untouched.
 - **Setup failed on the Flathub QGIS** (QGIS 4.2 on Python 3.13 with its own
   NumPy 1.26.4) with "Failed to install torchvision: No solution found when
   resolving dependencies". Since 1.2.1 Setup pinned the plugin environment to
@@ -25,62 +36,44 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - A failed CUDA test inside a Flatpak explains the Flatpak steps (matching
   NVIDIA Flatpak driver, CUDA device node) instead of "update the driver".
 
-### Changed
-- On RTX 50 series GPUs, Setup says that the Airborne classifier runs with
-  SegFormer 3D on the GPU and that LitePT-L (Mobile mapping, Railway) needs
-  spconv, which has no CUDA 12.8 build yet.
-- The LitePT status no longer asks for a Repair when the environment's NumPy 2
-  was chosen on purpose for QGIS's NumPy 1.x.
-
-## [1.3.0] - 2026-10-12
-
 ### Added
-- **Railway classifier**, model **LitePT-L Railway (5 cm)**, for railway
-  corridor point clouds. Seven classes: ground (with track bed, ballast,
-  sleepers and platforms), rail, pole (catenary masts, portals and their
-  supports, utility poles), wire (contact and messenger wires, droppers,
-  feeders, power and telecom lines), vegetation, fence (fences, noise
-  barriers, guardrails) and other. Geometry only (XYZ), 5 cm voxels,
-  240,000-point / 12 m crops, NVIDIA CUDA, the same reduced crop budgets as
-  mobile mapping on smaller GPUs. The fp16 weights (172 MB) download
-  automatically during Setup or on first use and are SHA-256 verified.
-  They are licensed CC BY-NC-SA 4.0 and provided as is.
-- Default railway codes follow ASPRS LAS 1.4 where a class exists: ground 2,
-  rail 10 (*Rail*), pole 15 (*Transmission Tower*), wire 14 (*Wire,
-  Conductor*), vegetation 5, other 1. Fences have no ASPRS code and get 64,
-  the first user-definable code. Every code is editable and saved, as for
-  mobile mapping; Processing takes `OUTPUT_CODES_JSON` keyed 1 to 7.
 - The output-code editor shows the ASPRS meaning of each code as it is
   typed (standard class, reserved, or user-definable).
-- Copyright notice for the LitePT-L Airborne, Mobile Mapping and Railway
-  weights (© 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège) in About, the README, the notices and the model cards.
+- Copyright notice for the LitePT-L Airborne and Mobile Mapping weights
+  (© 2026 Abderrazzaq Kharroubi, GeoScITY Lab, University of Liège) in About,
+  the README, the notices and the model cards.
 
 ### Changed
-- The dock and Processing offer three **classifiers** instead of models:
-  *Airborne*, *Mobile mapping* and *Railway*. SegFormer 3D is no longer a
-  separate choice: the Airborne classifier runs LitePT-L Airborne where it
-  can (NVIDIA CUDA GPU, *Use GPU* ticked, `spconv` loaded) and SegFormer 3D
+- The dock and Processing offer two **classifiers** instead of models:
+  *Airborne* and *Mobile mapping*. SegFormer 3D is no longer a separate
+  choice: the Airborne classifier runs LitePT-L Airborne where it can
+  (NVIDIA CUDA GPU, *Use GPU* ticked, `spconv` loaded) and SegFormer 3D
   otherwise (CPU, Apple Silicon, GPUs without `spconv`). The status line,
-  its tooltip and the log say which engine runs and why. Mobile mapping and
-  Railway are never replaced by an airborne model.
+  its tooltip and the log say which engine runs and why. Mobile mapping is
+  never replaced by an airborne model.
 - Processing: new algorithm *Classify LiDAR point cloud*
   (`aeriallidar:classify_point_cloud`) with a `CLASSIFIER` parameter
-  (0 Airborne, 1 Mobile mapping, 2 Railway). The algorithm of 1.0 to 1.2,
+  (0 Airborne, 1 Mobile mapping). The algorithm of 1.0 to 1.2,
   `aeriallidar:classify_lidar`, keeps its `MODEL` parameter and runs exactly
   the model it names (0 LitePT-L Airborne, 1 SegFormer 3D, 2 LitePT-L Mobile
-  Mapping, now 3 LitePT-L Railway); it is hidden from the Toolbox, and saved
-  models, scripts and `qgis_process` calls keep their results, also after a
-  model step is edited. Out-of-range values, also computed by expressions,
-  stop the run instead of selecting another model.
+  Mapping); it is hidden from the Toolbox, and saved models, scripts and
+  `qgis_process` calls keep their results, also after a model step is
+  edited. Out-of-range values, also computed by expressions, stop the run
+  instead of selecting another model.
 - Error messages of the LitePT-L models suggest the SegFormer 3D engine only
   for airborne data.
 - The dock's saved choice moves from the model to the classifier; the model
   saved by 1.1 or 1.2 selects its classifier once.
 - The one-click "Use <other model>" button is gone: the Airborne classifier
-  now switches engine by itself, and the other classifiers keep their
+  now switches engine by itself, and the Mobile mapping classifier keeps its
   acquisition type.
 - The Setup panel states the real size of the weights download (about
-  20 MB, or about 530 MB with an NVIDIA GPU).
+  20 MB, or about 370 MB with an NVIDIA GPU).
+- On RTX 50 series GPUs, Setup says that the Airborne classifier runs with
+  SegFormer 3D on the GPU and that LitePT-L (Mobile mapping) needs spconv,
+  which has no CUDA 12.8 build yet.
+- The LitePT status no longer asks for a Repair when the environment's NumPy 2
+  was chosen on purpose for QGIS's NumPy 1.x.
 
 ## [1.2.1] - 2026-10-10
 
