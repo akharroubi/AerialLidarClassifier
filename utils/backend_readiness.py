@@ -70,6 +70,32 @@ def _numpy_mismatch_hint():
     )
 
 
+def _spconv_hint():
+    """Why spconv is missing on this computer, from the install marker."""
+    try:
+        from .venv_manager import _read_install_marker, _spconv_is_fallback
+        marker = _read_install_marker() or {}
+    except Exception:
+        return ""
+    if marker.get("cuda_mode") != "cuda":
+        return ""
+    error = marker.get("spconv_error")
+    if error:
+        build = marker.get("spconv_build") or "cuXXX"
+        return (
+            f"Setup could not install spconv-{build} on this computer ({error}). "
+            f"Use Plugins > {PLUGIN_NAME} > Repair dependencies to rebuild the "
+            "environment; if it fails again, report the Setup log on the issue tracker."
+        )
+    if "spconv_build" not in marker and _spconv_is_fallback(marker.get("cuda_index")):
+        return (
+            "spconv has no build for the CUDA 12.8 PyTorch this GPU generation needs; "
+            "the plugin adds spconv's CUDA 12.6 build to the existing environment. "
+            f"Use Plugins > {PLUGIN_NAME} > Repair dependencies (PyTorch is kept)."
+        )
+    return ""
+
+
 def litept_dependency_status():
     # Setup/Repair can make imports available after a first failed check.
     # Cache only successful imports, never a failure for the entire session.
@@ -90,7 +116,7 @@ def litept_dependency_status():
     ready, reason = _check_imports()
     if not ready:
         _check_imports.cache_clear()
-        hint = _numpy_mismatch_hint()
+        hint = _numpy_mismatch_hint() or (_spconv_hint() if "spconv" in reason else "")
         if hint:
             reason = hint + "\n" + reason
         reason += "\n" + _torch_details()

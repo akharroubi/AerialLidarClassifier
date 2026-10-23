@@ -3,7 +3,7 @@ name=LiDAR AI Classifier
 qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Classify airborne, mobile mapping and railway LiDAR point clouds with deep learning (LitePT-L).
-version=1.3.1
+version=1.3.2
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
 email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
@@ -43,6 +43,24 @@ hasProcessingProvider=yes
 server=False
 
 changelog=
+    1.3.2
+        - "CUDA driver error" at the first GPU allocation (shared vGPU
+          profiles such as an A10-8Q, some Windows drivers with RTX A6000
+          and other cards), followed by an allocator assertion on the next
+          run: the plugin no longer forces PyTorch's expandable-segments
+          allocator. It asks the driver, confirms with a small probe
+          allocation, and uses the standard allocator where expandable
+          segments cannot work. The log says which allocator serves the run.
+        - New "GPU memory allocator" choice in Advanced parameters
+          (Automatic, Expandable segments, Standard allocator), also used by
+          Processing.
+        - Mobile mapping and Railway classifiers on RTX 50 series GPUs:
+          spconv has no CUDA 12.8 build, so Setup installs its CUDA 12.6
+          build next to the CUDA 12.8 PyTorch; the NVIDIA driver compiles
+          the kernels for the GPU when a LitePT-L model first loads (10 to
+          30 s, reported in the log). Environments set up by earlier
+          releases on these GPUs are completed in place ("Add missing
+          packages"), nothing is re-downloaded.
     1.3.1
         - Setup on the Flathub QGIS (and other QGIS builds with their own
           NumPy 1.x on Python 3.13): installing torchvision failed with

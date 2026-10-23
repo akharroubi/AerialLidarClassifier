@@ -55,11 +55,16 @@ REQUIRED_PACKAGES = [
 ]
 
 # spconv (sparse convolutions for LitePT-L) is a CUDA-only compiled
-# package published as one distribution per CUDA toolkit; it is added to
-# the batch install when torch was installed from one of these indexes.
-# No wheel exists for cu128 yet, which is why the cascade below prefers
-# cu126 on non-Blackwell GPUs.
+# package published as one distribution per CUDA toolkit. These indexes
+# have a matching build; it is installed after torch (Phase C).
+# No wheel exists for cu128, which is why the cascade below prefers cu126
+# on non-Blackwell GPUs. Blackwell GPUs (RTX 50 series) need the cu128
+# torch; they get spconv's cu126 build, whose embedded PTX the NVIDIA
+# driver compiles for the GPU on first use (verified at 12.6 on a cu128
+# torch: the wheel links cudart64_12 / nvrtc64_120_0, both shipped by
+# every CUDA 12 torch wheel).
 _SPCONV_INDEXES = ("cu118", "cu121", "cu124", "cu126")
+_SPCONV_FALLBACK_BUILDS = {"cu128": "cu126"}
 
 DEPS_HASH_FILE = os.path.join(VENV_DIR, "deps_hash.txt")
 CUDA_FLAG_FILE = os.path.join(VENV_DIR, "cuda_installed.txt")
@@ -1352,11 +1357,19 @@ def ensure_venv_packages_available() -> bool:
             f"Added venv site-packages to sys.path: {site_packages}",
             Qgis.MessageLevel.Info)
 
-    # Read by torch when its CUDA allocator starts: expandable segments
-    # keep "reserved" close to "allocated" for the LitePT-L model, whose
-    # sparse-conv and attention temporaries otherwise fragment the cache
-    # (16 GB reserved for 4.5 GB used). Harmless where unsupported.
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    # The CUDA allocator mode (expandable segments or not) is decided by
+    # core/cuda_allocator.py when LitePT-L loads, from what the GPU driver
+    # supports and the plugin setting; a process-wide environment default
+    # would also fail on shared vGPUs and on the Windows drivers that have
+    # no working virtual memory management.
+
+    # spconv's fallback build (RTX 50 series) runs through the driver's
+    # PTX compiler, whose on-disk cache keeps the compiled kernels between
+    # sessions. The default cache is too small for spconv's kernel set,
+    # so each QGIS session would compile again. Read by the driver when
+    # CUDA initialises, which happens after this point (torch import).
+    if (_read_install_marker() or {}).get("spconv_fallback"):
+        os.environ.setdefault("CUDA_CACHE_MAXSIZE", str(2 * 1024 ** 3))
 
     # On Windows, register DLL directories for native packages (torch,
     # etc.) so that the OS loader can find their DLLs when importing
@@ -2419,29 +2432,51 @@ def _is_cpu_torch_installed(
     return False
 
 
-def _spconv_extra_for(cuda_index: Optional[str]) -> List[str]:
-    """Distribution name(s) of the spconv build matching ``cuda_index``."""
+def _spconv_build_for(cuda_index: Optional[str]) -> Optional[str]:
+    """The spconv build (``"cu126"``) installed with torch from
+    ``cuda_index``: the matching build where spconv publishes one, the
+    fallback build for cu128 (RTX 50 series), ``None`` otherwise."""
     if cuda_index in _SPCONV_INDEXES:
-        return [f"spconv-{cuda_index}"]
-    return []
+        return cuda_index
+    return _SPCONV_FALLBACK_BUILDS.get(cuda_index or "")
+
+
+def _spconv_is_fallback(cuda_index: Optional[str]) -> bool:
+    """True when the spconv build for ``cuda_index`` is older than torch's
+    toolkit: its kernels are compiled by the driver on first use."""
+    build = _spconv_build_for(cuda_index)
+    return build is not None and build != cuda_index
+
+
+def _spconv_extra_for(cuda_index: Optional[str]) -> List[str]:
+    """Distribution name(s) of the spconv build installed with ``cuda_index``."""
+    build = _spconv_build_for(cuda_index)
+    return [f"spconv-{build}"] if build else []
+
+
+# What Phase C did for spconv in the last install_dependencies() call, for
+# the install marker: build, whether it is the fallback build, and the
+# install error (None when installed). Reset at every install.
+_last_spconv_result: dict = {}
 
 
 def _install_spconv(
     uv_path: Optional[str],
     python_path: str,
     venv_dir: str,
-    cuda_index: str,
+    build: str,
     env: dict,
     subprocess_kwargs: dict,
     cancel_check=None,
 ) -> Tuple[bool, str]:
-    """Install (or replace) the spconv build for ``cuda_index``.
+    """Install (or replace) the spconv ``build`` (``"cu126"``).
 
     Removes every other spconv / cumm variant first (the cascade may have
-    moved torch to another toolkit), then installs ``spconv-<cuda_index>``
+    moved torch to another toolkit), then installs ``spconv-<build>``
     under the torch constraints file when one exists, so the resolution
     cannot touch torch. Returns ``(ok, detail)``; never raises.
     """
+    cuda_index = build
     if uv_path is None:
         return False, "spconv is installed with uv only"
     variants = [f"{name}-{idx}" for idx in _SPCONV_INDEXES + ("cu128", "cu120")
@@ -3237,23 +3272,45 @@ def install_dependencies(
                                                                      :200])
 
     # -- Phase C: spconv for the LitePT-L model (CUDA installs only) ----------
-    # One distribution per CUDA toolkit, only where torch itself is the
-    # CUDA build from a toolkit spconv publishes wheels for. Kept out of
-    # the batch; a failed required install must not be stamped ready.
+    # One distribution per CUDA toolkit: the build matching torch's toolkit
+    # where spconv publishes one (required: a failed install must not be
+    # stamped ready), the cu126 build on the cu128 torch of RTX 50 GPUs
+    # (the driver compiles its PTX on first use; optional, so that Setup
+    # still completes with SegFormer 3D if this path fails). Kept out of
+    # the batch.
+    _last_spconv_result.clear()
     if cuda_enabled and cuda_packages:
         if cancel_check and cancel_check():
             _log("Installation cancelled by user", Qgis.MessageLevel.Warning)
             return False, "Installation cancelled"
-        if selected_cuda_index in _SPCONV_INDEXES:
+        spconv_build = _spconv_build_for(selected_cuda_index)
+        if spconv_build is not None:
+            fallback = _spconv_is_fallback(selected_cuda_index)
+            if fallback:
+                _log(
+                    f"No spconv wheel for {selected_cuda_index}: installing "
+                    f"spconv-{spconv_build}, whose kernels the NVIDIA driver "
+                    "compiles for this GPU the first time a LitePT-L model runs.",
+                    Qgis.MessageLevel.Info,
+                )
             if progress_callback:
                 progress_callback(99, "Installing spconv (LitePT-L model)...")
             ok, detail = _install_spconv(
                 uv_path if use_uv else None, python_path, venv_dir,
-                selected_cuda_index, env, subprocess_kwargs,
+                spconv_build, env, subprocess_kwargs,
                 cancel_check=cancel_check,
             )
-            if not ok:
+            _last_spconv_result.update(
+                build=spconv_build, fallback=fallback, error=None if ok else detail)
+            if not ok and not fallback:
                 return False, (f"The GPU library LitePT-L needs (spconv) could not be installed: {detail}. Click Reinstall Dependencies to retry, or install the CPU version (button below).")
+            if not ok:
+                _log(
+                    f"spconv-{spconv_build} could not be installed ({detail}); the "
+                    "LitePT-L models will be unavailable on this GPU (the Airborne "
+                    "classifier runs SegFormer 3D).",
+                    Qgis.MessageLevel.Warning,
+                )
         elif selected_cuda_index is not None:
             _log(
                 f"No spconv wheel for {selected_cuda_index}; the LitePT-L "
@@ -3334,6 +3391,7 @@ def verify_venv(
     venv_dir: str = None,
     progress_callback: Optional[Callable[[int, str], None]] = None,
     extra_packages: Optional[List[str]] = None,
+    optional_packages: Optional[List[str]] = None,
 ) -> Tuple[bool, str]:
     """Verify all required packages are importable in the venv.
 
@@ -3341,14 +3399,22 @@ def verify_venv(
         venv_dir: Optional venv directory path. Uses VENV_DIR if None.
         progress_callback: Optional function called with (percent, message).
         extra_packages: Distribution names installed on top of the
-            required list (spconv for the CUDA build in use). Optional:
-            a failure is logged and disables the model that needs them.
+            required list (spconv for the CUDA build in use). A failure
+            fails the verification like any required package.
+        optional_packages: Names among the verified packages whose
+            failure is logged and reported in the message instead of
+            failing the verification (spconv's fallback build on RTX 50
+            GPUs: Setup must still complete with SegFormer 3D).
 
     Returns:
         Tuple of (success, message).
     """
     if venv_dir is None:
         venv_dir = VENV_DIR
+    optional_set = set(optional_packages or [])
+
+    def optional(name: str) -> bool:
+        return name in optional_set or _is_optional_verify_package(name)
 
     if not venv_exists(venv_dir):
         return False, "Virtual environment not found"
@@ -3392,7 +3458,7 @@ def verify_venv(
                     ),
                     Qgis.MessageLevel.Warning,
                 )
-                if _is_optional_verify_package(package_name):
+                if optional(package_name):
                     _log(
                         "Package {} verification failed but is optional on this "
                         "platform; continuing.".format(package_name), Qgis.MessageLevel.Warning, )
@@ -3420,7 +3486,7 @@ def verify_venv(
                     error_detail = (
                         result.stderr[:300] if result.stderr else result.stdout[:300]
                     )
-                    if _is_optional_verify_package(package_name):
+                    if optional(package_name):
                         _log(
                             "Package {} verification failed on retry but is optional "
                             "on this platform; continuing.".format(package_name), Qgis.MessageLevel.Warning, )
@@ -3430,7 +3496,7 @@ def verify_venv(
                         package_name, error_detail[:200]
                     )
             except proc.TimeoutExpired:
-                if _is_optional_verify_package(package_name):
+                if optional(package_name):
                     _log(
                         "Verification of {} timed out but package is optional on "
                         "this platform; continuing.".format(package_name), Qgis.MessageLevel.Warning, )
@@ -3439,7 +3505,7 @@ def verify_venv(
                 return False, "Verification error: {} (timed out)".format(
                     package_name)
             except Exception as e:
-                if _is_optional_verify_package(package_name):
+                if optional(package_name):
                     _log(
                         "Verification error for {} but package is optional on this "
                         "platform; continuing: {}".format(
@@ -3719,6 +3785,19 @@ def get_venv_status() -> Tuple[bool, str]:
         _log(f"get_venv_status: quick check failed: {msg}", Qgis.MessageLevel.Warning)
         return False, "Virtual environment incomplete: {}".format(msg)
 
+    # Packages a newer plugin release installs on top of an environment
+    # this release still accepts (spconv's fallback build for RTX 50 GPUs,
+    # added in 1.3.2). They are added to the existing environment by
+    # complete_venv_packages(); nothing is rebuilt.
+    missing = missing_venv_packages(marker)
+    if missing:
+        _log(
+            f"get_venv_status: environment lacks {', '.join(missing)} for "
+            f"torch {marker.get('cuda_index')}; completion needed.",
+            Qgis.MessageLevel.Info,
+        )
+        return False, completion_message(missing)
+
     # Hash mismatch is informational only - the venv has torch +
     # torchvision (verified above); the user installed the plugin and
     # the wheels are on disk. If REQUIRED_PACKAGES changed in a later
@@ -3744,6 +3823,132 @@ def get_venv_status() -> Tuple[bool, str]:
     python_version = get_python_full_version()
     _log("get_venv_status: ready (quick check passed)", Qgis.MessageLevel.Success)
     return True, "Ready (Python {})".format(python_version)
+
+
+def missing_venv_packages(marker: Optional[dict] = None) -> List[str]:
+    """Distribution names this release installs that the environment lacks.
+
+    Only spconv's fallback build so far: an environment set up for a cu128
+    torch (RTX 50 series) by a release before 1.3.2 has no spconv. The
+    attempt is recorded in the marker (``spconv_build``) whether it
+    succeeded or not, so a failed attempt is reported by the LitePT status
+    instead of asking again at every start.
+    """
+    if marker is None:
+        marker = _read_install_marker()
+    if not marker or marker.get("cuda_mode") != "cuda":
+        return []
+    if "spconv_build" in marker:
+        return []
+    expected = _spconv_extra_for(marker.get("cuda_index"))
+    installed = {str(name).lower() for name in (marker.get("packages") or [])}
+    return [name for name in expected if name.lower() not in installed]
+
+
+def venv_completion_pending() -> bool:
+    """True when the ready environment only lacks packages that
+    ``complete_venv_packages`` adds (no rebuild needed)."""
+    marker = _read_install_marker()
+    if marker is None or marker.get("install_schema_version") != _INSTALL_SCHEMA_VERSION:
+        return False
+    return bool(missing_venv_packages(marker))
+
+
+def completion_message(missing: List[str]) -> str:
+    return (
+        "This environment was set up before the plugin could install "
+        f"{', '.join(missing)} for this GPU (RTX 50 series). Click the button "
+        "to add it to the existing environment; PyTorch and the other packages "
+        "are kept."
+    )
+
+
+def complete_venv_packages(
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
+) -> Tuple[bool, str]:
+    """Add the packages ``missing_venv_packages`` reports to the existing
+    environment and update the install marker. Nothing else is touched:
+    the torch constraints file keeps the resolution away from torch.
+
+    Returns ``(ok, message)``. A failed attempt is recorded in the marker
+    (``spconv_error``) so the environment counts as ready for the models
+    that do not need the package; Reinstall Dependencies remains the way
+    to retry from scratch.
+    """
+    from .uv_manager import get_uv_path, uv_exists
+
+    marker = _read_install_marker() or {}
+    missing = missing_venv_packages(marker)
+    if not missing:
+        return True, "Virtual environment ready"
+    build = _spconv_build_for(marker.get("cuda_index"))
+    if build is None:
+        return True, "Virtual environment ready"
+
+    def report(percent: int, message: str) -> None:
+        if progress_callback:
+            progress_callback(percent, message)
+
+    python_path = get_venv_python_path(VENV_DIR)
+    env = _get_clean_env_for_venv()
+    subprocess_kwargs = _get_subprocess_kwargs()
+    report(5, f"Adding spconv-{build} to the existing environment...")
+    _log(
+        f"Completing the environment with spconv-{build} for torch "
+        f"{marker.get('cuda_index')} (RTX 50 series); nothing is rebuilt.",
+        Qgis.MessageLevel.Info,
+    )
+    ok, detail = _install_spconv(
+        get_uv_path() if uv_exists() else None, python_path, VENV_DIR,
+        build, env, subprocess_kwargs, cancel_check=cancel_check,
+    )
+    if cancel_check and cancel_check():
+        return False, "Installation cancelled"
+    error: Optional[str] = None if ok else detail
+    if ok:
+        report(80, f"Verifying spconv-{build}...")
+        try:
+            result = proc.run(
+                [python_path, "-c", _get_verification_code(f"spconv-{build}")],
+                timeout=_get_verification_timeout(f"spconv-{build}"),
+                env=env, **subprocess_kwargs,
+            )
+            if result.returncode != 0:
+                error = (result.stderr or result.stdout or "import failed")[:300]
+        except Exception as exc:
+            error = str(exc)[:300]
+    versions = _get_installed_versions(
+        python_path, [f"spconv-{build}"], env, subprocess_kwargs) if ok else {}
+    if cancel_check and cancel_check():
+        return False, "Installation cancelled"
+
+    packages = [str(name) for name in (marker.get("packages") or [])
+                if not str(name).lower().startswith(("spconv-", "cumm-"))]
+    if ok and not error:
+        packages.append(f"spconv-{build}")
+    fields = {key: value for key, value in marker.items() if key not in (
+        "install_schema_version", "plugin_version", "cuda_logic_version", "written_at")}
+    fields.update({
+        "packages": packages,
+        "spconv_version": next(iter(versions.values()), None) if not error else None,
+        "spconv_build": build,
+        "spconv_fallback": _spconv_is_fallback(marker.get("cuda_index")),
+        "spconv_error": error,
+    })
+    _write_install_marker(VENV_DIR, extra=fields)
+    if error:
+        _log(f"spconv-{build} could not be added: {error}", Qgis.MessageLevel.Warning)
+        return False, (
+            f"spconv-{build} could not be added to the environment: {error[:200]}. "
+            "The Airborne classifier runs SegFormer 3D meanwhile. Click Reinstall "
+            "Dependencies for a full rebuild, or report the Setup log on the "
+            "issue tracker."
+        )
+    report(100, "Environment completed")
+    _log(f"Added spconv-{build} {versions.get(f'spconv-{build}', '')} to the environment",
+         Qgis.MessageLevel.Success)
+    return True, "Virtual environment ready"
 
 
 def remove_venv(venv_dir: str = None) -> Tuple[bool, str]:
@@ -3968,9 +4173,12 @@ def create_venv_and_install(
             mapped = 95 + int(percent * 0.04)
             progress_callback(min(mapped, 99), msg)
 
+    spconv_fallback = _spconv_is_fallback(torch_index_in_use)
+    spconv_expected = _spconv_extra_for(torch_index_in_use)
     is_valid, verify_msg = verify_venv(
         progress_callback=verify_progress,
-        extra_packages=_spconv_extra_for(torch_index_in_use),
+        extra_packages=spconv_expected,
+        optional_packages=spconv_expected if spconv_fallback else None,
     )
 
     # Do not silently change the requested device or perform a long reinstall
@@ -4020,21 +4228,31 @@ def create_venv_and_install(
         get_venv_python_path(VENV_DIR), ("torch", "torchvision"),
         _get_clean_env_for_venv(), _get_subprocess_kwargs(),
     )
-    spconv_names = _spconv_extra_for(torch_index_in_use) if cuda_mode == "cuda" else []
+    spconv_names = spconv_expected if cuda_mode == "cuda" else []
     spconv_versions = _get_installed_versions(
         get_venv_python_path(VENV_DIR), spconv_names,
         _get_clean_env_for_venv(), _get_subprocess_kwargs(),
     ) if spconv_names else {}
     if cancel_check and cancel_check():
         return False, "Installation cancelled"
+    installed_spconv = [name for name in spconv_names if name in spconv_versions]
+    spconv_error = _last_spconv_result.get("error")
+    if spconv_names and not spconv_error and (
+            not installed_spconv or "optional packages unavailable" in verify_msg):
+        spconv_error = "the package was installed but failed to import (see the Setup log)"
     _write_install_marker(VENV_DIR, extra={
         "torch_version": final_versions.get("torch"),
         "torchvision_version": final_versions.get("torchvision"),
         "cuda_index": torch_index_in_use,
         "cuda_mode": cuda_mode,
-        "packages": [name for name, _ in _get_required_packages()]
-        + [name for name in spconv_names if name in spconv_versions],
+        "packages": [name for name, _ in _get_required_packages()] + installed_spconv,
         "spconv_version": next(iter(spconv_versions.values()), None),
+        # spconv build installed with this torch (None: CPU install or no
+        # build), whether it is the fallback build compiled by the driver
+        # (RTX 50 series), and why it is unusable when it is.
+        "spconv_build": _spconv_build_for(torch_index_in_use) if cuda_mode == "cuda" else None,
+        "spconv_fallback": bool(spconv_names) and spconv_fallback,
+        "spconv_error": spconv_error if spconv_names else None,
         # QGIS's NumPy the packages were chosen for (None: no constraint).
         "host_numpy": (_host_numpy_pin(VENV_DIR) or "==").split("==", 1)[1] or None,
     })

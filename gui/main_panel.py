@@ -63,6 +63,12 @@ from ..config import (
     SETTINGS_PREFIX,
     TILE_DEFAULT_BUFFER_M,
 )
+from ..core.cuda_allocator import (
+    MODE_AUTO as ALLOCATOR_AUTO,
+    MODE_LABELS as ALLOCATOR_LABELS,
+    MODES as ALLOCATOR_MODES,
+    SETTING_NAME as ALLOCATOR_SETTING,
+)
 from ..core.registry import (
     CLASSIFIERS, DEFAULT_CLASSIFIER_ID, MODELS, classifier_for_model, get_classifier,
     get_model, select_engine,
@@ -300,6 +306,11 @@ class ClassifierDockWidget(QDockWidget):
         self._saved_units = str(
             s.value(f"{SETTINGS_PREFIX}/input_units", "auto") or "auto"
         )
+        self._saved_allocator = str(
+            s.value(f"{SETTINGS_PREFIX}/{ALLOCATOR_SETTING}", ALLOCATOR_AUTO) or ALLOCATOR_AUTO
+        )
+        if self._saved_allocator not in ALLOCATOR_MODES:
+            self._saved_allocator = ALLOCATOR_AUTO
         self._saved_classifier_id = str(s.value(f"{SETTINGS_PREFIX}/classifier_id", "") or "")
         # 1.1 and 1.2 saved the model (engine) id; used once to pick its classifier.
         self._saved_model_id = str(s.value(f"{SETTINGS_PREFIX}/model_id", "") or "")
@@ -341,6 +352,8 @@ class ClassifierDockWidget(QDockWidget):
         # CUDA install. Preserve the previously stored preference instead.
         if self.gpu_check.isEnabled():
             s.setValue(f"{SETTINGS_PREFIX}/use_gpu", self.gpu_check.isChecked())
+        s.setValue(f"{SETTINGS_PREFIX}/{ALLOCATOR_SETTING}",
+                   str(self.allocator_combo.currentData() or ALLOCATOR_AUTO))
         if self.output_widget.filePath():
             s.setValue(
                 f"{SETTINGS_PREFIX}/output_dir", self.output_widget.filePath()
@@ -730,6 +743,29 @@ class ClassifierDockWidget(QDockWidget):
         clear_gpu_btn.clicked.connect(self._clear_gpu_memory)
         lay.addWidget(clear_gpu_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
+        allocator_form = QFormLayout()
+        allocator_form.setSpacing(6)
+        allocator_form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.allocator_combo = QComboBox()
+        for key in ALLOCATOR_MODES:
+            self.allocator_combo.addItem(ALLOCATOR_LABELS[key], key)
+        saved_allocator = self.allocator_combo.findData(self._saved_allocator)
+        self.allocator_combo.setCurrentIndex(saved_allocator if saved_allocator >= 0 else 0)
+        self.allocator_combo.setToolTip(
+            "How PyTorch reserves GPU memory for the LitePT-L models.\n\n"
+            "Automatic: expandable segments where the GPU driver supports "
+            "them (they keep the reserved memory close to what is used, "
+            "which smaller cards need), PyTorch's standard allocator "
+            "elsewhere (shared vGPU profiles, some Windows drivers). The "
+            "run log says which one was used.\n\n"
+            "Choose Standard allocator if a run fails with 'CUDA driver "
+            "error' at the first allocation; choose Expandable segments to "
+            "force them. Applies to the dock and to Processing."
+        )
+        self.allocator_combo.currentIndexChanged.connect(self._on_allocator_changed)
+        allocator_form.addRow("GPU memory allocator:", self.allocator_combo)
+        lay.addLayout(allocator_form)
+
         lay.addWidget(self._hline())
 
         # ---- Performance / Tiling ----------------------------------------
@@ -845,6 +881,12 @@ class ClassifierDockWidget(QDockWidget):
             self.tile_check.setChecked(True)
             self.tile_check.blockSignals(False)
             self._update_tile_controls_enabled()
+
+    def _on_allocator_changed(self, _index: int) -> None:
+        """Saved at once: Processing reads the same setting at its next run."""
+        mode = str(self.allocator_combo.currentData() or ALLOCATOR_AUTO)
+        QgsSettings().setValue(f"{SETTINGS_PREFIX}/{ALLOCATOR_SETTING}", mode)
+        log_info(f"GPU memory allocator set to '{mode}' (applies at the next run).")
 
     def _section_header(self, text: str) -> QLabel:
         """Small bold label used as a flat in-group section divider."""

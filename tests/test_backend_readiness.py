@@ -45,6 +45,52 @@ class BackendReadiness(unittest.TestCase):
         self.assertIn("plugin/torch.py", reason)
         self.assertIn("RTX 3500 Ada", reason)
 
+    def _with_marker(self, marker, fallback=True):
+        """A stand-in venv_manager: the real one imports qgis."""
+        fake = types.SimpleNamespace(
+            _read_install_marker=lambda: marker,
+            _spconv_is_fallback=lambda index: fallback,
+        )
+        name = readiness.__name__.rsplit(".", 1)[0] + ".venv_manager"
+        return patch.dict(sys.modules, {name: fake})
+
+    def test_rtx50_environment_without_spconv_explains_the_completion(self):
+        marker = {"cuda_mode": "cuda", "cuda_index": "cu128", "packages": ["torch"]}
+        with patch.object(readiness, "_prepare_environment", return_value=True), \
+             patch.object(readiness.importlib, "import_module",
+                          side_effect=[ImportError("No module named 'spconv'")]), \
+             self._with_marker(marker):
+            ready, reason = readiness.litept_dependency_status()
+        self.assertFalse(ready)
+        self.assertIn("CUDA 12.6 build to the existing environment", reason)
+        self.assertIn("Repair dependencies", reason)
+        self.assertIn("No module named 'spconv'", reason)
+
+    def test_recorded_spconv_failure_is_reported_instead_of_a_loop(self):
+        marker = {"cuda_mode": "cuda", "cuda_index": "cu128", "packages": ["torch"],
+                  "spconv_build": "cu126", "spconv_fallback": True,
+                  "spconv_error": "No solution found"}
+        with patch.object(readiness, "_prepare_environment", return_value=True), \
+             patch.object(readiness.importlib, "import_module",
+                          side_effect=[ImportError("No module named 'spconv'")]), \
+             self._with_marker(marker):
+            ready, reason = readiness.litept_dependency_status()
+        self.assertFalse(ready)
+        self.assertIn("could not install spconv-cu126", reason)
+        self.assertIn("No solution found", reason)
+        self.assertNotIn("existing environment", reason)
+
+    def test_native_spconv_environment_gets_no_rtx50_hint(self):
+        marker = {"cuda_mode": "cuda", "cuda_index": "cu126", "packages": ["torch", "spconv-cu126"]}
+        with patch.object(readiness, "_prepare_environment", return_value=True), \
+             patch.object(readiness.importlib, "import_module",
+                          side_effect=[ImportError("DLL load failed")]), \
+             self._with_marker(marker, fallback=False):
+            ready, reason = readiness.litept_dependency_status()
+        self.assertFalse(ready)
+        self.assertNotIn("CUDA 12.6", reason)
+        self.assertIn("DLL load failed", reason)
+
     def test_environment_failure_does_not_import_system_packages(self):
         with patch.object(readiness, "_prepare_environment", return_value=False), \
              patch.object(readiness.importlib, "import_module") as imports:

@@ -207,6 +207,7 @@ class AerialLidarClassifierPlugin:
             log_info("Dependency check: already marked ready this session.")
             return True
 
+        status_msg = ""
         try:
             from .utils.venv_manager import (
                 ensure_venv_packages_available,
@@ -237,6 +238,14 @@ class AerialLidarClassifierPlugin:
 
         log_info("Dependency check: opening the Setup dock.")
         self._show_deps_dock()
+        try:
+            from .utils.venv_manager import venv_completion_pending
+            if self._deps_dock is not None and venv_completion_pending():
+                # Nothing to rebuild: the dock offers to add the missing
+                # packages to the existing environment.
+                self._deps_dock.show_completion_ui(status_msg)
+        except Exception as exc:
+            log_warning(f"Could not check for a pending completion: {exc}")
         if self.toggle_action:
             self.toggle_action.setChecked(False)
         return False

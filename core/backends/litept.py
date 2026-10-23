@@ -18,7 +18,9 @@ indices plus one, including Mobile Mapping's ground and unknown classes. Zero
 remains reserved for no prediction; coverage is complete or an error is raised.
 
 CUDA only: the sparse convolutions come from spconv, which ships no CPU or
-macOS build.
+macOS build. On GPU generations newer than spconv's compiled kernels (RTX 50
+series with the CUDA 12.6 build), the NVIDIA driver compiles spconv's PTX
+code on first use; ``load()`` does that work up front and says so.
 """
 
 from __future__ import annotations
@@ -97,8 +99,8 @@ class LitePTBackend:
         except ImportError as exc:
             raise RuntimeError(
                 f"{name} needs the spconv package, which is not installed "
-                "in the plugin environment. Use Plugins > Repair dependencies "
-                "to install it." + self._fallback_hint()
+                "in the plugin environment. " + _spconv_install_advice(torch)
+                + self._fallback_hint()
             ) from exc
 
         from ..litept.model import LitePT
@@ -136,6 +138,13 @@ class LitePTBackend:
         )
         head.load_state_dict({k: v.float() for k, v in head_state.items()}, strict=True)
 
+        # Before the first GPU allocation: expandable segments where the
+        # driver supports them (they keep "reserved" close to "allocated" on
+        # this model), the standard allocator elsewhere (shared vGPUs, some
+        # Windows drivers), or whatever the user chose in the settings.
+        from ..cuda_allocator import configure_cuda_allocator
+        configure_cuda_allocator(torch, log=self.log)
+
         backbone.to(device).eval()
         head.to(device).eval()
         # Disable every serialization shuffle, including GridPooling's,
@@ -146,16 +155,6 @@ class LitePTBackend:
         self.model = (backbone, head)
         self.device = device
 
-        # Fragmentation from the sparse-conv and attention temporaries
-        # makes the caching allocator reserve far more than it uses (16 GB
-        # reserved for 4.5 GB allocated on the validated 70k-point crops).
-        # Expandable segments keep reserved close to allocated, which is
-        # what smaller cards need. Best effort: a private torch API.
-        try:
-            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
-        except Exception:
-            _LOG.debug("Ignored non-fatal error", exc_info=True)
-
         # Each model has its own spatial context and memory requirements.
         # Retain the Airborne policy when no card profiles are present.
         try:
@@ -163,6 +162,14 @@ class LitePTBackend:
         except Exception:
             total_gb = 0.0
         self._configure_crop_budget(total_gb)
+
+        # spconv's kernels are compiled for GPU generations up to the one
+        # its wheel knows; a newer GPU runs them through the driver's PTX
+        # compiler, which takes seconds the first time. Do it now, with a
+        # message, instead of silently inside the first crop of the run.
+        build = spconv_build_needing_compilation(torch)
+        if build is not None:
+            self._compile_spconv_kernels(torch, build)
 
     def _configure_crop_budget(self, total_gb: float) -> None:
         """Apply a model-specific conservative budget for smaller GPUs."""
@@ -237,7 +244,6 @@ class LitePTBackend:
 
         if self.model is None:
             raise RuntimeError("LitePTBackend.load() must be called before predict()")
-        backbone, head = self.model
         xyz = np.asarray(xyz_m, dtype=np.float64)
         if xyz.ndim != 2 or xyz.shape[1] != 3 or not len(xyz):
             raise ValueError("Expected a nonempty (N, 3) array of metres")
@@ -257,7 +263,6 @@ class LitePTBackend:
         sums = np.zeros((n_cloud, self.num_classes), dtype=np.float32)
         visits = np.zeros(n_cloud, dtype=np.uint32)
         k = min(self.points_per_crop, n_cloud)
-        device = torch.device(self.device)
 
         def report(done, planned):
             if progress_callback is not None:
@@ -268,25 +273,7 @@ class LitePTBackend:
 
         def forward_crop(selected: np.ndarray, center: np.ndarray) -> np.ndarray:
             coord = cloud[selected] - center.astype(np.float32)
-            packed = _prepare_crop(coord, self.grid_size)
-            batch = {
-                "coord": torch.from_numpy(packed["coord"]).to(device),
-                "feat": torch.from_numpy(packed["feat"]).to(device),
-                "grid_coord": torch.from_numpy(packed["grid_coord"]).to(device),
-                "offset": torch.tensor([len(packed["coord"])], dtype=torch.long, device=device),
-                "grid_size": self.grid_size,
-            }
-            with torch.inference_mode():
-                if self.amp:
-                    with torch.autocast("cuda", dtype=torch.float16):
-                        point = backbone(batch)
-                else:
-                    point = backbone(batch)
-                logits = head(point.feat.float())
-            probabilities = logits.softmax(dim=1).cpu().numpy()
-            if not np.isfinite(probabilities).all():
-                raise FloatingPointError("Non-finite inference probabilities")
-            return probabilities[packed["inverse"]]
+            return self._forward_crop(coord)
 
         def run_crop(index: int) -> None:
             nonlocal k
@@ -351,6 +338,123 @@ class LitePTBackend:
         if progress_callback is not None:
             progress_callback(100.0)
         return cloud_class[projection]
+
+    def _forward_crop(self, coord: np.ndarray) -> np.ndarray:
+        """Class probabilities for one crop (float32 metres relative to its
+        centre), one row per input point, through the loaded model."""
+        import torch
+
+        backbone, head = self.model
+        device = torch.device(self.device)
+        packed = _prepare_crop(coord, self.grid_size)
+        batch = {
+            "coord": torch.from_numpy(packed["coord"]).to(device),
+            "feat": torch.from_numpy(packed["feat"]).to(device),
+            "grid_coord": torch.from_numpy(packed["grid_coord"]).to(device),
+            "offset": torch.tensor([len(packed["coord"])], dtype=torch.long, device=device),
+            "grid_size": self.grid_size,
+        }
+        with torch.inference_mode():
+            if self.amp:
+                with torch.autocast("cuda", dtype=torch.float16):
+                    point = backbone(batch)
+            else:
+                point = backbone(batch)
+            logits = head(point.feat.float())
+        probabilities = logits.softmax(dim=1).cpu().numpy()
+        if not np.isfinite(probabilities).all():
+            raise FloatingPointError("Non-finite inference probabilities")
+        return probabilities[packed["inverse"]]
+
+    def _compile_spconv_kernels(self, torch, build: str) -> float:
+        """Run one synthetic crop so the driver compiles spconv's kernels for
+        this GPU now (RTX 50 series with the CUDA 12.6 build). The compiled
+        code stays in the driver's cache, so later sessions start faster.
+        Returns the seconds it took."""
+        import time
+
+        name = self.card.get("display_name", "LitePT-L")
+        cuda = _cuda_label(build)
+        self.log(
+            f"{name}: spconv's CUDA {cuda} kernels have no native build for this "
+            f"GPU generation ({torch.cuda.get_device_name(0)}); the NVIDIA driver "
+            "compiles them now, which can take 10 to 30 s the first time."
+        )
+        start = time.monotonic()
+        try:
+            self._forward_crop(_synthetic_crop(self.grid_size, self.max_radius))
+            torch.cuda.synchronize()
+        except Exception as exc:
+            detail = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
+            raise RuntimeError(
+                f"{name} could not run spconv's CUDA {cuda} kernels on this GPU "
+                f"({type(exc).__name__}: {detail}). Update the NVIDIA driver, then "
+                "run again; if it persists, report it on the issue tracker with "
+                "the plugin log." + self._fallback_hint()
+            ) from exc
+        elapsed = time.monotonic() - start
+        self.log(f"{name}: spconv kernels ready ({elapsed:.1f} s).")
+        return elapsed
+
+
+def installed_spconv_build() -> Optional[str]:
+    """The CUDA tag of the installed spconv distribution (``"cu126"``), or
+    ``None`` when no spconv-cuXXX distribution is installed."""
+    try:
+        from importlib import metadata
+        for dist in metadata.distributions():
+            dist_name = (dist.metadata["Name"] or "").lower()
+            if dist_name.startswith("spconv-cu"):
+                return dist_name[len("spconv-"):]
+    except Exception:
+        _LOG.debug("Could not inspect the spconv distribution", exc_info=True)
+    return None
+
+
+def _cuda_label(build: str) -> str:
+    """``"cu126"`` -> ``"12.6"``."""
+    digits = build[2:] if build.startswith("cu") else build
+    return f"{digits[:2]}.{digits[2:]}" if len(digits) > 2 else digits
+
+
+# Newest GPU compute capability (major) with native kernels in spconv's
+# wheels: every published build (cu118 to cu126) stops at Hopper (9.x).
+# Blackwell (10.x datacenter, 12.x GeForce RTX 50) runs the embedded PTX.
+_SPCONV_NATIVE_MAJOR = 9
+
+
+def spconv_build_needing_compilation(torch, device_index: int = 0) -> Optional[str]:
+    """The installed spconv build when this GPU is newer than its compiled
+    kernels (the driver then compiles PTX on first use), else ``None``."""
+    try:
+        major = int(torch.cuda.get_device_capability(device_index)[0])
+    except Exception:
+        return None
+    if major <= _SPCONV_NATIVE_MAJOR:
+        return None
+    return installed_spconv_build()
+
+
+def _spconv_install_advice(torch) -> str:
+    """Why spconv is missing and what to do, by torch's CUDA build."""
+    cuda = str(getattr(getattr(torch, "version", None), "cuda", "") or "")
+    if cuda.startswith("12.8") or cuda.startswith("13"):
+        return ("spconv has no build for CUDA " + cuda + "; on RTX 50 series GPUs the "
+                "plugin installs its CUDA 12.6 build. Use Plugins > Repair dependencies "
+                "to add it to the environment.")
+    return "Use Plugins > Repair dependencies to install it."
+
+
+def _synthetic_crop(grid_size: float, max_radius: float, points: int = 4000) -> np.ndarray:
+    """A small deterministic crop (float32 metres, centred) exercising the
+    same kernels as real data: a 'ground' slab with scattered objects."""
+    rng = np.random.default_rng(0)
+    radius = float(min(max_radius, max(4.0, 60.0 * grid_size)))
+    xy = rng.uniform(-radius, radius, size=(points, 2)).astype(np.float32)
+    z = np.where(rng.random(points) < 0.7,
+                 rng.normal(0.0, 0.05, points),
+                 rng.uniform(0.0, 8.0, points)).astype(np.float32)
+    return np.column_stack([xy, z]).astype(np.float32)
 
 
 # ---------------------------------------------------------------------------

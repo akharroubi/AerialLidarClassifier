@@ -101,6 +101,65 @@ def test_backend_predicts_synthetic_cloud():
     assert (ids[:n] == 1).mean() > 0.9, f"ground share {(ids[:n] == 1).mean():.2%}"
 
 
+def test_spconv_compilation_is_decided_by_the_gpu_generation():
+    import types
+    litept = load_plugin_module("core.backends.litept")
+
+    def torch_with(capability):
+        return types.SimpleNamespace(cuda=types.SimpleNamespace(
+            get_device_capability=lambda index=0: capability))
+
+    # Hopper and older: native kernels in every spconv build.
+    assert litept.spconv_build_needing_compilation(torch_with((8, 6))) is None
+    assert litept.spconv_build_needing_compilation(torch_with((9, 0))) is None
+    # Blackwell: the installed build (if any) is compiled by the driver.
+    build = litept.spconv_build_needing_compilation(torch_with((12, 0)))
+    assert build == litept.installed_spconv_build()
+    assert build is None or build.startswith("cu")
+    broken = types.SimpleNamespace(cuda=types.SimpleNamespace(
+        get_device_capability=lambda index=0: (_ for _ in ()).throw(RuntimeError("no GPU"))))
+    assert litept.spconv_build_needing_compilation(broken) is None
+    assert litept._cuda_label("cu126") == "12.6" and litept._cuda_label("cu118") == "11.8"
+    crop = litept._synthetic_crop(0.1, 30.0)
+    assert crop.dtype == np.float32 and crop.shape == (4000, 3) and np.isfinite(crop).all()
+    assert np.array_equal(crop, litept._synthetic_crop(0.1, 30.0))
+
+
+def test_spconv_install_advice_names_the_rtx50_case():
+    import types
+    litept = load_plugin_module("core.backends.litept")
+    cu128 = types.SimpleNamespace(version=types.SimpleNamespace(cuda="12.8"))
+    cu126 = types.SimpleNamespace(version=types.SimpleNamespace(cuda="12.6"))
+    assert "CUDA 12.6 build" in litept._spconv_install_advice(cu128)
+    assert "Repair dependencies" in litept._spconv_install_advice(cu128)
+    assert "CUDA 12.6 build" not in litept._spconv_install_advice(cu126)
+    assert "Repair dependencies" in litept._spconv_install_advice(cu126)
+
+
+def test_compile_spconv_kernels_runs_the_inference_path():
+    """The warm-up uses the real crop pipeline; forced here on a GPU with
+    native kernels, where it must simply run and report its duration."""
+    ok, why = _ready()
+    if not ok:
+        print(f"SKIP ({why})")
+        return
+    import torch
+    litept = load_plugin_module("core.backends.litept")
+    messages = []
+    backend = litept.LitePTBackend(
+        PLUGIN_ROOT / "core" / "litept_l_dales_10cm.json", _find_weights(), log=messages.append,
+    )
+    backend.load("cuda")
+    try:
+        seconds = backend._compile_spconv_kernels(torch, "cu126")
+        assert 0.0 <= seconds < 120.0
+        assert any("compiles them now" in m for m in messages)
+        assert any("spconv kernels ready" in m for m in messages)
+        assert any(m.startswith("CUDA memory:") for m in messages), messages
+    finally:
+        backend.unload()
+
+
 def test_oom_retry_reaches_5000_point_floor():
     import torch
     import types

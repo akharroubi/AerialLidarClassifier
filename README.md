@@ -8,7 +8,7 @@ LiDAR (LAS / LAZ / COPC) inside QGIS 3.34+ and QGIS 4, with three classifiers:
 - **Airborne classifier**: LitePT-L Airborne, a point transformer from
   [prs-eth/LitePT](https://github.com/prs-eth/LitePT) using 10 cm voxels and
   eight classes, on NVIDIA GPUs. On computers where LitePT-L cannot run (no
-  NVIDIA GPU, Apple Silicon, RTX 50 series for now) it uses its second engine,
+  NVIDIA GPU, Apple Silicon) it uses its second engine,
   SegFormer 3D (UrbanFiltering, [TreeAIBox](https://github.com/NRCan/TreeAIBox),
   Natural Resources Canada), a voxel transformer at 30 cm that also runs on the
   CPU. The dock and the log say which engine runs.
@@ -86,7 +86,9 @@ viewing copy when loading the result.
 - **Right PyTorch build for the GPU.** The NVIDIA driver and compute
   capability are read with `nvidia-smi` and the matching CUDA build of PyTorch
   is installed (`cu118` to `cu128`, `cu126` preferred), plus `spconv` for
-  LitePT-L. Without an NVIDIA GPU the CPU build is installed. Apple Silicon
+  LitePT-L (on RTX 50 series its CUDA 12.6 build, which the NVIDIA driver
+  compiles for the GPU on first use). Without an NVIDIA GPU the CPU build is
+  installed. Apple Silicon
   uses MPS (the Airborne classifier's SegFormer 3D engine).
 - **Units handled.** Files in feet are converted from their CRS before
   inference; see [Coordinate units](#coordinate-units).
@@ -183,7 +185,9 @@ time and an *Open folder* button.
 - **Output**: folder, filename suffix (default `_classified`), label field
   (default `classification`; Airborne only), *Class codes: Edit output
   codes...* (Mobile mapping and Railway), and *Load classified files in QGIS*.
-- **Advanced parameters** (collapsed): *Use GPU*, *Clear GPU memory*, tiling
+- **Advanced parameters** (collapsed): *Use GPU*, *Clear GPU memory*, *GPU
+  memory allocator* (automatic, expandable segments or standard; see
+  [Troubleshooting](#cuda-driver-error-at-the-first-gpu-allocation)), tiling
   (auto size or tile size in metres, buffer in metres), *Streaming I/O*, and
   *Input units*.
 - **Log** (always visible) and the footer with progress, *Cancel* and *Run*.
@@ -257,11 +261,26 @@ hidden from the Toolbox but still runs from saved models, Python and
 | GPUs under 8 GB, other GPU generations | Not tested on real hardware; a smaller-crop path and out-of-memory retries exist |
 
 **LitePT-L needs an NVIDIA GPU and compatible PyTorch and `spconv` packages.**
-This installer selects `spconv` packages for its `cu118`, `cu121`, `cu124`
-and `cu126` setup paths. Its Blackwell setup path uses `cu128` and does not
-install `spconv`. The dock checks the installed packages and reports why a
-selected classifier is unavailable. The Airborne classifier then runs its
-SegFormer 3D engine; the Mobile mapping and Railway classifiers need LitePT-L.
+The installer selects the `spconv` build matching its `cu118`, `cu121`, `cu124`
+and `cu126` setup paths. RTX 50 series GPUs (Blackwell) need the `cu128`
+PyTorch, for which `spconv` publishes no build; the installer adds the `cu126`
+build there, and the NVIDIA driver compiles its kernels for the GPU the first
+time a LitePT-L model runs (10 to 30 s, reported in the log, then cached by the
+driver). An environment set up by 1.3.1 or earlier on such a GPU is completed
+in place at the next start (nothing is re-downloaded). The dock checks the
+installed packages and reports why a selected classifier is unavailable. The
+Airborne classifier then runs its SegFormer 3D engine; the Mobile mapping and
+Railway classifiers need LitePT-L.
+
+**GPU memory allocator.** For the LitePT-L models the plugin selects PyTorch's
+allocator per computer: expandable segments where the GPU driver supports CUDA
+virtual memory management (they keep the reserved memory close to what is
+used, which smaller cards need), the standard allocator elsewhere (shared vGPU
+profiles such as an A10-8Q, and the Windows drivers that refuse the mapping
+calls). The run log says which one served the run. *Advanced parameters > GPU
+memory allocator* fixes the choice; scripts and `qgis_process` can set
+`AERIAL_LIDAR_CLASSIFIER_CUDA_ALLOCATOR` to `auto`, `expandable` or `standard`.
+A `PYTORCH_CUDA_ALLOC_CONF` of your own is respected in automatic mode.
 
 LitePT-L Airborne processes crops of up to 70,000 points within 30 m; cards
 under 8 GB use 35,000-point / 20 m crops. LitePT-L Mobile Mapping and
@@ -525,9 +544,26 @@ status tooltip and the log say why.
   library that failed to load and the PyTorch/CUDA build in use. Restart QGIS,
   run *Repair dependencies*, restart again. If it persists, open an issue with
   that log text.
-- RTX 50 cards (Blackwell): the installer's `cu128` path does not install
-  `spconv`. Read the LitePT status and setup log for the packages available
-  in your environment. The Airborne classifier runs SegFormer 3D meanwhile.
+- RTX 50 cards (Blackwell): the plugin installs `spconv`'s `cu126` build next
+  to the `cu128` PyTorch. If the environment was set up by 1.3.1 or earlier,
+  the Setup dock opens with *Add missing packages*: it adds `spconv` to the
+  existing environment. The first LitePT-L run then compiles the kernels for
+  the GPU (10 to 30 s, said in the log). If the LitePT status reports that the
+  build could not be installed, run *Repair dependencies* and, if it fails
+  again, open an issue with the Setup log.
+
+### "CUDA driver error" at the first GPU allocation
+
+`CUDA driver error: operation not supported` or `CUDA driver error: unknown
+error` in `backbone.to(device)`, sometimes followed on the next run by an
+`INTERNAL ASSERT FAILED ... CUDACachingAllocator.cpp` message, means that the
+GPU driver refuses the virtual memory calls of PyTorch's expandable-segments
+allocator (shared vGPU profiles, some Windows drivers). Since 1.3.2 the plugin
+tests the driver before the first allocation and falls back to the standard
+allocator by itself; the log line starting with `CUDA memory:` says what was
+chosen. If a run still fails this way, set *Advanced parameters > GPU memory
+allocator* to *Standard allocator*. Versions before 1.3.2 forced expandable
+segments on every GPU: update the plugin.
 
 ### Install fails with `WinError 4551` / "Application Control policy"
 

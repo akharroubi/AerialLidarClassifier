@@ -60,11 +60,24 @@ class DepsInstallWorker(QThread):
             import sys
 
             from ..utils.venv_manager import (
-                CACHE_DIR, VENV_DIR, create_venv_and_install,
+                CACHE_DIR, VENV_DIR, complete_venv_packages,
+                create_venv_and_install, venv_completion_pending,
             )
 
             if self._cancelled:
                 self.completed.emit(False, "Installation cancelled")
+                return
+            if self._cuda_enabled and venv_completion_pending():
+                # The environment is current and only lacks packages this
+                # release adds (spconv's build for RTX 50 series): add them
+                # to the existing environment, nothing is removed.
+                success, message = complete_venv_packages(
+                    progress_callback=lambda p, m: self.progress.emit(p, m),
+                    cancel_check=lambda: self._cancelled,
+                )
+                if success and not self._cancelled:
+                    message = self._download_weights(message)
+                self.completed.emit(success, message)
                 return
             if _plugin_torch_loaded(CACHE_DIR):
                 self.completed.emit(False, (

@@ -193,7 +193,8 @@ class DepsInstallDockWidget(QDockWidget):
         self._gpu_detected = False
         try:
             from ..utils.venv_manager import (
-                _select_cuda_index, _spconv_extra_for, detect_nvidia_gpu)
+                _select_cuda_index, _spconv_extra_for, _spconv_is_fallback,
+                detect_nvidia_gpu)
 
             has_gpu, gpu_info = detect_nvidia_gpu()
             self._gpu_detected = bool(has_gpu)
@@ -204,8 +205,18 @@ class DepsInstallDockWidget(QDockWidget):
                 memory_mb = gpu_info.get("memory_mb")
                 memory_str = f" ({memory_mb} MB)" if memory_mb else ""
                 cuda_index = _select_cuda_index(gpu_info)
-                if cuda_index and not _spconv_extra_for(cuda_index):
-                    # RTX 50 series (CUDA 12.8 builds): spconv has no build yet.
+                if cuda_index and _spconv_is_fallback(cuda_index):
+                    # RTX 50 series (CUDA 12.8 torch): spconv's CUDA 12.6
+                    # build, compiled for the GPU by the driver on first use.
+                    models = (
+                        "The GPU (CUDA) version will be installed: LitePT-L "
+                        "and SegFormer 3D will both be available. On this GPU "
+                        "generation LitePT-L uses spconv's CUDA 12.6 build; "
+                        "the NVIDIA driver compiles it for the GPU the first "
+                        "time a model runs (10 to 30 s)."
+                    )
+                elif cuda_index and not _spconv_extra_for(cuda_index):
+                    # A CUDA toolkit spconv has no build for at all.
                     models = (
                         "The GPU (CUDA) version will be installed. On this "
                         "GPU generation the Airborne classifier runs with "
@@ -274,6 +285,18 @@ class DepsInstallDockWidget(QDockWidget):
         self.status_label.hide()
         self.reinstall_button.hide()
         self.cpu_retry_button.hide()
+
+    def show_completion_ui(self, message: str):
+        """The environment is current and only lacks packages this release
+        adds (spconv's build for RTX 50 series): offer to add them in place
+        instead of a reinstall."""
+        self.show_install_ui()
+        self.install_button.setText("Add missing packages")
+        self.cpu_only.setChecked(False)
+        self.cpu_only.hide()
+        self.status_label.setText(message)
+        self.status_label.setStyleSheet("")
+        self.status_label.show()
 
     def show_progress_ui(self):
         """Show progress bar and cancel button, hide install button."""

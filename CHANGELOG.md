@@ -4,6 +4,48 @@ All notable changes to **LiDAR AI Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.2] - 2026-10-23
+
+### Fixed
+- **"CUDA driver error" at the first GPU allocation** (`backbone.to(device)`),
+  then `!handles_.at(i) INTERNAL ASSERT FAILED ... CUDACachingAllocator.cpp`
+  on the next run (GitHub issue 8: Windows 11, two RTX A6000, driver 596.72),
+  and `CUDA driver error: operation not supported` on shared NVIDIA vGPU
+  profiles (an A10-8Q on a cloud desktop). Since 1.1.0 the plugin forced
+  PyTorch's expandable-segments allocator (`PYTORCH_CUDA_ALLOC_CONF`), which
+  maps memory through CUDA's virtual memory management API; fractional vGPU
+  profiles do not provide it and some Windows drivers refuse the mapping
+  calls. The plugin now asks the driver
+  (`CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED`), confirms with a
+  1 MB probe allocation when LitePT-L loads, and keeps PyTorch's standard
+  allocator where expandable segments cannot work; the log says which
+  allocator serves the run. Where they work, nothing changes. A PyTorch build
+  without expandable segments on the platform (torch 2.11 on Windows) is
+  reported as the standard allocator instead of a mode it silently ignores.
+- **Mobile mapping and Railway classifiers on RTX 50 series GPUs** (GitHub
+  issue 9: "LitePT cannot import spconv.pytorch", RTX 5060). These GPUs need
+  the CUDA 12.8 PyTorch, and `spconv` publishes no CUDA 12.8 build, so Setup
+  skipped it and the LitePT status wrongly advised Repair dependencies. Setup
+  now installs `spconv`'s CUDA 12.6 build next to the CUDA 12.8 PyTorch (it
+  links the CUDA 12 runtime PyTorch ships); the NVIDIA driver compiles its
+  kernels for the GPU the first time a LitePT-L model runs, which the plugin
+  does when the model loads, with a log message (10 to 30 s, cached by the
+  driver afterwards). An environment set up by an earlier release on such a
+  GPU is completed in place: the Setup dock offers *Add missing packages* and
+  keeps PyTorch and the other packages. If that build cannot be installed or
+  imported, Setup still completes, the LitePT status says why, and the
+  Airborne classifier runs SegFormer 3D.
+- The spconv import failure message names the actual cause on RTX 50 series
+  instead of a generic Repair advice.
+
+### Added
+- **GPU memory allocator** choice in *Advanced parameters*: *Automatic*
+  (default: the driver test above), *Expandable segments* or *Standard
+  allocator*, for users whose driver passes the probe but fails later.
+  Applies to the dock and to Processing; scripts can set
+  `AERIAL_LIDAR_CLASSIFIER_CUDA_ALLOCATOR`. A user's own
+  `PYTORCH_CUDA_ALLOC_CONF` is respected in automatic mode.
+
 ## [1.3.1] - 2026-10-19
 
 ### Fixed

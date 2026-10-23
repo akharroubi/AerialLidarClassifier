@@ -24,6 +24,8 @@ def module(name):
 
 
 venv = module("utils.venv_manager")
+pm = module("utils.python_manager")
+uv = module("utils.uv_manager")
 registry = module("core.registry")
 config = module("config")
 
@@ -71,7 +73,15 @@ class GpuReadiness(unittest.TestCase):
         self.assertEqual(nvml.call_count, 1)
         index = venv._select_cuda_index(self.RTX5080)
         self.assertEqual(index, "cu128")
-        self.assertEqual(venv._spconv_extra_for(index), [])
+        # No spconv-cu128 wheel: the cu126 build, compiled by the driver.
+        self.assertEqual(venv._spconv_build_for(index), "cu126")
+        self.assertTrue(venv._spconv_is_fallback(index))
+        self.assertEqual(venv._spconv_extra_for(index), ["spconv-cu126"])
+        for native in ("cu118", "cu121", "cu124", "cu126"):
+            self.assertEqual(venv._spconv_build_for(native), native)
+            self.assertFalse(venv._spconv_is_fallback(native))
+        self.assertIsNone(venv._spconv_build_for(None))
+        self.assertEqual(venv._spconv_extra_for("cu130"), [])
 
     def test_nvidia_smi_failure_falls_back_to_nvml(self):
         failed = types.SimpleNamespace(returncode=9, stdout="", stderr="NVML: Unknown Error")
@@ -102,7 +112,7 @@ class GpuReadiness(unittest.TestCase):
             self.skipTest("no NVIDIA GPU on this computer")
         self.assertEqual(venv._detect_with_nvml(), smi)
 
-    def test_setup_text_for_rtx50_does_not_promise_litept(self):
+    def test_setup_text_for_rtx50_explains_the_compiled_spconv_build(self):
         dialog_module = module("dialogs.deps_install_dialog")
         texts = {}
         for name, info in (("rtx50", self.RTX5080),
@@ -113,9 +123,166 @@ class GpuReadiness(unittest.TestCase):
                 texts[name] = dock.gpu_label.text()
                 dock.deleteLater()
         self.assertIn("RTX 5080 Laptop GPU (16303 MB)", texts["rtx50"])
-        self.assertIn("SegFormer 3D on the GPU", texts["rtx50"])
-        self.assertNotIn("will both be available", texts["rtx50"])
+        self.assertIn("will both be available", texts["rtx50"])
+        self.assertIn("CUDA 12.6 build", texts["rtx50"])
+        self.assertIn("compiles it for the GPU", texts["rtx50"])
         self.assertIn("will both be available", texts["ada"])
+        self.assertNotIn("CUDA 12.6 build", texts["ada"])
+
+    CU128_MARKER_131 = {"install_schema_version": venv._INSTALL_SCHEMA_VERSION,
+                        "plugin_version": "1.3.1", "cuda_mode": "cuda", "cuda_index": "cu128",
+                        "torch_version": "2.11.0+cu128",
+                        "packages": ["torch", "torchvision", "laspy", "lazrs", "timm",
+                                     "numpy_indexed", "scipy"]}
+
+    def test_missing_packages_only_for_rtx50_environments_of_earlier_releases(self):
+        self.assertEqual(venv.missing_venv_packages(dict(self.CU128_MARKER_131)), ["spconv-cu126"])
+        # 1.3.2 recorded its attempt (success or failure): never asked again.
+        done = dict(self.CU128_MARKER_131, spconv_build="cu126", spconv_error="No solution")
+        self.assertEqual(venv.missing_venv_packages(done), [])
+        native = dict(self.CU128_MARKER_131, cuda_index="cu126",
+                      packages=self.CU128_MARKER_131["packages"] + ["spconv-cu126"])
+        self.assertEqual(venv.missing_venv_packages(native), [])
+        self.assertEqual(venv.missing_venv_packages({"cuda_mode": "cpu", "packages": ["torch"]}), [])
+        self.assertEqual(venv.missing_venv_packages(None if False else {}), [])
+
+    def test_venv_status_asks_to_complete_the_rtx50_environment_not_to_rebuild(self):
+        with patch.object(pm, "standalone_python_exists", return_value=True), \
+             patch.object(venv, "venv_exists", return_value=True), \
+             patch.object(venv, "_read_install_marker", return_value=dict(self.CU128_MARKER_131)), \
+             patch.object(venv, "_quick_check_packages", return_value=(True, "")):
+            ready, message = venv.get_venv_status()
+            self.assertFalse(ready)
+            self.assertIn("spconv-cu126", message)
+            self.assertIn("existing environment", message)
+            self.assertNotIn("Reinstall", message)
+            self.assertTrue(venv.venv_completion_pending())
+            with patch.object(venv, "_read_install_marker", return_value=dict(
+                    self.CU128_MARKER_131, install_schema_version="1")):
+                # An outdated pipeline is rebuilt, never completed.
+                self.assertFalse(venv.venv_completion_pending())
+
+    def _completion(self, install_result, import_rc=0):
+        written = []
+        run = types.SimpleNamespace(returncode=import_rc, stdout="2.3.8", stderr="DLL load failed")
+        with patch.object(venv, "_read_install_marker", return_value=dict(self.CU128_MARKER_131)), \
+             patch.object(venv, "_install_spconv", return_value=install_result) as install, \
+             patch.object(venv.proc, "run", return_value=run), \
+             patch.object(venv, "_get_installed_versions", return_value={"spconv-cu126": "2.3.8"}), \
+             patch.object(venv, "_write_install_marker",
+                          side_effect=lambda venv_dir, extra: written.append(extra)), \
+             patch.object(uv, "uv_exists", return_value=True), \
+             patch.object(uv, "get_uv_path", return_value="uv"):
+            progress = []
+            ok, message = venv.complete_venv_packages(progress_callback=lambda p, m: progress.append(m))
+        self.assertEqual(install.call_args.args[3], "cu126")
+        self.assertEqual(len(written), 1)
+        return ok, message, written[0], progress
+
+    def test_completion_adds_spconv_in_place_and_records_it(self):
+        ok, message, marker, progress = self._completion((True, ""))
+        self.assertTrue(ok, message)
+        self.assertIn("spconv-cu126", marker["packages"])
+        self.assertEqual(marker["packages"][:2], ["torch", "torchvision"])
+        self.assertEqual(marker["spconv_build"], "cu126")
+        self.assertTrue(marker["spconv_fallback"])
+        self.assertIsNone(marker["spconv_error"])
+        self.assertEqual(marker["spconv_version"], "2.3.8")
+        self.assertEqual(marker["cuda_index"], "cu128")
+        self.assertNotIn("install_schema_version", marker)
+        self.assertTrue(any("existing environment" in m for m in progress))
+        self.assertEqual(venv.missing_venv_packages(dict(self.CU128_MARKER_131, **marker)), [])
+
+    def test_failed_completion_is_recorded_and_explained(self):
+        ok, message, marker, _ = self._completion((False, "No solution found"))
+        self.assertFalse(ok)
+        self.assertIn("No solution found", message)
+        self.assertIn("SegFormer 3D", message)
+        self.assertNotIn("spconv-cu126", marker["packages"])
+        self.assertEqual(marker["spconv_error"], "No solution found")
+        self.assertEqual(marker["spconv_build"], "cu126")
+        ok, message, marker, _ = self._completion((True, ""), import_rc=1)
+        self.assertFalse(ok)
+        self.assertIn("DLL load failed", marker["spconv_error"])
+        self.assertNotIn("spconv-cu126", marker["packages"])
+
+    def test_install_worker_completes_instead_of_rebuilding(self):
+        import shutil
+        worker_module = module("workers.deps_install_worker")
+        results = []
+        worker = worker_module.DepsInstallWorker(cuda_enabled=True)
+        worker.completed.connect(lambda ok, message: results.append((ok, message)))
+        with patch.object(venv, "venv_completion_pending", return_value=True), \
+             patch.object(venv, "complete_venv_packages", return_value=(True, "Virtual environment ready")), \
+             patch.object(worker, "_download_weights", side_effect=lambda message: message), \
+             patch.object(shutil, "rmtree") as rmtree:
+            worker.run()
+        rmtree.assert_not_called()
+        self.assertEqual(results, [(True, "Virtual environment ready")])
+        # The CPU-only choice is a rebuild, never a completion.
+        results.clear()
+        cpu_worker = worker_module.DepsInstallWorker(cuda_enabled=False)
+        cpu_worker.completed.connect(lambda ok, message: results.append((ok, message)))
+        with patch.object(venv, "venv_completion_pending", return_value=True) as pending, \
+             patch.object(worker_module, "_plugin_torch_loaded", return_value=True):
+            cpu_worker.run()
+        pending.assert_not_called()
+        self.assertEqual(len(results), 1)
+        self.assertIn("Restart QGIS", results[0][1])
+
+    def test_setup_dock_completion_ui_offers_to_add_packages(self):
+        dialog_module = module("dialogs.deps_install_dialog")
+        with patch.object(venv, "detect_nvidia_gpu", return_value=(True, self.RTX5080)):
+            dock = dialog_module.DepsInstallDockWidget()
+        try:
+            dock.show_completion_ui(venv.completion_message(["spconv-cu126"]))
+            self.assertEqual(dock.install_button.text(), "Add missing packages")
+            self.assertTrue(dock.cpu_only.isHidden())
+            self.assertIn("existing environment", dock.status_label.text())
+        finally:
+            dock.deleteLater()
+
+    def test_allocator_setting_round_trips_through_the_dock_and_the_backend(self):
+        panel_module = module("gui.main_panel")
+        allocator = module("core.cuda_allocator")
+        settings = {f"{config.SETTINGS_PREFIX}/settings_version": 2}
+
+        class Settings:
+            def value(self, key, default=None, **kwargs): return settings.get(key, default)
+            def setValue(self, key, value): settings[key] = value
+        gpu = {"available": True, "backend": "cuda", "name": "NVIDIA RTX 3500 Ada", "mem": 12.}
+        with patch.object(panel_module, "QgsSettings", Settings), \
+             patch.object(panel_module, "get_gpu_info", return_value=gpu), \
+             patch.object(panel_module.ModelManager, "is_model_available", return_value=True):
+            panel = panel_module.ClassifierDockWidget(None)
+            try:
+                self.assertEqual(panel.allocator_combo.currentData(), "auto")
+                self.assertEqual(panel.allocator_combo.count(), 3)
+                panel.allocator_combo.setCurrentIndex(panel.allocator_combo.findData("standard"))
+                self.assertEqual(settings[f"{config.SETTINGS_PREFIX}/cuda_allocator"], "standard")
+            finally:
+                panel.close()
+            restored = panel_module.ClassifierDockWidget(None)
+            try:
+                self.assertEqual(restored.allocator_combo.currentData(), "standard")
+            finally:
+                restored.close()
+        # The backend reads the real QgsSettings; Processing shares them.
+        from qgis.core import QgsSettings
+        key = f"{config.SETTINGS_PREFIX}/{allocator.SETTING_NAME}"
+        previous = QgsSettings().value(key, None)
+        try:
+            QgsSettings().setValue(key, "expandable")
+            self.assertEqual(allocator.preferred_mode(), "expandable")
+            QgsSettings().setValue(key, "bogus")
+            self.assertEqual(allocator.preferred_mode(), "auto")
+            with patch.dict(os.environ, {allocator.ENV_OVERRIDE: "standard"}):
+                self.assertEqual(allocator.preferred_mode(), "standard")
+        finally:
+            if previous is None:
+                QgsSettings().remove(key)
+            else:
+                QgsSettings().setValue(key, previous)
 
     def test_detected_but_unchecked_gpu_runs_airborne_on_segformer_and_says_why(self):
         panel_module = module("gui.main_panel")
