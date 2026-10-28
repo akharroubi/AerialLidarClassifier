@@ -79,7 +79,7 @@ from ..utils.class_mapping import (
 from ..utils.helpers import get_gpu_info, truncate_name
 from ..utils.las_units import UNIT_OVERRIDES
 from ..utils.las_utils import find_las_files
-from ..utils.logger import LOG_TAG, log_error, log_info, log_warning
+from ..utils.logger import LOG_TAG, log_error, log_info, log_warning, message_log_signal
 from ..utils.model_manager import ModelManager
 from ..widgets.drag_drop_list import DragDropList
 from ..workers.file_loader import FileInfoLoader
@@ -156,6 +156,8 @@ class ClassifierDockWidget(QDockWidget):
         self.gpu_info: dict = {"available": False}
         self.task = None
         self._running = False
+        # Text -> copies waiting for their twin (see _on_log_message).
+        self._log_twins = {}
         self._run_started = 0.0
         self._loaders: list[FileInfoLoader] = []
         self._auto_output_set = False
@@ -194,9 +196,7 @@ class ClassifierDockWidget(QDockWidget):
     def closeEvent(self, event):  # noqa: N802 - Qt API
         self._save_settings()
         try:
-            QgsApplication.messageLog().messageReceived.disconnect(
-                self._on_log_message
-            )
+            message_log_signal().disconnect(self._on_log_message)
         except Exception:
             _LOG.debug("Ignored non-fatal error", exc_info=True)
         self._log_connected = False
@@ -249,7 +249,7 @@ class ClassifierDockWidget(QDockWidget):
 
     def _connect_log(self):
         if not getattr(self, "_log_connected", False):
-            QgsApplication.messageLog().messageReceived.connect(self._on_log_message)
+            message_log_signal().connect(self._on_log_message)
             self._log_connected = True
 
     # ------------------------------------------------------------------
@@ -274,6 +274,14 @@ class ClassifierDockWidget(QDockWidget):
         if settings_version < 2:
             s.setValue(f"{SETTINGS_PREFIX}/use_gpu", True)
             s.setValue(f"{SETTINGS_PREFIX}/settings_version", 2)
+            settings_version = 2
+        # 1.3.3: the buffer is automatic (0, the model's own context). A
+        # saved 50 m is the old default, not a choice: it becomes automatic;
+        # any other saved value is kept (and raised to the model's need).
+        if settings_version < 3:
+            if s.value(f"{SETTINGS_PREFIX}/tile_buffer_m", None, type=float) == 50.0:
+                s.setValue(f"{SETTINGS_PREFIX}/tile_buffer_m", TILE_DEFAULT_BUFFER_M)
+            s.setValue(f"{SETTINGS_PREFIX}/settings_version", 3)
 
         self._saved_suffix = s.value(
             f"{SETTINGS_PREFIX}/suffix", "_classified")
@@ -300,9 +308,6 @@ class ClassifierDockWidget(QDockWidget):
             f"{SETTINGS_PREFIX}/tile_buffer_m",
             TILE_DEFAULT_BUFFER_M,
             type=float)
-        self._saved_tile_streaming = s.value(
-            f"{SETTINGS_PREFIX}/tile_streaming", False, type=bool
-        )
         self._saved_units = str(
             s.value(f"{SETTINGS_PREFIX}/input_units", "auto") or "auto"
         )
@@ -369,10 +374,6 @@ class ClassifierDockWidget(QDockWidget):
         )
         s.setValue(
             f"{SETTINGS_PREFIX}/tile_buffer_m", self.tile_buffer_spin.value()
-        )
-        s.setValue(
-            f"{SETTINGS_PREFIX}/tile_streaming",
-            self.tile_streaming_check.isChecked(),
         )
         s.setValue(
             f"{SETTINGS_PREFIX}/input_units",
@@ -753,14 +754,15 @@ class ClassifierDockWidget(QDockWidget):
         self.allocator_combo.setCurrentIndex(saved_allocator if saved_allocator >= 0 else 0)
         self.allocator_combo.setToolTip(
             "How PyTorch reserves GPU memory for the LitePT-L models.\n\n"
-            "Automatic: expandable segments where the GPU driver supports "
-            "them (they keep the reserved memory close to what is used, "
-            "which smaller cards need), PyTorch's standard allocator "
-            "elsewhere (shared vGPU profiles, some Windows drivers). The "
-            "run log says which one was used.\n\n"
-            "Choose Standard allocator if a run fails with 'CUDA driver "
-            "error' at the first allocation; choose Expandable segments to "
-            "force them. Applies to the dock and to Processing."
+            "Automatic: PyTorch's standard allocator on Windows (some GPU "
+            "drivers refuse expandable segments there) and on shared vGPU "
+            "profiles; expandable segments elsewhere, with a switch to the "
+            "standard allocator if the driver refuses them during a run. "
+            "Both give the same labels; expandable segments reserve less GPU "
+            "memory. The run log says which one was used ('CUDA memory:').\n\n"
+            "Expandable segments forces them, also on Windows: if a run then "
+            "fails with 'CUDA driver error', go back to Automatic. Applies to "
+            "the dock and to Processing."
         )
         self.allocator_combo.currentIndexChanged.connect(self._on_allocator_changed)
         allocator_form.addRow("GPU memory allocator:", self.allocator_combo)
@@ -776,9 +778,13 @@ class ClassifierDockWidget(QDockWidget):
         )
         self.tile_check.setChecked(self._saved_tile_enabled)
         self.tile_check.setToolTip(
-            "Splits the input into N x N spatial tiles with a buffer "
-            "overlap, runs inference per tile and merges the predictions "
-            "back. Recommended for files with many millions of points."
+            "Splits the input into spatial tiles with a buffer overlap, runs "
+            "inference per tile and merges the predictions back. Tiles denser "
+            "than the free memory allows are split further.\n\n"
+            "Files that do not fit in RAM are streamed from disk automatically "
+            "(tiles kept in temporary files in the output folder, removed at "
+            "the end), and a file that cannot be classified in one piece is "
+            "tiled automatically. The log says when that happens."
         )
         self.tile_check.toggled.connect(self._update_tile_controls_enabled)
         lay.addWidget(self.tile_check)
@@ -810,35 +816,29 @@ class ClassifierDockWidget(QDockWidget):
         self.tile_buffer_spin.setDecimals(0)
         self.tile_buffer_spin.setSingleStep(5.0)
         self.tile_buffer_spin.setSuffix(" m")
+        # 0 shows as "Automatic": the context the model needs.
+        self.tile_buffer_spin.setSpecialValueText("Automatic")
         self.tile_buffer_spin.setValue(self._saved_tile_buffer_m)
         self.tile_buffer_spin.setToolTip(
-            "Spatial buffer around each tile providing context for "
-            "points near the tile edges. Predictions in the buffer "
-            "are discarded."
+            "Context around each tile; predictions in the buffer are "
+            "discarded.\n\n"
+            "Automatic (recommended) uses exactly the context the model "
+            "needs, with which tiled and streamed results are the same as "
+            "an untiled run: 91.5 m for Airborne LitePT-L, 35 m for Mobile "
+            "mapping and Railway (less on small GPUs), 34 m for SegFormer "
+            "3D. A larger value is used as given; a smaller one is raised "
+            "to the model's need."
         )
         perf_form.addRow("Buffer:", self.tile_buffer_spin)
 
         lay.addLayout(perf_form)
 
-        self.tile_streaming_check = QCheckBox(
-            "Streaming I/O (requires tiling - handles files larger than RAM)"
-        )
-        # Restore only if tiling was also enabled - streaming is
-        # meaningless on its own.
-        self.tile_streaming_check.setChecked(
-            self._saved_tile_streaming and self._saved_tile_enabled
-        )
-        self.tile_streaming_check.setToolTip(
-            "Stream the input chunk-by-chunk via laspy. Each tile is "
-            "written to disk-backed sidecars instead of being held in "
-            "memory, then merged back through a streaming writer. "
-            "Required for files that do not fit in RAM.\n\n"
-            "This option requires 'Tile large files' - turning it on "
-            "automatically enables tiling; turning tiling off "
-            "automatically disables streaming."
-        )
-        self.tile_streaming_check.toggled.connect(self._on_streaming_toggled)
-        lay.addWidget(self.tile_streaming_check)
+        streaming_note = QLabel(
+            "Files larger than the free memory are streamed from disk "
+            "automatically.")
+        streaming_note.setWordWrap(True)
+        streaming_note.setStyleSheet(_secondary_text(streaming_note))
+        lay.addWidget(streaming_note)
 
         lay.addWidget(self._hline())
 
@@ -865,23 +865,6 @@ class ClassifierDockWidget(QDockWidget):
         self._update_tile_controls_enabled()
         return group
 
-    def _on_streaming_toggled(self, checked: bool) -> None:
-        """When the user enables streaming, also enable tiling.
-
-        Streaming is implemented as a per-tile pipeline; running it
-        without tiling makes no sense. Coupling the two checkboxes
-        explicitly avoids the surprising 'streaming checked but
-        ignored' state the user could otherwise reach.
-        """
-        if checked and not self.tile_check.isChecked():
-            # Block signals so we don't bounce back through
-            # _update_tile_controls_enabled and undo the streaming
-            # checkbox we just enabled.
-            self.tile_check.blockSignals(True)
-            self.tile_check.setChecked(True)
-            self.tile_check.blockSignals(False)
-            self._update_tile_controls_enabled()
-
     def _on_allocator_changed(self, _index: int) -> None:
         """Saved at once: Processing reads the same setting at its next run."""
         mode = str(self.allocator_combo.currentData() or ALLOCATOR_AUTO)
@@ -902,16 +885,6 @@ class ClassifierDockWidget(QDockWidget):
         self.tile_buffer_spin.setEnabled(on)
         self.tile_size_spin.setEnabled(
             on and not self.tile_auto_check.isChecked())
-        if hasattr(self, "tile_streaming_check"):
-            self.tile_streaming_check.setEnabled(on)
-            # When tiling is turned off, also force-uncheck streaming
-            # so the visual state matches the runtime gate (which
-            # requires both flags). Block the toggled signal so this
-            # doesn't reactivate tiling via _on_streaming_toggled.
-            if not on and self.tile_streaming_check.isChecked():
-                self.tile_streaming_check.blockSignals(True)
-                self.tile_streaming_check.setChecked(False)
-                self.tile_streaming_check.blockSignals(False)
 
     # ---- Log (always visible) -------------------------------------------
     def _build_log_panel(self) -> QWidget:
@@ -1631,7 +1604,6 @@ class ClassifierDockWidget(QDockWidget):
             tile_auto=self.tile_auto_check.isChecked(),
             tile_size_m=self.tile_size_spin.value(),
             tile_buffer_m=self.tile_buffer_spin.value(),
-            tile_streaming=self.tile_streaming_check.isChecked(),
             units_override=self.units_combo.currentData() or "auto",
             output_codes=self._output_codes_by_model.get(spec.id),
             prepare_qgis_view=self.load_result_check.isChecked(),
@@ -1639,6 +1611,8 @@ class ClassifierDockWidget(QDockWidget):
         self.task.progressChanged.connect(self._on_progress)
         self.task.taskCompleted.connect(self._on_task_completed)
         self.task.taskTerminated.connect(self._on_task_terminated)
+        self._log_twins.clear()
+        self.task.log_message.connect(self._on_task_log_message)
 
         QgsApplication.taskManager().addTask(self.task)
 
@@ -1825,6 +1799,26 @@ class ClassifierDockWidget(QDockWidget):
         ts = datetime.now().strftime("%H:%M:%S")
         self.log_text.append(f"[{ts}] {message}")
 
-    def _on_log_message(self, message, tag, level):
-        if tag == LOG_TAG:
+    def _on_log_message(self, message, tag, level, *_format):
+        if tag != LOG_TAG:
+            return
+        if not self._running:
             self._log(message)
+            return
+        # During a run the task's messages arrive twice: through its own
+        # signal and through QgsMessageLog. Show each once, whichever copy
+        # comes first (the message log can also miss them entirely).
+        pending = self._log_twins.get(message, 0)
+        if pending > 0:
+            self._log_twins[message] = pending - 1
+            return
+        self._log_twins[message] = pending - 1
+        self._log(message)
+
+    def _on_task_log_message(self, message):
+        pending = self._log_twins.get(message, 0)
+        if pending < 0:
+            self._log_twins[message] = pending + 1
+            return
+        self._log_twins[message] = pending + 1
+        self._log(message)

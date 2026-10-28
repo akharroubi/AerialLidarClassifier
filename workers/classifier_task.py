@@ -11,16 +11,18 @@ from pathlib import Path
 import numpy as np
 
 from qgis.core import QgsTask
+from qgis.PyQt.QtCore import pyqtSignal
 
 from ..config import TILE_DEFAULT_BUFFER_M
 from ..core.backends import create_backend
 from ..core.registry import get_model
-from ..core.tiling import compute_tile_grid
+from ..core.memory import plan_processing, tile_point_budget
+from ..core.tiling import PointCountGrid, compute_tile_grid, resolve_buffer, split_dense_tiles
 from ..utils.compat import scoped_enum
 from ..utils.class_mapping import output_model_spec, supports_output_codes, validate_model_output_field
 from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_vlrs
-from ..utils.logger import LOG_TAG, log_error, log_info, log_warning
+from ..utils.logger import LOG_TAG, log_error, log_info, log_warning, set_thread_sink
 from ..utils.model_manager import ModelManager
 from ..utils.output_safety import (add_extra_dim_preserving_raw, atomic_output_path, validate_output_paths, validate_label_field,
                                    read_complete, checked_predictions, label_values, assign_labels,
@@ -150,17 +152,48 @@ def _classify_tiled(
     """
     n = len(pcd)
     xy = pcd[:, :2]
+    buffer_m, buffer_note = resolve_buffer(buffer_m, predict_fn)
     tiles, resolved_size = _compute_tile_grid(xy, n, auto, tile_size_m)
-    n_tiles = len(tiles)
-
     log_info(
-        f"Tiled inference: {n_tiles} tile(s), tile size "
-        f"~{resolved_size:.0f} m, buffer {buffer_m:.0f} m."
+        f"Tiled inference: {len(tiles)} tile(s), tile size "
+        f"~{resolved_size:.0f} m. {buffer_note}"
     )
+
+    # The grid assumes uniform density; split the tiles whose buffered
+    # window holds more points than the RAM budget (GitHub issue 10).
+    grid = PointCountGrid(float(xy[:, 0].min()), float(xy[:, 1].min()),
+                          float(xy[:, 0].max()), float(xy[:, 1].max()))
+    grid.add(xy[:, 0], xy[:, 1])
+    budget = tile_point_budget()
+    plans = split_dense_tiles(tiles, grid, buffer_m, budget)
+    if any(len(plan) > 1 for plan in plans):
+        dense = sum(len(plan) > 1 for plan in plans)
+        tiles = [piece for plan in plans for piece in plan]
+        log_info(
+            f"Tiled inference: {dense} dense tile(s) split; {len(tiles)} tile(s) now, "
+            f"each within the memory budget of {budget:,} points where the buffer allows."
+        )
+    del grid
 
     predictions = np.zeros(n, dtype=np.int32)
     assigned = np.zeros(n, dtype=bool)
 
+    # Every tile places its crops / blocks as an untiled run would.
+    set_origin = getattr(predict_fn, "set_reference_origin", None)
+    if set_origin is not None:
+        set_origin(pcd.min(axis=0))
+    try:
+        result = _classify_tiles(tiles, pcd, xy, predict_fn, progress_callback,
+                                 cancel_callback, buffer_m, predictions, assigned)
+    finally:
+        if set_origin is not None:
+            set_origin(None)
+    return result
+
+
+def _classify_tiles(tiles, pcd, xy, predict_fn, progress_callback, cancel_callback,
+                    buffer_m, predictions, assigned):
+    n_tiles = len(tiles)
     for i, (tx0, ty0, tx1, ty1) in enumerate(tiles):
         if cancel_callback():
             return None
@@ -228,6 +261,11 @@ def _empty_gpu_cache_safe():
 class ClassificationTask(QgsTask):
     """Background task that runs the classifier over a list of files."""
 
+    # Every message the task logs (the plugin's log helpers, the backend's
+    # messages included), for the dock's log panel. Emitted from the worker
+    # thread, delivered queued to the dock.
+    log_message = pyqtSignal(str)
+
     def __init__(self, files, out_dir, suffix, model_id, device, field_name,
                  tile_enabled=False, tile_auto=True,
                  tile_size_m=None, tile_buffer_m=TILE_DEFAULT_BUFFER_M,
@@ -266,6 +304,13 @@ class ClassificationTask(QgsTask):
 
     # ------------------------------------------------------------------
     def run(self) -> bool:
+        set_thread_sink(self.log_message.emit)
+        try:
+            return self._run()
+        finally:
+            set_thread_sink(None)
+
+    def _run(self) -> bool:
         backend = None
         try:
             import laspy
@@ -332,6 +377,10 @@ class ClassificationTask(QgsTask):
 
             def predict_fn(xyz_m, progress_cb):
                 return backend.predict(xyz_m, progress_cb, self.isCanceled)
+            # Tiles share the file's origin and use the model's context as
+            # buffer (see LitePTBackend.set_reference_origin, resolve_buffer).
+            predict_fn.set_reference_origin = getattr(backend, "set_reference_origin", None)
+            predict_fn.context_buffer = lambda: getattr(backend, "context_buffer_m", None)
 
             for i, fp in enumerate(self.files):
                 if self.isCanceled():
@@ -416,13 +465,24 @@ class ClassificationTask(QgsTask):
                     _LOG.debug("Ignored non-fatal error", exc_info=True)
 
     # ------------------------------------------------------------------
-    def _can_stream(self) -> bool:
-        """Return True iff streaming mode is enabled.
+    def _plan(self, fp, laspy) -> str:
+        """"untiled", "tiled" or "streaming" for this file.
 
-        The streaming path supports ASPRS / custom extra-byte fields
-        and automatic LAS-1.4 / PRF 6 upgrade. No silent fallbacks.
+        Tiling is the user's choice; streaming follows from the memory the
+        file needs (see core.memory.plan_processing), so a file that does
+        not fit in RAM is streamed from disk without a separate option.
+        ``tile_streaming`` (scripts, tests, the Processing parameter of
+        1.0 to 1.3.2) forces streaming. Each automatic switch is logged.
         """
-        return bool(self.tile_enabled and self.tile_streaming)
+        with laspy.open(str(fp)) as reader:
+            n_points = int(reader.header.point_count)
+            record_length = int(reader.header.point_format.size)
+        mode, reason = plan_processing(
+            n_points, record_length, self.tile_enabled,
+            force_streaming=self.tile_streaming and self.tile_enabled)
+        if reason:
+            log_info(f"{fp.name}: {reason}")
+        return mode
 
     # ------------------------------------------------------------------
     def _process_one_streaming(
@@ -431,6 +491,9 @@ class ClassificationTask(QgsTask):
     ):
         """Streaming variant: process a single file with disk-backed tiling."""
         from .streaming_classifier import streaming_tiled_classify
+
+        # Automatic streaming of a file the user did not tile: auto tiles.
+        tile_auto = self.tile_auto or not self.tile_enabled
 
         log_info(f"Streaming mode active for {fp.name}")
 
@@ -454,8 +517,8 @@ class ClassificationTask(QgsTask):
                 progress_callback=stream_progress,
                 cancel_callback=self.isCanceled,
                 field_name=field,
-                tile_auto=self.tile_auto,
-                tile_size_m=None if self.tile_auto else self.tile_size_m,
+                tile_auto=tile_auto,
+                tile_size_m=None if tile_auto else self.tile_size_m,
                 buffer_m=self.tile_buffer_m,
                 units_override=self.units_override,
             )
@@ -467,8 +530,9 @@ class ClassificationTask(QgsTask):
     def _process_one(self, fp, out_path, predict_fn, laspy,
                      file_base, file_span):
         """Run inference on a single file and write the result."""
-        # Streaming mode dispatch -------------------------------------------
-        if self._can_stream():
+        # Streaming when the file does not fit in RAM ---------------------
+        mode = self._plan(fp, laspy)
+        if mode == "streaming":
             return self._process_one_streaming(
                 fp, out_path, predict_fn, laspy,
                 file_base, file_span,
@@ -502,11 +566,12 @@ class ClassificationTask(QgsTask):
                 raise InterruptedError()
             self.setProgress(file_base + file_span * (0.10 + p * 0.008))
 
-        if self.tile_enabled:
+        if mode == "tiled":
+            tile_auto = self.tile_auto or not self.tile_enabled
             preds = _classify_tiled(
                 pcd, predict_fn, progress_cb, self.isCanceled,
-                auto=self.tile_auto,
-                tile_size_m=self.tile_size_m,
+                auto=tile_auto,
+                tile_size_m=None if tile_auto else self.tile_size_m,
                 buffer_m=self.tile_buffer_m,
             )
         else:

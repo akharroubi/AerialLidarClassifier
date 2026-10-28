@@ -5,7 +5,7 @@ import json
 import torch
 
 
-def sliding_blocks_point_indices(pts, block_size, overlap_ratio):
+def sliding_blocks_point_indices(pts, block_size, overlap_ratio, origin=None):
     """
     Slice 2D or 3D points into overlapping blocks.
 
@@ -20,6 +20,11 @@ def sliding_blocks_point_indices(pts, block_size, overlap_ratio):
 
     Returns
     -------
+    origin : sequence, optional
+        Lower corner of the block lattice (at most the points' minimum);
+        default the points' minimum. The whole file's minimum when a tile
+        is processed, so that tiles share the untiled run's lattice.
+
     origins : (M, 2) or (M, 3) array
         Array of each block’s lower-corner coordinates.
     groups : list of ndarrays
@@ -37,6 +42,8 @@ def sliding_blocks_point_indices(pts, block_size, overlap_ratio):
     stride = bs * (1.0 - overlap_ratio)
 
     p_min = pts.min(axis=0)
+    if origin is not None:
+        p_min = np.minimum(p_min, np.asarray(origin, float)[:ndim])
     p_max = pts.max(axis=0)
     # Number of stride steps needed so the last block still reaches p_max.
     # Clamped at 0: when an axis spans less than (block - stride), the raw
@@ -221,7 +228,7 @@ def load_segformer(config_file, model_path, device):
 
 
 def predict_blocks(model, configs, device, pcd, if_bottom_only=False,
-                   progress_callback=lambda x: None):
+                   progress_callback=lambda x: None, origin=None):
     """Voxelise ``pcd`` block by block and run the loaded SegFormer on it.
 
     ``device`` is ``"cuda"``, ``"mps"`` or ``"cpu"``. Returns one model
@@ -255,7 +262,8 @@ def predict_blocks(model, configs, device, pcd, if_bottom_only=False,
         cut_dim = 3
 
     _, block_idx_groups = sliding_blocks_point_indices(
-        pcd[:, :cut_dim], min_res[:cut_dim] * nbmat_sz[:cut_dim], overlap_ratio=0.1)
+        pcd[:, :cut_dim], min_res[:cut_dim] * nbmat_sz[:cut_dim], overlap_ratio=0.1,
+        origin=None if origin is None else np.asarray(origin, float)[:cut_dim])
 
     nb_idxs = []
     nb_pcd_idxs = []

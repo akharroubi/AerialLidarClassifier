@@ -73,6 +73,39 @@ class LitePTBackend:
         self.amp = bool(evaluation.get("amp", False))
         self.model = None
         self.device = None
+        # Integer origin (metres) of the whole file when it is processed in
+        # tiles: see set_reference_origin. None: each call uses its own.
+        self.reference_origin = None
+
+    @property
+    def context_buffer_m(self) -> float:
+        """Buffer a tile needs so that its core gets exactly the labels of an
+        untiled run (with the file's origin, see set_reference_origin).
+
+        A core point is reached by crops centred up to one radius away; the
+        regular centre of a grid cell is the first point of the cell, so the
+        whole cell (one centre spacing) must be in the tile; and the "fill"
+        crops centred on points that no regular crop reached depend on the
+        coverage up to one more radius away. Hence two radii plus one
+        spacing. Measured in 1.3.3 (Airborne, 60 m and 40 m tiles): 67
+        labels of 1.08 M differ at radius + spacing, none at this value.
+        Valid after load(), which may reduce the crops on small GPUs."""
+        return 2.0 * float(self.max_radius) + float(self.center_spacing)
+
+    def set_reference_origin(self, origin) -> None:
+        """Use the file's origin for every following predict() call.
+
+        predict() works in metres from an integer origin, and its regular
+        crop centres are cells of a grid anchored there. With each tile's
+        own origin, tiles placed their crops differently from an untiled
+        run and tiling changed about 0.5 % of the labels; with the file's
+        origin (the floor of its minimum, what an untiled run uses) every
+        tile places them exactly where the untiled run does: measured in
+        1.3.3, tiled Mobile Mapping labels identical to untiled. Integer
+        metres keep the voxel grid aligned. None restores the default.
+        """
+        self.reference_origin = None if origin is None else np.floor(
+            np.asarray(origin, dtype=np.float64))
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -138,15 +171,28 @@ class LitePTBackend:
         )
         head.load_state_dict({k: v.float() for k, v in head_state.items()}, strict=True)
 
-        # Before the first GPU allocation: expandable segments where the
-        # driver supports them (they keep "reserved" close to "allocated" on
-        # this model), the standard allocator elsewhere (shared vGPUs, some
-        # Windows drivers), or whatever the user chose in the settings.
-        from ..cuda_allocator import configure_cuda_allocator
+        # Before the first GPU allocation: the standard allocator on Windows
+        # and on drivers without virtual memory management (shared vGPUs),
+        # expandable segments elsewhere, or what the user chose in the
+        # settings. A driver that refuses expandable segments anyway is
+        # handled by a switch to the standard allocator and one retry.
+        from ..cuda_allocator import (
+            configure_cuda_allocator, recover_from_allocator_failure, restart_advice)
         configure_cuda_allocator(torch, log=self.log)
 
-        backbone.to(device).eval()
-        head.to(device).eval()
+        try:
+            backbone.to(device)
+            head.to(device)
+        except RuntimeError as exc:
+            if not recover_from_allocator_failure(torch, exc, self.log):
+                raise
+            try:
+                backbone.to(device)
+                head.to(device)
+            except RuntimeError as retry_exc:
+                raise restart_advice(retry_exc) from retry_exc
+        backbone.eval()
+        head.eval()
         # Disable every serialization shuffle, including GridPooling's,
         # to keep inference deterministic.
         for module in backbone.modules():
@@ -247,11 +293,19 @@ class LitePTBackend:
         xyz = np.asarray(xyz_m, dtype=np.float64)
         if xyz.ndim != 2 or xyz.shape[1] != 3 or not len(xyz):
             raise ValueError("Expected a nonempty (N, 3) array of metres")
-        if not np.isfinite(xyz).all():
-            raise ValueError("Input coordinates contain NaN or infinite values")
+        n_points = len(xyz)
+        for start in range(0, n_points, _CHUNK):
+            if not np.isfinite(xyz[start:start + _CHUNK]).all():
+                raise ValueError("Input coordinates contain NaN or infinite values")
 
-        origin = np.floor(xyz.min(axis=0))
-        local = (xyz - origin).astype(np.float32)
+        # float32 metres from an integer origin, converted chunk by chunk:
+        # the same values as (xyz - origin).astype(float32) without a full
+        # float64 temporary (24 B per point on tiles of 100 M points).
+        origin = (np.floor(xyz.min(axis=0)) if self.reference_origin is None
+                  else self.reference_origin)
+        local = np.empty(xyz.shape, dtype=np.float32)
+        for start in range(0, n_points, _CHUNK):
+            local[start:start + _CHUNK] = xyz[start:start + _CHUNK] - origin
         del xyz
 
         keep, projection = _voxel_partition(local, self.grid_size)
@@ -263,6 +317,12 @@ class LitePTBackend:
         sums = np.zeros((n_cloud, self.num_classes), dtype=np.float32)
         visits = np.zeros(n_cloud, dtype=np.uint32)
         k = min(self.points_per_crop, n_cloud)
+        # Crop neighbours: the k nearest within max_radius. Bounding the search
+        # by the radius returns the same points (measured in 1.3.3: identical
+        # selections for 600 crops of real street data) and skips the far
+        # ones: 16 % faster on dense street data, about 10 times faster
+        # searches in sparse areas.
+        search_bound = float(np.nextafter(self.max_radius, np.inf))
 
         def report(done, planned):
             if progress_callback is not None:
@@ -270,18 +330,21 @@ class LitePTBackend:
                 progress_callback(min(99.0, 100.0 * done / max(planned * 1.15, 1)))
 
         oom_error = getattr(torch.cuda, "OutOfMemoryError", RuntimeError)
+        from ..cuda_allocator import (
+            looks_like_allocator_failure, recover_from_allocator_failure, restart_advice)
+        recovered = False
 
         def forward_crop(selected: np.ndarray, center: np.ndarray) -> np.ndarray:
             coord = cloud[selected] - center.astype(np.float32)
             return self._forward_crop(coord)
 
         def run_crop(index: int) -> None:
-            nonlocal k
+            nonlocal k, recovered
             if cancel_callback is not None and cancel_callback():
                 raise InterruptedError()
             center = cloud[index]
             while True:
-                distances, indices = tree.query(center, k=k)
+                distances, indices = tree.query(center, k=k, distance_upper_bound=search_bound)
                 distances = np.atleast_1d(distances)
                 indices = np.atleast_1d(indices)
                 selected = indices[distances <= self.max_radius]
@@ -308,6 +371,16 @@ class LitePTBackend:
                         "LitePT-L: GPU out of memory; retrying with "
                         f"{k:,}-point crops for the rest of the run."
                     )
+                except RuntimeError as exc:
+                    # The driver refused expandable segments mid-run: the
+                    # standard allocator takes over and the crop is retried
+                    # once; a second failure is not an allocator problem.
+                    if not recovered and recover_from_allocator_failure(torch, exc, self.log):
+                        recovered = True
+                        continue
+                    if recovered and looks_like_allocator_failure(exc):
+                        raise restart_advice(exc) from exc
+                    raise
             sums[selected] += probabilities
             visits[selected] += 1
 
@@ -380,9 +453,18 @@ class LitePTBackend:
             f"GPU generation ({torch.cuda.get_device_name(0)}); the NVIDIA driver "
             "compiles them now, which can take 10 to 30 s the first time."
         )
+        from ..cuda_allocator import recover_from_allocator_failure
+
         start = time.monotonic()
         try:
-            self._forward_crop(_synthetic_crop(self.grid_size, self.max_radius))
+            try:
+                self._forward_crop(_synthetic_crop(self.grid_size, self.max_radius))
+            except RuntimeError as exc:
+                # A driver refusing expandable segments is an allocator
+                # problem, not a kernel one: standard allocator, one retry.
+                if not recover_from_allocator_failure(torch, exc, self.log):
+                    raise
+                self._forward_crop(_synthetic_crop(self.grid_size, self.max_radius))
             torch.cuda.synchronize()
         except Exception as exc:
             detail = str(exc).strip().splitlines()[0] if str(exc).strip() else ""
@@ -461,20 +543,66 @@ def _synthetic_crop(grid_size: float, max_radius: float, points: int = 4000) -> 
 # Geometry helpers (numpy only)
 # ---------------------------------------------------------------------------
 
+# Rows per step for the chunked conversions (bounds the temporaries).
+_CHUNK = 4_000_000
+
+
+def _voxel_cells(local: np.ndarray, start: int, grid_size: float) -> np.ndarray:
+    """Integer voxel coordinates of one chunk, as floor(float64(local) / grid)."""
+    chunk = local[start:start + _CHUNK].astype(np.float64)
+    chunk /= float(grid_size)
+    return np.floor(chunk, out=chunk).astype(np.int64)
+
+
 def _voxel_partition(local: np.ndarray, grid_size: float):
-    """Representatives (first point per occupied voxel) and raw -> rep index."""
-    grid = np.floor(local.astype(np.float64) / float(grid_size)).astype(np.int64)
-    grid -= grid.min(axis=0)
-    span = grid.max(axis=0) + 1
+    """Representatives (first point per occupied voxel, in file order) and the
+    raw -> representative index.
+
+    Same result as np.unique(keys, return_index=True, return_inverse=True)
+    on the voxel keys followed by a stable renumbering, at about a quarter of
+    the peak memory (GitHub issue 10: a 211 M-point tile needed more than
+    20 GB here). The keys are built chunk by chunk, the stable sort gives the
+    first occurrence of each key, and the projection is stored as int32.
+    """
+    n = len(local)
+    lo = np.full(3, np.iinfo(np.int64).max, dtype=np.int64)
+    hi = np.full(3, np.iinfo(np.int64).min, dtype=np.int64)
+    for start in range(0, n, _CHUNK):
+        cells = _voxel_cells(local, start, grid_size)
+        lo = np.minimum(lo, cells.min(axis=0))
+        hi = np.maximum(hi, cells.max(axis=0))
+    span = hi - lo + 1
     if int(span[0]) * int(span[1]) * int(span[2]) >= 2 ** 62:
         raise ValueError("Cloud extent too large for a 64-bit voxel key at this grid size")
-    keys = (grid[:, 0] * span[1] + grid[:, 1]) * span[2] + grid[:, 2]
-    _, first, inverse = np.unique(keys, return_index=True, return_inverse=True)
+    keys = np.empty(n, dtype=np.int64)
+    for start in range(0, n, _CHUNK):
+        cells = _voxel_cells(local, start, grid_size)
+        cells -= lo
+        keys[start:start + _CHUNK] = (cells[:, 0] * span[1] + cells[:, 1]) * span[2] + cells[:, 2]
+    del cells
+
+    order = np.argsort(keys, kind="stable")
+    keys = keys[order]
+    starts = np.empty(n, dtype=bool)
+    starts[:1] = True
+    np.not_equal(keys[1:], keys[:-1], out=starts[1:])
+    del keys
+    first = order[starts]
+    group = np.cumsum(starts, dtype=np.int64)
+    del starts
+    group -= 1
+    inverse = np.empty(n, dtype=np.int64)
+    inverse[order] = group
+    del order, group
+
     # Renumber so that representatives keep file order (stable, like the reference).
-    order = np.argsort(first, kind="stable")
-    rank = np.empty_like(order)
-    rank[order] = np.arange(len(order))
-    return first[order], rank[np.asarray(inverse).reshape(-1)]
+    renumber = np.argsort(first, kind="stable")
+    rank = np.empty_like(renumber)
+    rank[renumber] = np.arange(len(renumber))
+    projection = np.empty(n, dtype=np.int32 if len(rank) < 2 ** 31 else np.int64)
+    for start in range(0, n, _CHUNK):
+        projection[start:start + _CHUNK] = rank[inverse[start:start + _CHUNK]]
+    return first[renumber], projection
 
 
 def _prepare_crop(coord: np.ndarray, grid_size: float) -> dict:

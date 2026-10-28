@@ -4,6 +4,75 @@ All notable changes to **LiDAR AI Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.3] - 2026-10-28
+
+### Fixed
+- **"CUDA driver error: unknown error" still occurred with the automatic GPU
+  memory allocator on Windows** (GitHub issue 8, RTX A6000, driver 596.72):
+  1.3.2 kept expandable segments when a 1 MB test allocation succeeded, but on
+  this driver the failure appears later and not reproducibly (anywhere from a
+  4 MB to a 32 MB allocation, varying between runs). No test allocation can
+  detect that reliably, so the automatic mode now uses PyTorch's standard
+  allocator on Windows. Measured on the LitePT-L models with emulated 6, 8 and
+  12 GB cards: identical labels, no out-of-memory retry, about twice the
+  reserved GPU memory. Other platforms keep expandable segments where the
+  driver supports them; if the driver refuses them during a run, the run
+  switches to the standard allocator and retries the operation, and the GPU
+  and driver are remembered so later runs start with the standard allocator.
+  *Expandable segments* in Advanced parameters still forces them.
+- **The dock's log showed none of the run's own messages on QGIS 4** ("Model:",
+  "CUDA memory:", crop size, out-of-memory retries, streaming passes; only the
+  start, output and end lines). QGIS 4 no longer emits the three-argument
+  `QgsMessageLog.messageReceived` signal the dock listened to (it emits
+  `messageReceivedWithFormat`). The dock now follows the right signal on QGIS
+  3 and 4, and the classification task also hands its messages to the dock
+  directly, each line shown once.
+- Every allocator decision writes its "CUDA memory:" line, including the case
+  of a PyTorch build without an allocator setting.
+- **Large mobile mapping files ran out of RAM in tiled and streaming mode**
+  (GitHub issue 10: 717 M points, 4.3 GB LAZ, "Unable to allocate 201 MiB" after
+  two hours). Tiles were sized from the file's average density, and along the
+  trajectory one 592 m tile held 211 M points; its classification needed more
+  than 30 GB. Points are now counted on a fine grid while the file is read
+  (streaming: during the partition pass, no extra read), and every tile whose
+  buffered window exceeds the RAM budget (half of the free memory) is split,
+  recursively and across the densest direction, before inference. The pieces
+  partition the tile exactly, so every point is still labelled once.
+- **Less memory per point.** Streaming reads a tile straight into its final
+  arrays (32 bytes per point instead of about 90), and LitePT-L's voxelisation
+  builds its keys chunk by chunk and replaces `np.unique` by a stable sort
+  (identical representatives and projection, about half the peak memory on
+  dense data).
+- **Tiling and streaming no longer change the labels.** Each tile placed the
+  model's crops (LitePT-L) or blocks (SegFormer 3D) on a grid anchored at its
+  own corner, so tiled labels differed from an untiled run of the same file
+  (0.35 to 0.55 % on a street tile cut into 100 m tiles), and splitting a
+  dense tile would have changed them again. Every tile now uses the file's
+  origin, and the buffer is by default exactly the context the model needs:
+  twice the crop radius plus one crop spacing for LitePT-L (91.5 m Airborne,
+  35 m Mobile mapping and Railway, less on GPUs under 16 GB), one block for
+  SegFormer 3D (33.6 m). Measured on a 1.08 M-point street tile cut into 60 m
+  tiles: identical labels to the untiled run for all four engines. The Buffer
+  setting is now *Automatic* (0) by default; a saved 50 m (the old default)
+  becomes automatic, a larger value is used as given, a smaller one is raised
+  to the model's need.
+- **Tiling and streaming are one option.** The dock keeps *Tile large files*;
+  the *Streaming I/O* checkbox is gone. The plugin reads each file's header,
+  compares the memory an in-memory run needs with the memory free at that
+  moment, and streams the file from disk when it does not fit; a file that
+  cannot be classified in one piece is tiled automatically. The log says when
+  either happens. In Processing, `TILE_STREAMING` keeps working and now means
+  "always stream from disk"; unticked, the choice is automatic.
+- **Faster LitePT-L inference.** The neighbour search that builds each crop is
+  bounded by the crop radius: the same points are selected (identical for 600
+  crops of real street data), 16 % faster on dense street data, and the search
+  is about 10 times faster in sparse areas.
+- Streaming writes its temporary tile files in a work folder inside the output
+  folder (removed at the end) instead of the system temporary folder, which is
+  usually on C: and often the fullest drive. It checks the free space of that
+  drive before it starts and refuses with the amount needed when it cannot
+  hold the files.
+
 ## [1.3.2] - 2026-10-23
 
 ### Fixed

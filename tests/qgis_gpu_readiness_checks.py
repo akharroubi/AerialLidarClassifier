@@ -364,6 +364,132 @@ class GpuReadiness(unittest.TestCase):
         self.addCleanup(panel.close)
         return panel
 
+    def test_dock_log_shows_each_task_message_once_with_or_without_the_message_log(self):
+        """GitHub issue 8: the dock showed none of the task's lines (no "Model:",
+        no "CUDA memory:"): on QGIS 4 it listened to a signal that is no longer
+        emitted. The task now also hands its messages to the dock through its
+        own signal; each line must appear exactly once whether QgsMessageLog
+        delivers its copy or not."""
+        import time
+        from qgis.PyQt.QtCore import QThread
+        tasks = module("workers.classifier_task")
+        logger = module("utils.logger")
+        panel = self._panel({"available": False})
+        panel._connect_log()
+        task = tasks.ClassificationTask([], Path("."), "_x", registry.LITEPT_L_DALES.id,
+                                        "cpu", "classification")
+
+        class Worker(QThread):
+            def __init__(self, lines):
+                super().__init__()
+                self.lines = lines
+
+            def run(self):
+                logger.set_thread_sink(task.log_message.emit)
+                try:
+                    for level, line in self.lines:
+                        getattr(logger, level)(line)
+                finally:
+                    logger.set_thread_sink(None)
+
+        def run_lines(lines):
+            panel._running = True
+            panel._log_twins.clear()
+            worker = Worker(lines)
+            worker.start()
+            worker.wait(10000)
+            for _ in range(30):
+                app.processEvents()
+                time.sleep(0.01)
+            panel._running = False
+            return panel.log_text.toPlainText()
+
+        task.log_message.connect(panel._on_task_log_message)
+        lines = [("log_info", "Model: LitePT-L Airborne (10 cm) on CUDA"),
+                 ("log_warning", "CUDA memory: test line 1"),
+                 ("log_warning", "LitePT-L: GPU out of memory; retrying"),
+                 ("log_warning", "LitePT-L: GPU out of memory; retrying")]
+        text = run_lines(lines)
+        self.assertEqual(text.count("Model: LitePT-L Airborne (10 cm) on CUDA"), 1)
+        self.assertEqual(text.count("CUDA memory: test line 1"), 1)
+        # A message the task logs twice is shown twice, not merged.
+        self.assertEqual(text.count("LitePT-L: GPU out of memory; retrying"), 2)
+
+        # QgsMessageLog's copy never arrives (the dock is not connected to it).
+        logger.message_log_signal().disconnect(panel._on_log_message)
+        panel._log_connected = False
+        text = run_lines([("log_warning", "CUDA memory: test line 2"),
+                          ("log_error", "Classification error: test")])
+        self.assertEqual(text.count("CUDA memory: test line 2"), 1)
+        self.assertEqual(text.count("Classification error: test"), 1)
+
+        # Outside a run, plugin messages from the main thread still appear.
+        panel._connect_log()
+        logger.log_info("Setup message outside a run")
+        for _ in range(100):
+            app.processEvents()
+            if "Setup message outside a run" in panel.log_text.toPlainText():
+                break
+            time.sleep(0.01)
+        self.assertEqual(panel.log_text.toPlainText().count("Setup message outside a run"), 1)
+
+    def test_dock_mirrors_the_message_log_on_this_qgis(self):
+        """The dock's log follows the plugin's QgsMessageLog messages on QGIS 3
+        (messageReceived) and QGIS 4 (messageReceivedWithFormat)."""
+        import time
+        logger = module("utils.logger")
+        panel = self._panel({"available": False})
+        panel._connect_log()
+        logger.log_warning("Mirrored message check")
+        for _ in range(100):
+            app.processEvents()
+            if "Mirrored message check" in panel.log_text.toPlainText():
+                break
+            time.sleep(0.01)
+        self.assertEqual(panel.log_text.toPlainText().count("Mirrored message check"), 1)
+        # closeEvent disconnects; reopening reconnects.
+        panel.close()
+        logger.log_warning("While closed")
+        app.processEvents()
+        panel.show()
+        logger.log_warning("After reopening")
+        for _ in range(100):
+            app.processEvents()
+            if "After reopening" in panel.log_text.toPlainText():
+                break
+            time.sleep(0.01)
+        self.assertNotIn("While closed", panel.log_text.toPlainText())
+        self.assertEqual(panel.log_text.toPlainText().count("After reopening"), 1)
+
+    def test_buffer_setting_becomes_automatic_and_streaming_option_is_gone(self):
+        """1.3.3: a saved 50 m buffer (the old default) becomes Automatic (0);
+        a value the user chose is kept; the Streaming I/O checkbox is gone."""
+        panel_module = module("gui.main_panel")
+        for saved, expected in ((50.0, 0.0), (80.0, 80.0), (None, 0.0)):
+            settings = {f"{config.SETTINGS_PREFIX}/settings_version": 2}
+            if saved is not None:
+                settings[f"{config.SETTINGS_PREFIX}/tile_buffer_m"] = saved
+
+            class Settings:
+                def value(self, key, default=None, **kwargs):
+                    return settings.get(key, default)
+
+                def setValue(self, key, value):
+                    settings[key] = value
+            with patch.object(panel_module, "QgsSettings", Settings), \
+                 patch.object(panel_module, "get_gpu_info", return_value={"available": False}), \
+                 patch.object(panel_module.ModelManager, "is_model_available", return_value=True):
+                panel = panel_module.ClassifierDockWidget(None)
+                try:
+                    self.assertEqual(panel.tile_buffer_spin.value(), expected, saved)
+                    self.assertEqual(settings[f"{config.SETTINGS_PREFIX}/settings_version"], 3)
+                    if expected == 0.0:
+                        self.assertEqual(panel.tile_buffer_spin.text(), "Automatic")
+                    self.assertFalse(hasattr(panel, "tile_streaming_check"))
+                    self.assertIn("streamed from disk automatically", panel.tile_check.toolTip())
+                finally:
+                    panel.close()
+
     def test_gate_messages_never_ask_for_an_impossible_action(self):
         cases = (
             ({"available": False, "reason": "no_gpu"}, "No GPU visible", "driver"),

@@ -42,6 +42,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QVariant
 
 from ..config import PLUGIN_NAME, TILE_DEFAULT_BUFFER_M
+from ..core.memory import plan_processing
 from ..core.registry import CLASSIFIERS, MODELS
 from ..utils.class_mapping import output_codes_json, output_model_spec, supports_output_codes, validate_model_output_field
 from ..utils.compat import scoped_enum
@@ -203,15 +204,18 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             "auto-size to ~10 M points per tile; positive value forces "
             "a square tile side.</li>"
             "<li><b>Tile buffer in metres</b> - context halo around "
-            "each tile (50 m default). Predictions inside the buffer "
-            "are discarded so points near tile edges still benefit from "
-            "context.</li>"
-            "<li><b>Streaming I/O</b> - process files larger than RAM. "
-            "Reads the input chunk-by-chunk via <code>laspy</code>, stores "
-            "per-tile points in disk-backed sidecars, runs per-tile "
-            "inference one tile at a time and streams the output writer. "
-            "Predictions and coverage use about 2 bytes/point during inference, plus tile/model workspace and one "
-            "chunk. Requires tiling to be enabled.</li>"
+            "each tile; predictions inside the buffer are discarded. "
+            "<code>0</code> (default) uses exactly the context the model "
+            "needs (Airborne LitePT-L 91.5 m, Mobile mapping and Railway 35 m, "
+            "SegFormer 3D 34 m), with which tiled results equal untiled "
+            "ones; a smaller value is raised to it.</li>"
+            "<li><b>Files larger than RAM</b> are streamed automatically: "
+            "when a file would not fit in memory, it is read in chunks, the "
+            "points of each tile go to temporary files in a work folder inside "
+            "the output folder (removed at the end), one tile is classified at "
+            "a time and the output is written as it goes. A file that does not "
+            "fit in one piece is tiled automatically. The log says when either "
+            "happens. <b>Always stream from disk</b> forces streaming.</li>"
             "<li><b>Input units</b> - the model works in metres. By "
             "default the unit is read from the file's CRS (WKT or GeoTIFF "
             "keys) and feet are converted before inference; the log says "
@@ -309,7 +313,7 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
         self._add_advanced(
             QgsProcessingParameterNumber(
                 self.TILE_BUFFER_M,
-                self.tr("Tile buffer in metres"),
+                self.tr("Tile buffer in metres (0 = automatic: the context the model needs)"),
                 type=_NUMBER_DOUBLE,
                 defaultValue=TILE_DEFAULT_BUFFER_M,
                 minValue=0.0,
@@ -320,8 +324,8 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             QgsProcessingParameterBoolean(
                 self.TILE_STREAMING,
                 self.tr(
-                    "Streaming I/O (handle files larger than RAM; "
-                    "requires tiling)"
+                    "Always stream from disk (otherwise automatic when the "
+                    "file does not fit in RAM)"
                 ),
                 defaultValue=False,
             )
@@ -576,6 +580,16 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
                                            extra_dim_description)
         with laspy.open(str(input_path)) as reader:
             field_name = validate_label_field(reader.header.point_format, field_name, laspy)
+            n_points = int(reader.header.point_count)
+            record_length = int(reader.header.point_format.size)
+        # Tiling is the user's choice; streaming follows from the memory the
+        # file needs (TILE_STREAMING forces it, as in 1.0 to 1.3.2).
+        mode, reason = plan_processing(n_points, record_length, tile_enabled,
+                                       force_streaming=tile_enabled and tile_streaming)
+        if reason:
+            feedback.pushInfo(self.tr(f"{input_path.name}: {reason}"))
+        if not tile_enabled and mode != "untiled":
+            tile_auto = True
         output_path = _resolve_output_path(input_path, output_folder, suffix)
         self._guard_input_output_collision(input_path, output_path)
 
@@ -592,16 +606,28 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             feedback.pushInfo(self.tr(f"Classifier: {classifier.display_name}"))
         feedback.pushInfo(self.tr(f"Model: {spec.display_name}"))
         backend_loaded = False
-        def predict_fn(xyz_m, progress_cb):
+
+        def ensure_loaded():
             nonlocal backend_loaded
             if not backend_loaded:
                 backend.load(device)
                 backend_loaded = True
+
+        def predict_fn(xyz_m, progress_cb):
+            ensure_loaded()
             return backend.predict(xyz_m, progress_cb, feedback.isCanceled)
+
+        def context_buffer():
+            ensure_loaded()  # the need depends on the GPU (crop budget)
+            return getattr(backend, "context_buffer_m", None)
+        # Tiles share the file's origin and use the model's context as buffer
+        # (see LitePTBackend.set_reference_origin, core.tiling.resolve_buffer).
+        predict_fn.set_reference_origin = getattr(backend, "set_reference_origin", None)
+        predict_fn.context_buffer = context_buffer
 
         # ---- Streaming dispatch (writes the output directly) ----------------
         is_asprs_field = field_name.lower() == ASPRS_CLASSIFICATION_FIELD
-        if tile_enabled and tile_streaming:
+        if mode == "streaming":
             from ..workers.streaming_classifier import streaming_tiled_classify
 
             output_path = _resolve_output_path(
@@ -619,8 +645,7 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
                 feedback.setProgress(int(min(100, max(0, p))))
 
             feedback.pushInfo(self.tr(
-                "Streaming + tiling enabled - processing without loading "
-                "the entire file into RAM."
+                "Streaming the file from disk in tiles (it is not loaded into RAM)."
             ))
             try:
                 written = streaming_tiled_classify(
@@ -688,11 +713,11 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             f"Running {spec.display_name} on {device.upper()}..."
         ))
         try:
-            if tile_enabled:
+            if mode == "tiled":
                 feedback.pushInfo(self.tr(
                     "Tiling enabled "
                     f"(auto={tile_auto}, tile={tile_size_m or 'auto'} m, "
-                    f"buffer={tile_buffer_m:.0f} m)."
+                    f"buffer={'automatic' if tile_buffer_m <= 0 else f'{tile_buffer_m:g} m'})."
                 ))
                 preds = _classify_tiled(
                     pcd, predict_fn, progress_cb, feedback.isCanceled,

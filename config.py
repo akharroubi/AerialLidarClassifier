@@ -48,9 +48,15 @@ PLUGIN_VERSION = _read_plugin_version()
 # needs (its point arrays and block index lists), not GPU memory.
 TILE_AUTO_TARGET_POINTS = 10_000_000
 
-# Default lateral buffer in metres around each tile, to provide spatial
-# context for points near tile edges.
-TILE_DEFAULT_BUFFER_M = 50.0
+# Lateral buffer in metres around each tile, to provide spatial context for
+# points near tile edges. 0 (the default since 1.3.3) means automatic: the
+# loaded model's own need (core.tiling.resolve_buffer), with which tiled
+# labels equal untiled ones. A larger user value is used as given.
+TILE_BUFFER_AUTO = 0.0
+TILE_DEFAULT_BUFFER_M = TILE_BUFFER_AUTO
+# Buffer for a backend that does not state its need (none of the shipped
+# ones); the default of 1.0 to 1.3.2.
+TILE_FALLBACK_BUFFER_M = 50.0
 
 # Point count above which the UI suggests turning tiling on.
 TILE_RECOMMEND_ABOVE = 20_000_000

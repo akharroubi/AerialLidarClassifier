@@ -3,7 +3,7 @@ name=LiDAR AI Classifier
 qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
 description=Classify airborne, mobile mapping and railway LiDAR point clouds with deep learning (LitePT-L).
-version=1.3.2
+version=1.3.3
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
 email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
@@ -43,6 +43,36 @@ hasProcessingProvider=yes
 server=False
 
 changelog=
+    1.3.3
+        - "CUDA driver error: unknown error" with the automatic GPU memory
+          allocator on Windows: the failure of some drivers is intermittent
+          and no test allocation detects it, so the automatic mode now uses
+          PyTorch's standard allocator on Windows (identical labels, more
+          reserved GPU memory). Elsewhere a run that hits the error switches
+          to the standard allocator, retries, and remembers the GPU.
+        - QGIS 4: the dock's log now shows the run's own messages ("Model:",
+          "CUDA memory:", crop size, retries, streaming passes). QGIS 4 no
+          longer emits the signal the dock listened to.
+        - Large mobile mapping files no longer run out of RAM in tiled and
+          streaming mode: tiles are sized from the average density, so a
+          tile along the trajectory could hold 20 times more points than its
+          neighbours. Points are now counted while the file is read and every
+          tile over the memory budget is split before inference. Each tile
+          also needs about half the memory per point. Streaming keeps its
+          temporary tile files in the output folder (not on C:) and checks
+          the free space of that drive before it starts.
+        - LitePT-L is faster: the neighbour search of each crop is bounded
+          by the crop radius (same points, 16 % faster on dense street data,
+          much faster in sparse areas).
+        - Tiling and streaming no longer change the labels: every tile uses
+          the file's origin for the model's crops or blocks, and the buffer
+          is automatically the context the model needs (91.5 m Airborne,
+          35 m Mobile mapping and Railway, 33.6 m SegFormer 3D). Measured:
+          identical labels to an untiled run for all four engines.
+        - Tiling and streaming are one option: "Tile large files". A file
+          that does not fit in the free memory is streamed from disk
+          automatically, and the log says so. In Processing, TILE_STREAMING
+          now means "always stream".
     1.3.2
         - "CUDA driver error" at the first GPU allocation (shared vGPU
           profiles such as an A10-8Q, some Windows drivers with RTX A6000

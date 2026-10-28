@@ -327,5 +327,130 @@ class ReleaseChecks(unittest.TestCase):
             self.assertEqual(output.read_bytes(), b'previous output')
 
 
+    def _dense_corridor_las(self, folder, n_street=240_000, n_background=20_000):
+        """GitHub issue 10 in miniature: a dense street across a sparse area,
+        written in shuffled order (file order is not spatial)."""
+        rng = np.random.default_rng(10)
+        street = np.column_stack([rng.uniform(0, 2_000, n_street), rng.uniform(995, 1_005, n_street),
+                                  rng.uniform(0, 10, n_street)])
+        background = np.column_stack([rng.uniform(0, 2_000, n_background), rng.uniform(0, 2_000, n_background),
+                                      rng.uniform(0, 10, n_background)])
+        xyz = np.vstack([street, background])[rng.permutation(n_street + n_background)]
+        h = laspy.LasHeader(point_format=6, version='1.4')
+        h.scales = [0.001, 0.001, 0.001]
+        h.offsets = [0, 0, 0]
+        d = laspy.LasData(h)
+        d.x, d.y, d.z = xyz.T
+        source = Path(folder) / 'corridor.las'
+        d.write(source)
+        return source, laspy.read(source)
+
+    @staticmethod
+    def _position_labels(xyz):
+        """A label that depends only on the point, not on the tile it came in."""
+        return (np.floor(xyz[:, 0] / 37.0).astype(np.int64) % 7 + 1).astype(np.int32)
+
+    def test_dense_tiles_are_split_to_the_memory_budget_streaming_and_memory(self):
+        """Every predict call stays within the point budget (the buffer allows
+        it here), every point is labelled once, from its own position."""
+        memory = module('core.memory')
+        with tempfile.TemporaryDirectory() as folder:
+            source, original = self._dense_corridor_las(folder)
+            expected_ids = self._position_labels(np.column_stack([original.x, original.y, original.z]))
+            expected = np.array([spec.class_mapping[int(i)].asprs_code for i in expected_ids])
+            budget = 40_000
+            for mode in ('stream', 'memory'):
+                calls = []
+
+                def predict(xyz, cb):
+                    calls.append(len(xyz))
+                    return self._position_labels(xyz)
+                output = Path(folder) / 'results' / (mode + '.las')
+                messages = []
+                workdirs = []
+                real_mkdtemp = streaming.tempfile.mkdtemp
+
+                def mkdtemp(*args, **kwargs):
+                    workdirs.append(Path(real_mkdtemp(*args, **kwargs)))
+                    return str(workdirs[-1])
+                with patch.dict(os.environ, {memory.ENV_TILE_POINTS: str(budget)}),                         patch.object(streaming, 'log_info', messages.append),                         patch.object(tasks, 'log_info', messages.append),                         patch.object(streaming.tempfile, 'mkdtemp', mkdtemp):
+                    if mode == 'stream':
+                        streaming.streaming_tiled_classify(
+                            source, output, predict, 'cpu', spec.class_mapping, laspy,
+                            lambda p: None, lambda: False, tile_auto=True, buffer_m=10,
+                            chunk_size=50_000, model_spec=spec)
+                    else:
+                        output.parent.mkdir(exist_ok=True)
+                        task = tasks.ClassificationTask([source], Path(folder), '_m', spec.id, 'cpu',
+                                                        'classification', tile_enabled=True,
+                                                        tile_auto=True, tile_buffer_m=10)
+                        task._process_one(source, output, predict, laspy, 0, 100)
+                self.assertTrue(any('dense tile(s) split' in m for m in messages), (mode, messages))
+                if mode == 'stream':
+                    # Temporary tile files next to the output, never in the
+                    # system temporary folder, and removed afterwards.
+                    self.assertEqual([w.parent for w in workdirs], [output.parent])
+                    self.assertFalse(workdirs[0].exists())
+                    self.assertEqual(sorted(p.name for p in output.parent.iterdir()), ['stream.las'])
+                self.assertLessEqual(max(calls), budget, mode)
+                result = laspy.read(output)
+                self.assertEqual(len(result.points), len(original.points))
+                np.testing.assert_array_equal(np.asarray(result.classification), expected, err_msg=mode)
+                np.testing.assert_array_equal(result.X, original.X)
+
+    def test_file_larger_than_free_memory_is_streamed_without_the_option(self):
+        """Tiling and streaming are one option: with streaming not requested,
+        a file that does not fit in the free memory is streamed (dock task and
+        Processing), and one that fits stays in memory."""
+        memory = module('core.memory')
+        algorithm_module = module('processing.classify_algorithm')
+        with tempfile.TemporaryDirectory() as folder:
+            source, original = self._dense_corridor_las(folder, 60_000, 2_000)
+            expected = np.array([spec.class_mapping[int(i)].asprs_code for i in
+                                 self._position_labels(np.column_stack([original.x, original.y, original.z]))])
+            for available, expected_mode in ((10 ** 6, 'streaming'), (64 * 1024 ** 3, 'tiled')):
+                messages = []
+                streamed = []
+                real_stream = streaming.streaming_tiled_classify
+
+                def spy(*args, **kwargs):
+                    streamed.append(True)
+                    return real_stream(*args, **kwargs)
+                with patch.object(memory, 'available_memory_bytes', return_value=available), \
+                        patch.object(streaming, 'streaming_tiled_classify', spy), \
+                        patch.object(tasks, 'log_info', messages.append):
+                    output = Path(folder) / f'{expected_mode}_task.las'
+                    task = tasks.ClassificationTask([source], Path(folder), '_t', spec.id, 'cpu',
+                                                    'classification', tile_enabled=True, tile_auto=True,
+                                                    tile_buffer_m=10)
+                    task._process_one(source, output, lambda xyz, cb: self._position_labels(xyz),
+                                      laspy, 0, 100)
+                self.assertEqual(bool(streamed), expected_mode == 'streaming', expected_mode)
+                self.assertEqual(any('streaming the file from disk automatically' in m for m in messages),
+                                 expected_mode == 'streaming')
+                np.testing.assert_array_equal(np.asarray(laspy.read(output).classification), expected)
+            # Processing decides the same way from the same header.
+            with patch.object(memory, 'available_memory_bytes', return_value=10 ** 6):
+                mode, reason = algorithm_module.plan_processing(len(original.points), 30, True)
+            self.assertEqual(mode, 'streaming')
+
+    def test_streaming_refuses_a_temp_folder_that_cannot_hold_the_sidecars(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source, _ = self._dense_corridor_las(folder, 20_000, 1_000)
+            output = Path(folder) / 'out.las'
+            full = types.SimpleNamespace(total=10 ** 12, used=10 ** 12, free=100_000)
+            with patch.object(streaming.shutil, 'disk_usage', return_value=full):
+                with self.assertRaisesRegex(RuntimeError, 'Not enough free space'):
+                    streaming.streaming_tiled_classify(
+                        source, output, lambda xyz, cb: np.ones(len(xyz), dtype=np.int32), 'cpu',
+                        spec.class_mapping, laspy, lambda p: None, lambda: False, model_spec=spec)
+            self.assertFalse(output.exists())
+            warnings = []
+            tight = types.SimpleNamespace(total=10 ** 12, used=10 ** 12, free=21_000 * 32 + 10)
+            with patch.object(streaming.shutil, 'disk_usage', return_value=tight):
+                streaming._check_temp_space(Path(folder), 21_000, [(0, 0, 100, 100)], 50.0, warnings.append)
+            self.assertTrue(warnings and 'may need up to' in warnings[0])
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

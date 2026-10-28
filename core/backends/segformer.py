@@ -26,6 +26,27 @@ class SegFormerBackend:
         self.model = None
         self.configs = None
         self.device = None
+        # The whole file's minimum when it is processed in tiles: the block
+        # lattice is anchored there instead of at each tile's minimum.
+        self.reference_origin = None
+
+    def set_reference_origin(self, origin) -> None:
+        """Anchor the block lattice of every following predict() call at the
+        file's minimum (what an untiled run uses) instead of each tile's.
+        With a buffer of at least one block (see context_buffer_m), the
+        blocks that hold a tile's core points then contain exactly the
+        points they contain untiled, so tiling does not change the labels.
+        None restores the default."""
+        self.reference_origin = None if origin is None else np.asarray(origin, dtype=np.float64)
+
+    @property
+    def context_buffer_m(self) -> float:
+        """Buffer a tile needs: one block side (XY), the reach of the
+        blocks that contain a core point. Valid after load()."""
+        model = (self.configs or {}).get("model", {})
+        size = np.asarray(model.get("voxel_number_in_block", [112, 112]), dtype=np.float64)[:2]
+        res = np.asarray(model.get("voxel_resolution_in_meter", [0.3, 0.3]), dtype=np.float64)[:2]
+        return float((size * res).max())
 
     def load(self, device: str = "cuda") -> None:
         from ..classifier_core import load_segformer, resolve_device
@@ -68,4 +89,5 @@ class SegFormerBackend:
         return predict_blocks(
             self.model, self.configs, self.device, np.asarray(xyz_m, dtype=np.float64),
             if_bottom_only=False, progress_callback=progress,
+            origin=self.reference_origin,
         )

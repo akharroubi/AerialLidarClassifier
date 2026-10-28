@@ -187,8 +187,9 @@ time and an *Open folder* button.
   codes...* (Mobile mapping and Railway), and *Load classified files in QGIS*.
 - **Advanced parameters** (collapsed): *Use GPU*, *Clear GPU memory*, *GPU
   memory allocator* (automatic, expandable segments or standard; see
-  [Troubleshooting](#cuda-driver-error-at-the-first-gpu-allocation)), tiling
-  (auto size or tile size in metres, buffer in metres), *Streaming I/O*, and
+  [Troubleshooting](#cuda-driver-error-at-the-first-gpu-allocation)), *Tile
+  large files* (auto size or tile size in metres, buffer in metres; files
+  larger than the free memory are streamed from disk automatically), and
   *Input units*.
 - **Log** (always visible) and the footer with progress, *Cancel* and *Run*.
 
@@ -214,8 +215,8 @@ qgis_process run aeriallidar:classify_point_cloud -- \
 | `FIELD_NAME` | `classification` (default). The Airborne classifier also accepts a new name (raw model classes in an extra field) |
 | `OUTPUT_CODES_JSON` | mobile mapping and railway, optional: codes keyed by model class ID, e.g. `{"5":70,"6":71,"7":72}`; blank keeps the defaults |
 | `LOAD_AS_LAYER` | add the result to the project |
-| `TILE_ENABLED`, `TILE_SIZE_M`, `TILE_BUFFER_M` | tiling; size `0` is automatic (about 10 M points per tile), buffer default 50 m |
-| `TILE_STREAMING` | streaming I/O for files larger than RAM |
+| `TILE_ENABLED`, `TILE_SIZE_M`, `TILE_BUFFER_M` | tiling; size `0` is automatic (about 10 M points per tile); buffer `0` (default) is the context the model needs, with which tiles give the same labels as an untiled run |
+| `TILE_STREAMING` | always stream from disk; otherwise a file is streamed automatically when it does not fit in RAM |
 | `UNITS` | `0` auto-detect, `1` metres, `2` international feet, `3` US survey feet |
 
 For example, mobile mapping with your own user-defined codes for poles,
@@ -273,12 +274,18 @@ Airborne classifier then runs its SegFormer 3D engine; the Mobile mapping and
 Railway classifiers need LitePT-L.
 
 **GPU memory allocator.** For the LitePT-L models the plugin selects PyTorch's
-allocator per computer: expandable segments where the GPU driver supports CUDA
-virtual memory management (they keep the reserved memory close to what is
-used, which smaller cards need), the standard allocator elsewhere (shared vGPU
-profiles such as an A10-8Q, and the Windows drivers that refuse the mapping
-calls). The run log says which one served the run. *Advanced parameters > GPU
-memory allocator* fixes the choice; scripts and `qgis_process` can set
+allocator. In the automatic mode (default) it uses the standard allocator on
+Windows, where some GPU drivers refuse expandable segments intermittently, and
+on drivers without CUDA virtual memory management (shared vGPU profiles such as
+an A10-8Q). Elsewhere it uses expandable segments, which keep the reserved
+memory close to what is used; if the driver still refuses them during a run,
+the run switches to the standard allocator and retries, and later runs on that
+GPU start with it. Both allocators give identical labels; the standard one
+reserves about twice as much GPU memory (for example 4.2 GB instead of 2.0 GB
+for Mobile Mapping on an 8 GB card), without out-of-memory retries on 6, 8 or
+12 GB cards. The run log says which allocator served the run, in a line
+starting with `CUDA memory:`. *Advanced parameters > GPU memory allocator*
+fixes the choice; scripts and `qgis_process` can set
 `AERIAL_LIDAR_CLASSIFIER_CUDA_ALLOCATOR` to `auto`, `expandable` or `standard`.
 A `PYTORCH_CUDA_ALLOC_CONF` of your own is respected in automatic mode.
 
@@ -443,19 +450,45 @@ feet) or the `UNITS` parameter in Processing.
 
 ## Tiling, streaming and large files
 
-- **Tiling** splits the file into square tiles with a context buffer; only the
-  core of each tile is written. Tile size is automatic (about 10 M points per
-  tile) or set in metres; the buffer defaults to 50 m. Tiling bounds the work
-  handed to the model, but the whole file is still read into RAM.
-- **Streaming I/O** (needs tiling; the dock ticks both) reads the file in
-  chunks, keeps per-tile points in temporary files on disk, classifies one tile
-  at a time and writes the output as it goes. Use it when the file does not fit
-  in RAM, with enough free space on a local disk for the temporary files.
+- **Tile large files** splits the file into square tiles with a context
+  buffer; only the core of each tile is written. Tile size is automatic (about
+  10 M points per tile at the file's average density) or set in metres. The
+  file is read into RAM once and the model works on one tile at a time.
+- **Tiling does not change the labels.** Every tile places the model's crops
+  (LitePT-L) or blocks (SegFormer 3D) on the same grid as an untiled run of
+  the whole file, and the buffer is, by default, exactly the context the
+  model needs: 91.5 m for Airborne LitePT-L, 35 m for Mobile mapping and
+  Railway (less on GPUs under 16 GB, where the crops are smaller), 34 m for
+  SegFormer 3D. Measured on a 1.08 M-point street tile cut into 100 m tiles:
+  identical labels to the untiled run for LitePT-L Airborne and Mobile
+  Mapping and for SegFormer 3D. A buffer set larger is used as given; a smaller one is raised to
+  the model's need.
+- **Streaming is automatic.** Before each file the plugin reads its header and
+  compares the memory an in-memory run needs (the point records, the
+  coordinates and one tile) with the memory free at that moment. A file that
+  does not fit is streamed from disk: read in chunks, the points of each tile
+  kept in temporary files, one tile classified at a time, the output written
+  as it goes, about 2 bytes per point in RAM for the whole file. A file meant
+  to run in one piece (tiling unticked) that does not fit in one piece is
+  tiled automatically. The log says when either happens. The temporary tile
+  files take about 32 bytes per point (more with the buffers) in a work folder
+  inside the output folder, on the drive you chose for the results, and are
+  removed at the end; the run checks the free space of that drive before it
+  starts and says how much it needs. In Processing, `TILE_STREAMING` forces
+  streaming.
+- **Dense tiles are split.** Point density is rarely uniform: along a mobile
+  mapping trajectory a tile sized from the average density can hold twenty
+  times more points than its neighbours. While reading the file, the plugin
+  counts the points on a fine grid, and every tile whose buffered window holds
+  more points than half of the free RAM allows is cut in two, recursively,
+  across the densest direction, before inference. The log says how many tiles
+  were split. Splitting stops when the model's context around a piece holds
+  most of its points; if such a piece is still over the budget, the log says
+  so and the run continues.
 
-Streaming is not a fixed memory budget: a dense tile, its buffer and the model
-still need memory, and the predictions take about 2 bytes per point. Run one
-job at a time on very large data, and untick *Load classified files in QGIS*
-for long batches.
+The predictions take about 2 bytes per point for the whole file. Run one job
+at a time on very large data, and untick *Load classified files in QGIS* for
+long batches.
 
 To keep the GPU free for other work, choose the Airborne classifier and untick
 *Use GPU*: its SegFormer 3D engine then runs on the CPU. *Clear GPU memory* releases unused cached memory
@@ -558,12 +591,15 @@ status tooltip and the log say why.
 error` in `backbone.to(device)`, sometimes followed on the next run by an
 `INTERNAL ASSERT FAILED ... CUDACachingAllocator.cpp` message, means that the
 GPU driver refuses the virtual memory calls of PyTorch's expandable-segments
-allocator (shared vGPU profiles, some Windows drivers). Since 1.3.2 the plugin
-tests the driver before the first allocation and falls back to the standard
-allocator by itself; the log line starting with `CUDA memory:` says what was
-chosen. If a run still fails this way, set *Advanced parameters > GPU memory
-allocator* to *Standard allocator*. Versions before 1.3.2 forced expandable
-segments on every GPU: update the plugin.
+allocator (shared vGPU profiles, some Windows drivers). Since 1.3.3 the
+automatic mode uses the standard allocator on Windows and on vGPU profiles,
+and switches to it by itself if the driver refuses expandable segments during
+a run elsewhere; the log line starting with `CUDA memory:` says what was
+chosen. These errors can only come back with *Advanced parameters > GPU memory
+allocator* set to *Expandable segments*: choose *Automatic* or *Standard
+allocator*. Versions before 1.3.2 forced expandable segments on every GPU, and
+1.3.2 still chose them on Windows when a small test allocation passed: update
+the plugin.
 
 ### Install fails with `WinError 4551` / "Application Control policy"
 

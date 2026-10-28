@@ -1,8 +1,10 @@
-"""The allocator mode must follow the driver in automatic mode: expandable
-segments where they work, the standard allocator (with an explanation) where
-the driver refuses them, no change when the user configured
-PYTORCH_CUDA_ALLOC_CONF; and the user's explicit choice (plugin setting or
-environment override) must win over the probe."""
+"""The allocator mode: in automatic mode the standard allocator on Windows
+(GitHub issue 8: intermittent driver failures no probe detects), expandable
+segments elsewhere where the driver supports them, the standard allocator
+(with an explanation) where it does not or where they failed before, no
+change when the user configured PYTORCH_CUDA_ALLOC_CONF; the user's explicit
+choice (plugin setting or environment override) wins; a failure during a
+run switches to the standard allocator once and is remembered."""
 
 import os
 import unittest
@@ -47,10 +49,20 @@ class AllocatorMode(unittest.TestCase):
         os.environ.pop(alloc.ENV_OVERRIDE, None)
         alloc._PLATFORM_UNSUPPORTED = False
         self.addCleanup(setattr, alloc, "_PLATFORM_UNSUPPORTED", False)
+        alloc._active.update(mode=None, chosen_by=None, signature=None)
+        self.addCleanup(alloc._active.update, mode=None, chosen_by=None, signature=None)
+        self.remembered = []
+        for name, value in (("_remembered_failures", lambda: list(self.remembered)),
+                            ("_remember_failure", self.remembered.append),
+                            ("driver_version", lambda: "596.72")):
+            patcher = mock.patch.object(alloc, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.messages = []
 
-    def configure(self, torch, supports, mode="auto"):
-        return alloc.configure_cuda_allocator(torch, self.messages.append, supports=supports, mode=mode)
+    def configure(self, torch, supports, mode="auto", platform="linux"):
+        return alloc.configure_cuda_allocator(torch, self.messages.append, supports=supports,
+                                              mode=mode, platform=platform)
 
     def test_driver_without_virtual_memory_keeps_the_standard_allocator(self):
         torch = _FakeTorch()
@@ -73,13 +85,82 @@ class AllocatorMode(unittest.TestCase):
         self.assertEqual(torch.calls, ["expandable_segments:True", "expandable_segments:False"])
         self.assertIn("operation not supported", self.messages[0])
 
-    def test_windows_driver_refusing_the_mapping_falls_back(self):
-        # Issue 8: dual RTX A6000, driver 596.72: the attribute says supported,
-        # the first allocation fails with "unknown error".
+    def test_driver_refusing_the_probe_falls_back_and_is_remembered(self):
         torch = _FakeTorch(fail=RuntimeError("CUDA driver error: unknown error"))
         self.assertEqual(self.configure(torch, lambda i: True), "standard")
         self.assertEqual(torch.calls[-1], "expandable_segments:False")
         self.assertIn("unknown error", self.messages[0])
+        self.assertEqual(self.remembered, ["unknown GPU|unknown|596.72"])
+
+    def test_windows_automatic_mode_uses_the_standard_allocator_without_probing(self):
+        # Issue 8: dual RTX A6000, driver 596.72, Windows: the driver reports
+        # virtual memory management, a 1 MB probe passes, and allocations of
+        # 4 to 32 MB fail later, differently from run to run.
+        torch = _FakeTorch(fail=AssertionError("no GPU allocation may happen here"))
+        self.assertEqual(self.configure(torch, lambda i: True, platform="win32"), "standard")
+        self.assertEqual(torch.calls, ["expandable_segments:False"])
+        self.assertEqual(len(self.messages), 1)
+        self.assertTrue(self.messages[0].startswith("CUDA memory: PyTorch's standard allocator"))
+        self.assertIn("automatic choice on Windows", self.messages[0])
+        self.assertIn("GPU memory allocator", self.messages[0])
+        self.assertEqual(alloc._active["mode"], "standard")
+        # The explicit setting still forces expandable segments on Windows.
+        self.messages.clear()
+        forced = _FakeTorch()
+        self.assertEqual(self.configure(forced, lambda i: True, mode="expandable",
+                                        platform="win32"), "expandable")
+        self.assertEqual(forced.calls, ["expandable_segments:True"])
+
+    def test_remembered_failure_starts_with_the_standard_allocator(self):
+        self.remembered.append("unknown GPU|unknown|596.72")
+        torch = _FakeTorch(fail=AssertionError("no GPU allocation may happen here"))
+        self.assertEqual(self.configure(torch, lambda i: True), "standard")
+        self.assertEqual(torch.calls, ["expandable_segments:False"])
+        self.assertIn("failed in an earlier run", self.messages[0])
+        # Another driver version is another computer for the allocator.
+        with mock.patch.object(alloc, "driver_version", lambda: "610.88"):
+            self.messages.clear()
+            self.assertEqual(self.configure(_FakeTorch(), lambda i: True), "expandable")
+
+    def test_failure_during_a_run_switches_to_standard_once_and_is_remembered(self):
+        torch = _FakeTorch()
+        self.assertEqual(self.configure(torch, lambda i: True), "expandable")
+        self.messages.clear()
+        for text in ("CUDA driver error: unknown error",
+                     '!handles_.at(i) INTERNAL ASSERT FAILED at "C:\\actions-runner\\_work\\'
+                     'pytorch\\pytorch\\c10\\cuda\\CUDACachingAllocator.cpp":487'):
+            self.assertTrue(alloc.looks_like_allocator_failure(RuntimeError(text)), text)
+        self.assertTrue(alloc.recover_from_allocator_failure(
+            torch, RuntimeError("CUDA driver error: unknown error"), self.messages.append))
+        self.assertEqual(torch.calls[-1], "expandable_segments:False")
+        self.assertEqual(self.remembered, ["unknown GPU|unknown|596.72"])
+        self.assertIn("switched to PyTorch's standard allocator", self.messages[0])
+        self.assertTrue(self.messages[0].startswith("CUDA memory:"))
+        # Already on the standard allocator: nothing more to recover.
+        self.assertFalse(alloc.recover_from_allocator_failure(
+            torch, RuntimeError("CUDA driver error: unknown error"), self.messages.append))
+        self.assertIn("restart QGIS", str(alloc.restart_advice(RuntimeError("x"))).replace("Restart", "restart"))
+
+    def test_other_errors_during_a_run_are_not_recovered(self):
+        torch = _FakeTorch()
+        self.configure(torch, lambda i: True)
+        for text in ("CUDA error: an illegal memory access was encountered",
+                     "Expected all tensors to be on the same device"):
+            self.assertFalse(alloc.looks_like_allocator_failure(RuntimeError(text)), text)
+            self.assertFalse(alloc.recover_from_allocator_failure(torch, RuntimeError(text)))
+        self.assertEqual(torch.calls, ["expandable_segments:True"])
+
+    def test_no_recovery_with_the_standard_allocator_or_a_forced_setting(self):
+        torch = _FakeTorch()
+        self.configure(torch, lambda i: True, mode="standard")
+        self.assertFalse(alloc.recover_from_allocator_failure(
+            torch, RuntimeError("CUDA driver error: unknown error")))
+        forced = _FakeTorch()
+        self.configure(forced, lambda i: True, mode="expandable")
+        with self.assertRaisesRegex(RuntimeError, "Automatic or Standard"):
+            alloc.recover_from_allocator_failure(
+                forced, RuntimeError("CUDA driver error: unknown error"))
+        self.assertEqual(self.remembered, [])
 
     def test_other_errors_are_not_swallowed(self):
         torch = _FakeTorch(fail=RuntimeError("CUDA out of memory"))
@@ -158,10 +239,25 @@ class AllocatorMode(unittest.TestCase):
         self.assertEqual(self.configure(torch, lambda i: True), "expandable")
         self.assertEqual(torch.calls, ["expandable_segments:True"])
 
-    def test_torch_without_setter_changes_nothing(self):
+    def test_torch_without_setter_changes_nothing_and_says_so(self):
         torch = mock.Mock(spec=[])
         self.assertEqual(self.configure(torch, lambda i: True), "unchanged")
         self.assertEqual(self.configure(torch, lambda i: True, mode="standard"), "unchanged")
+        self.assertEqual(self.configure(torch, lambda i: True, platform="win32"), "unchanged")
+        self.assertEqual(len(self.messages), 3)
+        self.assertTrue(all(m.startswith("CUDA memory:") for m in self.messages))
+
+    def test_every_decision_writes_one_cuda_memory_line(self):
+        cases = [dict(supports=lambda i: True), dict(supports=lambda i: False),
+                 dict(supports=lambda i: True, platform="win32"),
+                 dict(supports=lambda i: True, mode="standard"),
+                 dict(supports=lambda i: True, mode="expandable")]
+        for case in cases:
+            with self.subTest(case=case):
+                self.messages.clear()
+                self.configure(_FakeTorch(), **case)
+                self.assertEqual(len(self.messages), 1)
+                self.assertTrue(self.messages[0].startswith("CUDA memory:"))
 
     def test_driver_query_never_raises(self):
         # Whatever the machine, the query answers True, False or None.
