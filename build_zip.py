@@ -132,6 +132,21 @@ def check_no_binaries(files) -> None:
         raise SystemExit("Binary or data files must not be packed:\n  " + "\n  ".join(found))
 
 
+def check_metadata_parses() -> None:
+    """plugins.qgis.org reads metadata.txt with configparser and its default
+    interpolation: a single '%' (as in "16 % faster") rejects the upload
+    ("'%' must be followed by '%' or '('"). Parse it the same way."""
+    import configparser
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(ROOT / "metadata.txt", encoding="utf-8")
+        for key in parser["general"]:
+            parser["general"][key]
+    except (configparser.Error, KeyError) as exc:
+        raise SystemExit(f"metadata.txt would be rejected by plugins.qgis.org: {exc}. "
+                         "Write 'percent' instead of '%'.")
+
+
 def check_flake8_blockers() -> None:
     """Refuse Flake8's syntax-class errors (project policy).
 
@@ -154,6 +169,7 @@ def check_flake8_blockers() -> None:
 
 def build(destination: Path) -> str:
     files = collect()
+    check_metadata_parses()
     check_no_binaries(files)
     check_secrets_scanner(files)
     check_bandit()

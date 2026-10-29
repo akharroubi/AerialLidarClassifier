@@ -58,13 +58,13 @@ changelog=
           tile along the trajectory could hold 20 times more points than its
           neighbours. Points are now counted while the file is read and every
           tile over the memory budget is split before inference (on a finer
-          grid when needed). Streaming tiles need about 20 % less memory per
-          point, SegFormer 3D about 60 % less, and the memory plan uses each
+          grid when needed). Streaming tiles need about 20 percent less memory
+          per point, SegFormer 3D about 60 percent less, and the memory plan uses each
           engine's own figure. Streaming keeps its temporary tile files in the
           output folder (not on C:) and checks the free space of that drive
           before it starts.
         - LitePT-L is faster: the neighbour search of each crop is bounded
-          by the crop radius (same points, 16 % faster on dense street data,
+          by the crop radius (same points, 16 percent faster on dense street data,
           much faster in sparse areas).
         - Tiles give the labels of an untiled run: every tile uses the
           file's origin for the model's crops or blocks, and the buffer is
