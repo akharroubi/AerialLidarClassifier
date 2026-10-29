@@ -82,7 +82,7 @@ class AerialLidarClassifierPlugin:
         self.iface.addPluginToMenu(MENU_LABEL, clear_gpu)
         repair = self._add_action(
             QIcon(":/images/themes/default/mActionRefresh.svg"),
-            tr("Repair dependencies"), self._show_deps_dock,
+            tr("Repair dependencies"), self._repair_dependencies,
         )
         self.iface.addPluginToMenu(MENU_LABEL, repair)
 
@@ -260,6 +260,17 @@ class AerialLidarClassifierPlugin:
         except Exception:
             _LOG.debug("Ignored non-fatal error", exc_info=True)
         self._deps_dock = None
+
+    def _repair_dependencies(self) -> None:
+        """Open the Setup dock; when only packages are missing (or an
+        earlier spconv attempt failed), it offers to add them in place."""
+        self._show_deps_dock()
+        try:
+            from .utils.venv_manager import completion_status_message, venv_completion_pending
+            if self._deps_dock is not None and venv_completion_pending():
+                self._deps_dock.show_completion_ui(completion_status_message())
+        except Exception as exc:
+            log_warning(f"Could not check for a pending completion: {exc}")
 
     def _show_deps_dock(self) -> None:
         """Create and show the setup dock (idempotent)."""

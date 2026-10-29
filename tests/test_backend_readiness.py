@@ -78,7 +78,8 @@ class BackendReadiness(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("could not install spconv-cu126", reason)
         self.assertIn("No solution found", reason)
-        self.assertNotIn("existing environment", reason)
+        # 1.3.3: Repair retries spconv alone (no 3 GB rebuild).
+        self.assertIn("try again: it only adds spconv", reason)
 
     def test_native_spconv_environment_gets_no_rtx50_hint(self):
         marker = {"cuda_mode": "cuda", "cuda_index": "cu126", "packages": ["torch", "spconv-cu126"]}

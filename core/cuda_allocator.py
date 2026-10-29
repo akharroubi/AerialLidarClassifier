@@ -119,15 +119,23 @@ def driver_version() -> Optional[str]:
             lib = ctypes.CDLL(name)
         except OSError:
             continue
+        initialised = False
         try:
             init = getattr(lib, "nvmlInit_v2", None) or getattr(lib, "nvmlInit")
             if init() != 0:
                 continue
+            initialised = True
             text = ctypes.create_string_buffer(96)
             if lib.nvmlSystemGetDriverVersion(text, ctypes.c_uint(96)) == 0:
                 return text.value.decode("ascii", "replace")
         except Exception:
             _LOG.debug("NVML driver version query failed", exc_info=True)
+        finally:
+            if initialised:
+                try:
+                    lib.nvmlShutdown()
+                except Exception:
+                    _LOG.debug("NVML shutdown failed", exc_info=True)
     try:
         lib = ctypes.WinDLL("nvcuda.dll") if sys.platform == "win32" else ctypes.CDLL("libcuda.so.1")
         value = ctypes.c_int(0)
@@ -186,6 +194,25 @@ def driver_supports_virtual_memory(device_index: int = 0) -> Optional[bool]:
     except Exception:
         _LOG.debug("CUDA driver attribute query failed", exc_info=True)
         return None
+
+
+# PyTorch's allocator variables: PYTORCH_ALLOC_CONF (current name) and
+# PYTORCH_CUDA_ALLOC_CONF (older name, still read).
+_TORCH_ENV_NAMES = ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF")
+
+
+def _environment_setting():
+    """``(name, True | False | None)`` when one of PyTorch's allocator
+    variables sets expandable_segments (None: a value not understood),
+    None when neither does."""
+    import re
+    for name in _TORCH_ENV_NAMES:
+        value = os.environ.get(name, "")
+        if "expandable_segments" not in value:
+            continue
+        found = re.search(r"expandable_segments\s*:\s*(true|false)", value, re.IGNORECASE)
+        return name, None if found is None else found.group(1).lower() == "true"
+    return None
 
 
 def _set_mode(torch, setting: str) -> bool:
@@ -268,8 +295,10 @@ def configure_cuda_allocator(torch, log: Optional[Callable[[str], None]] = None,
 
     ``mode`` is one of ``MODES`` (``None``: the user's preference);
     ``platform`` defaults to ``sys.platform``. Returns ``"expandable"``,
-    ``"standard"`` or ``"unchanged"`` (automatic mode with the user's own
-    PYTORCH_CUDA_ALLOC_CONF, or a torch without the setter). Every decision
+    ``"standard"`` or ``"unchanged"`` (automatic mode with a
+    PYTORCH_ALLOC_CONF / PYTORCH_CUDA_ALLOC_CONF value it does not
+    understand, or a torch without the setter). A value it understands is
+    applied as given. Every decision
     is reported through ``log`` with a line starting with "CUDA memory:".
     """
     log = log if log is not None else (lambda message: None)
@@ -306,11 +335,28 @@ def configure_cuda_allocator(torch, log: Optional[Callable[[str], None]] = None,
         log("CUDA memory: expandable segments (plugin setting).")
         return _done("expandable", "setting")
 
-    if "expandable_segments" in os.environ.get("PYTORCH_CUDA_ALLOC_CONF", ""):
-        _LOG.info("PYTORCH_CUDA_ALLOC_CONF is set by the user; allocator left as is")
-        log("CUDA memory: PYTORCH_CUDA_ALLOC_CONF is set in the environment; "
-            "the allocator is left as configured there.")
-        return _done("unchanged", "environment")
+    environment = _environment_setting()
+    if environment is not None:
+        # The user's own PyTorch setting. It is applied again explicitly: an
+        # earlier run of this session may have forced the other mode.
+        name, expandable = environment
+        _LOG.info("%s is set by the user", name)
+        if expandable is None:
+            log(f"CUDA memory: {name} is set in the environment; the allocator is "
+                "left as configured there.")
+            return _done("unchanged", "environment")
+        if not _set_mode(torch, _EXPANDABLE if expandable else _STANDARD):
+            log(_NO_SETTER)
+            return _done("unchanged", "environment")
+        if not expandable:
+            log(f"CUDA memory: PyTorch's standard allocator ({name} in the environment).")
+            return _done("standard", "environment")
+        _probe(torch, device_index)
+        if _PLATFORM_UNSUPPORTED:
+            log(_platform_message())
+            return _done("standard", "environment")
+        log(f"CUDA memory: expandable segments ({name} in the environment).")
+        return _done("expandable", "environment")
 
     if platform == "win32":
         if not _set_mode(torch, _STANDARD):
@@ -373,6 +419,13 @@ def recover_from_allocator_failure(torch, exc: BaseException,
     log = log if log is not None else (lambda message: None)
     if _active["mode"] != "expandable" or not looks_like_allocator_failure(exc):
         return False
+    if _active["chosen_by"] == "environment":
+        names = " / ".join(_TORCH_ENV_NAMES)
+        raise RuntimeError(
+            "Expandable segments are set in the environment (" + names + "), but this "
+            f"GPU driver failed with them during the run ({_first_line(exc)}). Remove "
+            "expandable_segments from that variable, restart QGIS and run again."
+        ) from exc
     if _active["chosen_by"] == "setting":
         raise RuntimeError(
             "Expandable segments are selected in the plugin settings, but this GPU "

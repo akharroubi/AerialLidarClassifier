@@ -216,11 +216,11 @@ def test_processing_plan_streams_only_what_does_not_fit():
         # Issue 10: 717 M points, 34-byte records, 32 GB free: streamed.
         mode, reason = plan(717_000_000, 34, tiling=True, available=32 * gb)
         assert mode == "streaming" and "streaming the file from disk automatically" in reason
+        # Unticked: never tiled or streamed by the plugin; refused instead.
         mode, reason = plan(717_000_000, 34, tiling=False, available=32 * gb)
-        assert mode == "streaming"
-        # Fits in memory, but not in one piece: tiled automatically.
+        assert mode == "too_large" and "in one piece" in reason
         mode, reason = plan(120_000_000, 30, tiling=False, available=32 * gb)
-        assert mode == "tiled" and "tiling automatically" in reason
+        assert mode == "too_large"
         assert plan(120_000_000, 30, tiling=True, available=32 * gb) == ("tiled", "")
         assert plan(100_000_000, 30, tiling=False, available=32 * gb) == ("untiled", "")
         # Forced streaming (Processing TILE_STREAMING, scripts) is honoured.

@@ -67,8 +67,9 @@ from typing import Callable
 import numpy as np
 
 from ..config import TILE_DEFAULT_BUFFER_M
-from ..core.memory import tile_point_budget
-from ..core.tiling import PointCountGrid, compute_tile_grid, resolve_buffer, split_dense_tiles
+from ..core.memory import BYTES_PER_TILE_POINT, available_memory_bytes, tile_point_budget
+from ..core.tiling import (PointCountGrid, compute_tile_grid, refine_dense_plans, resolve_buffer,
+                           split_dense_tiles, window_of)
 from ..utils.class_mapping import supports_output_codes, validate_model_output_field
 from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_from_header
@@ -76,7 +77,8 @@ from ..utils.logger import log_info, log_warning
 from ..utils.output_safety import (atomic_output_path, validate_output_paths, validate_label_field, validate_waveform_storage,
                                    checked_predictions, label_values, assign_labels, add_label_metadata,
                                    upgrade_header_preserving_fields, convert_points_preserving_fields,
-                                   extra_dim_description)
+                                   extra_dim_description, file_signature, output_record_length,
+                                   require_unchanged)
 import logging
 
 _LOG = logging.getLogger(__name__)
@@ -215,6 +217,16 @@ def streaming_tiled_classify(
         ymin = float(header.mins[1]) * units.xy_to_m
         xmax = float(header.maxs[0]) * units.xy_to_m
         ymax = float(header.maxs[1]) * units.xy_to_m
+        record_length = int(header.point_format.size)
+        output_bytes = None
+        if Path(output_path).suffix.lower() == ".las":
+            # Uncompressed output: its size is known (LAZ: not before writing).
+            new_records = output_record_length(header.point_format, field, class_mapping)
+            output_bytes = int(header.offset_to_point_data) + n_points * max(
+                record_length, new_records)
+    # The file is read four times; a change in between (another program
+    # still writing it) would attach the labels to other points.
+    input_signature = file_signature(input_path)
 
     if n_points <= 0:
         log_warning("Streaming: input has zero points; nothing to do.")
@@ -236,7 +248,8 @@ def streaming_tiled_classify(
     # folder is where the user expects large files to land.
     workroot = Path(output_path).parent
     workroot.mkdir(parents=True, exist_ok=True)
-    _check_temp_space(workroot, n_points, tiles, buffer_m, emit_warning)
+    _check_temp_space(workroot, n_points, tiles, buffer_m, emit_warning,
+                      output_bytes=output_bytes, chunk_size=chunk_size)
 
     # One byte per point for the whole file: the class mapping only ever
     # produces ASPRS codes (0-255), and that is what pass 4 writes, cast
@@ -254,15 +267,43 @@ def streaming_tiled_classify(
         d.mkdir()
 
     try:
-        grid = PointCountGrid(xmin, ymin, xmax, ymax)
-        counts = [0] * n_tiles
-        lows = np.full(3, np.inf)
-        if not _pass2_partition(
-            input_path, tiles, tile_dirs, buffer_m,
-            chunk_size, laspy_module, progress_callback, cancel_callback,
-            units, grid=grid, counts=counts, lows=lows,
-        ):
-            return None
+        for attempt in (1, 2):
+            grid = PointCountGrid(xmin, ymin, xmax, ymax)
+            counts = [0] * n_tiles
+            lows = np.full(3, np.inf)
+            highs = np.full(3, -np.inf)
+            if not _pass2_partition(
+                input_path, tiles, tile_dirs, buffer_m,
+                chunk_size, laspy_module, progress_callback, cancel_callback,
+                units, grid=grid, counts=counts, lows=lows, highs=highs,
+            ):
+                return None
+            # Tiles come from the header's bounds; a header that does not
+            # hold every point (a writer that did not update it) would leave
+            # points in no tile core, found only after the inference.
+            covered = (lows[0] >= min(t[0] for t in tiles)
+                       and highs[0] < max(t[2] for t in tiles)
+                       and lows[1] >= min(t[1] for t in tiles)
+                       and highs[1] < max(t[3] for t in tiles))
+            if covered or attempt == 2:
+                break
+            emit_warning(
+                f"Streaming: the header bounds of {input_path.name} do not contain all its "
+                f"points (X {lows[0]:.2f} to {highs[0]:.2f} m, Y {lows[1]:.2f} to "
+                f"{highs[1]:.2f} m); partitioning again with the true bounds (one more "
+                "read of the file).")
+            xmin, ymin = float(lows[0]), float(lows[1])
+            xmax, ymax = float(highs[0]), float(highs[1])
+            tiles, resolved_size = _grid_from_bounds(
+                xmin, ymin, xmax, ymax, n_points, tile_auto, tile_size_m)
+            n_tiles = len(tiles)
+            for d in tile_dirs:
+                shutil.rmtree(d, ignore_errors=True)
+            tile_dirs = [workdir / f"tile_{i:05d}" for i in range(n_tiles)]
+            for d in tile_dirs:
+                d.mkdir()
+            log_info(f"Streaming: {n_tiles} tile(s) of ~{resolved_size:.0f} m from the "
+                     "true bounds.")
         # Every tile places its crops / blocks as an untiled run would: the
         # origin is the file's true minimum (in metres), seen in pass 2.
         set_origin = getattr(predict_fn, "set_reference_origin", None)
@@ -272,6 +313,7 @@ def streaming_tiled_classify(
         tiles, tile_dirs, counts = _split_dense_tiles(
             tiles, tile_dirs, counts, grid, buffer_m, workdir,
             cancel_callback, emit_info, emit_warning,
+            bytes_per_point=getattr(predict_fn, "bytes_per_point", BYTES_PER_TILE_POINT),
         )
         if tiles is None:
             return None
@@ -303,6 +345,8 @@ def streaming_tiled_classify(
             emit_warning=emit_warning,
             field_description=field_description,
             model_spec=model_spec,
+            input_signature=input_signature,
+            output_bytes=output_bytes,
         ):
             return None
 
@@ -356,6 +400,7 @@ def _pass2_partition(
     grid: PointCountGrid | None = None,
     counts: list | None = None,
     lows=None,
+    highs=None,
 ) -> bool:
     log_info("Streaming pass 2/4: partitioning points into tile sidecars")
 
@@ -387,6 +432,8 @@ def _pass2_partition(
                 grid.add(x, y)
             if lows is not None:
                 np.minimum(lows, [cxmin, cymin, float(z.min())], out=lows)
+            if highs is not None:
+                np.maximum(highs, [cxmax, cymax, float(z.max())], out=highs)
 
             for tile_idx, (bx0, by0, bx1, by1) in enumerate(buffered):
                 if cxmax < bx0 or cxmin > bx1 or cymax < by0 or cymin > by1:
@@ -418,50 +465,100 @@ def _pass2_partition(
 
 # Bytes per point and sidecar copy: x, y, z as float64 and the index as uint64.
 SIDECAR_BYTES_PER_POINT = 32
+# Container overhead of one sidecar file (zip entries and array headers).
+SIDECAR_FILE_OVERHEAD = 4096
+
+
+def _free_space(folder: Path):
+    try:
+        return shutil.disk_usage(str(folder)).free
+    except OSError:
+        return None
 
 
 def _check_temp_space(workroot: Path, n_points: int, tiles, buffer_m: float,
-                      emit_warning) -> None:
-    """Refuse to start when the output folder cannot hold the sidecars.
+                      emit_warning, output_bytes=None, chunk_size=DEFAULT_CHUNK_SIZE) -> None:
+    """Refuse to start when the output folder cannot hold what the run writes.
 
-    Every point is stored at least once (32 bytes); points in buffer halos
-    are stored once per tile that overlaps them, estimated here from the
-    tile areas at uniform density.
+    The temporary tile files (sidecars) store every point at least once
+    (32 bytes) and the points of the buffer halos once more per tile that
+    overlaps them, estimated here from the tile areas at uniform density.
+    Pass 3 deletes them as it goes, before pass 4 writes the output, so the
+    peak is the larger of the two. ``output_bytes``: the size of an
+    uncompressed output, None for LAZ (not known before writing).
     """
-    try:
-        free = shutil.disk_usage(str(workroot)).free
-    except OSError:
+    free = _free_space(workroot)
+    if free is None:
         return
-    minimum = n_points * SIDECAR_BYTES_PER_POINT
+    files = -(-int(n_points) // max(int(chunk_size), 1)) * len(tiles)
+    minimum = n_points * SIDECAR_BYTES_PER_POINT + files * SIDECAR_FILE_OVERHEAD
     core = sum(max(t[2] - t[0], 1e-9) * max(t[3] - t[1], 1e-9) for t in tiles)
     windows = sum((t[2] - t[0] + 2 * buffer_m) * (t[3] - t[1] + 2 * buffer_m) for t in tiles)
     estimate = int(minimum * max(1.0, windows / core))
+    output = int(output_bytes or 0)
     gb = 1024 ** 3
-    if free < minimum:
+    output_note = (f" The output file needs {output / gb:.1f} GB." if output
+                   else " The compressed output also needs space.")
+    if free < max(minimum, output):
         raise RuntimeError(
             f"Not enough free space for streaming in the output folder {workroot}: "
             f"{free / gb:.1f} GB free, at least {minimum / gb:.1f} GB needed for the "
             f"temporary tile files of {n_points:,} points (about {estimate / gb:.1f} GB "
-            f"with the {buffer_m:g} m buffers), plus the output file. Free space on that "
+            f"with the {buffer_m:g} m buffers).{output_note} Free space on that "
             "drive or choose an output folder on a drive with more space."
         )
-    if free < estimate:
+    if free < max(estimate, output):
         emit_warning(
             f"Streaming: the output folder {workroot} has {free / gb:.1f} GB free; the "
             f"temporary tile files may need up to {estimate / gb:.1f} GB with the "
-            f"{buffer_m:g} m buffers, plus the output file. If the run stops on a full "
+            f"{buffer_m:g} m buffers.{output_note} If the run stops on a full "
             "disk, free space on that drive or choose another output folder."
         )
 
 
+def _sidecar_grid(tile_dir: Path, window, cancel_callback):
+    """Count grid over ``window`` holding the points of a tile's sidecars."""
+    fine = PointCountGrid(*window)
+    for sidecar in sorted(tile_dir.glob("c*.npz")):
+        if cancel_callback():
+            raise InterruptedError()
+        with np.load(sidecar) as data:
+            fine.add(data["x"], data["y"])
+    return fine
+
+
+def _warn_over_budget(counts, budget, buffer_m, bytes_per_point, emit_warning):
+    over = [n for n in counts if n > budget]
+    if not over:
+        return
+    gb = 1024 ** 3
+    available = available_memory_bytes()
+    have = f"; {available / gb:.1f} GB is available now" if available else ""
+    emit_warning(
+        f"Streaming: {len(over)} tile(s) still hold more than the memory budget of "
+        f"{budget:,} points (up to {max(over):,} with the buffer): the {buffer_m:g} m of "
+        "context the model needs around them is that dense, so smaller tiles would not "
+        f"hold fewer. The largest needs about {max(over) * bytes_per_point / gb:.1f} GB{have}. "
+        "The run continues; if it runs out of memory, close other applications."
+    )
+
+
 def _split_dense_tiles(tiles, tile_dirs, counts, grid, buffer_m, workdir,
-                       cancel_callback, emit_info, emit_warning):
+                       cancel_callback, emit_info, emit_warning,
+                       bytes_per_point=BYTES_PER_TILE_POINT):
     """Split the tiles whose buffered window exceeds the RAM budget and move
     their sidecars to the pieces. Returns (tiles, tile_dirs, counts), or
     (None, None, None) when cancelled."""
-    budget = tile_point_budget()
+    budget = tile_point_budget(bytes_per_point=bytes_per_point)
     plans = split_dense_tiles(tiles, grid, buffer_m, budget)
+    try:
+        plans = refine_dense_plans(
+            tiles, plans, grid, buffer_m, budget,
+            lambda index, window: _sidecar_grid(tile_dirs[index], window, cancel_callback))
+    except InterruptedError:
+        return None, None, None
     if all(len(plan) == 1 for plan in plans):
+        _warn_over_budget(counts, budget, buffer_m, bytes_per_point, emit_warning)
         return tiles, tile_dirs, counts
 
     dense = [i for i, plan in enumerate(plans) if len(plan) > 1]
@@ -470,6 +567,18 @@ def _split_dense_tiles(tiles, tile_dirs, counts, grid, buffer_m, workdir,
         f"{budget:,} (largest {max(counts[i] for i in dense):,} with its buffer); "
         f"splitting them into {sum(len(plans[i]) for i in dense)} pieces."
     )
+    # The pieces repeat their buffers: the sidecars grow while a tile's points
+    # are copied to its pieces (its own files are deleted as they are copied).
+    growth = sum(max(0, sum(grid.count(*window_of(p, buffer_m)) for p in plan) - counts[i])
+                 for i, plan in enumerate(plans) if len(plan) > 1)
+    peak = (growth + max(counts[i] for i in dense)) * SIDECAR_BYTES_PER_POINT
+    free = _free_space(workdir)
+    if free is not None and free < peak:
+        gb = 1024 ** 3
+        emit_warning(
+            f"Streaming: splitting the dense tiles may need up to {peak / gb:.1f} GB more in "
+            f"{workdir.parent} ({free / gb:.1f} GB free). If the run stops on a full disk, "
+            "free space on that drive or choose another output folder.")
     new_tiles, new_dirs, new_counts = [], [], []
     split_tiles = pieces = 0
     for index, plan in enumerate(plans):
@@ -510,20 +619,93 @@ def _split_dense_tiles(tiles, tile_dirs, counts, grid, buffer_m, workdir,
         f"Streaming: {split_tiles} dense tile(s) split into {pieces} pieces; the largest "
         f"tile now holds {max(new_counts):,} points with its buffer."
     )
-    over = [n for n in new_counts if n > budget]
-    if over:
-        emit_warning(
-            f"Streaming: {len(over)} piece(s) still hold more than {budget:,} points "
-            f"(up to {max(over):,}): the {buffer_m:g} m of context the model needs "
-            "around them is that dense, so smaller pieces would not hold fewer. The "
-            "run continues; if it runs out of memory, close other applications."
-        )
+    _warn_over_budget(new_counts, budget, buffer_m, bytes_per_point, emit_warning)
     return new_tiles, new_dirs, new_counts
 
 
 # ---------------------------------------------------------------------------
 # Pass 3: per-tile inference
 # ---------------------------------------------------------------------------
+
+def _infer_tile(tile_idx, n_tiles, tile, tile_dir, count, predictions, assigned,
+                class_mapping, predict_fn, progress_callback, cancel_callback, raw_ids) -> bool:
+    """Read one tile's sidecars, classify it and keep its core's labels.
+    False when cancelled. Everything of the tile is released on return."""
+    tx0, ty0, tx1, ty1 = tile
+    chunk_files = sorted(tile_dir.glob("c*.npz"))
+    if not chunk_files:
+        return True
+
+    # The tile is read straight into its final arrays (32 bytes per
+    # point): 1.3.2 kept the chunk lists, their concatenation and a
+    # stacked copy at once, about 90 bytes per point.
+    total = count
+    if total is None:
+        total = 0
+        for cf in chunk_files:
+            with np.load(cf) as d:
+                total += int(d["idx"].shape[0])
+    tile_pcd = np.empty((total, 3), dtype=np.float64)
+    tile_idx_arr = np.empty(total, dtype=np.uint64)
+    filled = 0
+    for cf in chunk_files:
+        if cancel_callback():
+            return False
+        # On Windows, ``np.load`` returns a lazy ``NpzFile`` that
+        # keeps the underlying file handle open until it is closed
+        # or GC'd. Use it as a context manager and copy each array
+        # out before the handle is released, otherwise the
+        # subsequent ``cf.unlink()`` raises WinError 32.
+        with np.load(cf) as d:
+            part = d["idx"]
+            end = filled + len(part)
+            tile_idx_arr[filled:end] = part
+            tile_pcd[filled:end, 0] = d["x"]
+            tile_pcd[filled:end, 1] = d["y"]
+            tile_pcd[filled:end, 2] = d["z"]
+            filled = end
+        try:
+            cf.unlink(missing_ok=True)
+        except PermissionError:
+            # Extreme rarity: another process / AV scanner has the
+            # file open. Defer cleanup to the workdir rmtree at the
+            # end - not fatal.
+            log_warning(
+                f"Streaming: could not delete sidecar {cf.name} now; "
+                "will be cleaned up when the temp working dir is removed."
+            )
+
+    part = None  # the last sidecar's index array, no longer needed
+    if filled != total:
+        raise ValueError(f"Streaming tile {tile_idx + 1}/{n_tiles}: read {filled:,} "
+                         f"points for {total:,} partitioned.")
+
+    def tile_progress(p, _i=tile_idx):
+        overall = 40.0 + ((_i + p / 100.0) / n_tiles) * 50.0
+        progress_callback(min(90.0, overall))
+
+    try:
+        tile_preds = predict_fn(tile_pcd, tile_progress)
+    except InterruptedError:
+        return False
+
+    if tile_preds is None:
+        raise ValueError(f"Streaming tile {tile_idx + 1}/{n_tiles} returned no predictions.")
+    tile_preds = checked_predictions(tile_preds, len(tile_pcd))
+
+    tile_x = tile_pcd[:, 0]
+    tile_y = tile_pcd[:, 1]
+    in_core = (
+        (tile_x >= tx0) & (tile_x < tx1)
+        & (tile_y >= ty0) & (tile_y < ty1)
+    )
+    core_preds = tile_preds[in_core]
+    core_indices = tile_idx_arr[in_core]
+
+    predictions[core_indices] = label_values(core_preds, class_mapping, raw_ids=raw_ids)
+    assigned[core_indices] = True
+    return True
+
 
 def _pass3_inference(
     tiles, tile_dirs, predictions, class_mapping,
@@ -536,82 +718,14 @@ def _pass3_inference(
     n_tiles = len(tiles)
     assigned = np.zeros(len(predictions), dtype=bool)
 
-    for tile_idx, (tx0, ty0, tx1, ty1) in enumerate(tiles):
+    for tile_idx, tile in enumerate(tiles):
         if cancel_callback():
             return False
-
-        tile_dir = tile_dirs[tile_idx]
-        chunk_files = sorted(tile_dir.glob("c*.npz"))
-        if not chunk_files:
-            continue
-
-        # The tile is read straight into its final arrays (32 bytes per
-        # point): 1.3.2 kept the chunk lists, their concatenation and a
-        # stacked copy at once, about 90 bytes per point.
-        total = None if counts is None else int(counts[tile_idx])
-        if total is None:
-            total = 0
-            for cf in chunk_files:
-                with np.load(cf) as d:
-                    total += int(d["idx"].shape[0])
-        tile_pcd = np.empty((total, 3), dtype=np.float64)
-        tile_idx_arr = np.empty(total, dtype=np.uint64)
-        filled = 0
-        for cf in chunk_files:
-            if cancel_callback():
-                return False
-            # On Windows, ``np.load`` returns a lazy ``NpzFile`` that
-            # keeps the underlying file handle open until it is closed
-            # or GC'd. Use it as a context manager and copy each array
-            # out before the handle is released, otherwise the
-            # subsequent ``cf.unlink()`` raises WinError 32.
-            with np.load(cf) as d:
-                part = d["idx"]
-                end = filled + len(part)
-                tile_idx_arr[filled:end] = part
-                tile_pcd[filled:end, 0] = d["x"]
-                tile_pcd[filled:end, 1] = d["y"]
-                tile_pcd[filled:end, 2] = d["z"]
-                filled = end
-            try:
-                cf.unlink(missing_ok=True)
-            except PermissionError:
-                # Extreme rarity: another process / AV scanner has the
-                # file open. Defer cleanup to the workdir rmtree at the
-                # end - not fatal.
-                log_warning(
-                    f"Streaming: could not delete sidecar {cf.name} now; "
-                    "will be cleaned up when the temp working dir is removed."
-                )
-
-        if filled != total:
-            raise ValueError(f"Streaming tile {tile_idx + 1}/{n_tiles}: read {filled:,} "
-                             f"points for {total:,} partitioned.")
-
-        def tile_progress(p, _i=tile_idx):
-            overall = 40.0 + ((_i + p / 100.0) / n_tiles) * 50.0
-            progress_callback(min(90.0, overall))
-
-        try:
-            tile_preds = predict_fn(tile_pcd, tile_progress)
-        except InterruptedError:
+        count = None if counts is None else int(counts[tile_idx])
+        if not _infer_tile(tile_idx, n_tiles, tile, tile_dirs[tile_idx], count, predictions,
+                           assigned, class_mapping, predict_fn, progress_callback,
+                           cancel_callback, raw_ids):
             return False
-
-        if tile_preds is None:
-            raise ValueError(f"Streaming tile {tile_idx + 1}/{n_tiles} returned no predictions.")
-        tile_preds = checked_predictions(tile_preds, len(tile_pcd))
-
-        tile_x = tile_pcd[:, 0]
-        tile_y = tile_pcd[:, 1]
-        in_core = (
-            (tile_x >= tx0) & (tile_x < tx1)
-            & (tile_y >= ty0) & (tile_y < ty1)
-        )
-        core_preds = tile_preds[in_core]
-        core_indices = tile_idx_arr[in_core]
-
-        predictions[core_indices] = label_values(core_preds, class_mapping, raw_ids=raw_ids)
-        assigned[core_indices] = True
 
     if not assigned.all():
         raise ValueError(f"{int((~assigned).sum()):,} points were not covered; no output published.")
@@ -700,8 +814,25 @@ def _pass4_write(
     emit_warning=log_warning,
     field_description: str = "AI classification",
     model_spec=None,
+    input_signature=None,
+    output_bytes=None,
 ) -> bool:
     emit_info(f"Streaming pass 4/4: writing {output_path.name}")
+    if input_signature is not None:
+        require_unchanged(input_path, input_signature)
+    free = _free_space(Path(output_path).parent)
+    if output_bytes and free is not None and free < output_bytes:
+        gb = 1024 ** 3
+        raise RuntimeError(
+            f"Not enough free space for the output {output_path.name}: {output_bytes / gb:.1f} GB "
+            f"needed, {free / gb:.1f} GB free in {Path(output_path).parent}. Free space on that "
+            "drive or choose another output folder.")
+
+    def before_publish():
+        if cancel_callback():
+            raise InterruptedError("Classification cancelled; previous output retained.")
+        if input_signature is not None:
+            require_unchanged(input_path, input_signature)
 
     is_laz = output_path.suffix.lower() == ".laz"
     preserve_legacy_angle = model_spec is None or not supports_output_codes(model_spec)
@@ -772,7 +903,8 @@ def _pass4_write(
         if is_laz:
             kw["laz_backend"] = laspy_module.LazBackend.LazrsParallel
 
-        with atomic_output_path(output_path) as temporary, laspy_module.open(str(temporary), **kw) as writer:
+        with atomic_output_path(output_path, before_publish=before_publish) as temporary, \
+                laspy_module.open(str(temporary), **kw) as writer:
             n_points = int(reader.header.point_count)
             global_offset = 0
 

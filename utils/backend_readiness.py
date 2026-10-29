@@ -84,8 +84,9 @@ def _spconv_hint():
         build = marker.get("spconv_build") or "cuXXX"
         return (
             f"Setup could not install spconv-{build} on this computer ({error}). "
-            f"Use Plugins > {PLUGIN_NAME} > Repair dependencies to rebuild the "
-            "environment; if it fails again, report the Setup log on the issue tracker."
+            f"Use Plugins > {PLUGIN_NAME} > Repair dependencies to try again: it only "
+            "adds spconv to the existing environment (PyTorch is kept). If it fails "
+            "again, report the Setup log on the issue tracker."
         )
     if "spconv_build" not in marker and _spconv_is_fallback(marker.get("cuda_index")):
         return (

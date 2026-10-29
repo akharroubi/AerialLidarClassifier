@@ -112,10 +112,18 @@ def download_uv(progress_callback=None, cancel_check=None):
         A tuple of (success: bool, message: str).
     """
     if uv_exists():
-        _log("uv already exists")
-        return True, "uv already installed"
+        # A uv left half-written (Setup stopped during the copy) or damaged
+        # would fail every later install: check that it runs.
+        if verify_uv()[0]:
+            _log("uv already exists")
+            return True, "uv already installed"
+        _log("The existing uv does not run; downloading it again", Qgis.MessageLevel.Warning)
+        remove_uv()
+
+    from .download_hashes import UV_SHA256, check_archive
 
     url = get_uv_download_url()
+    archive_name = url.rsplit("/", 1)[-1]
     _log(f"Downloading uv {UV_VERSION} from: {url}")
 
     if progress_callback:
@@ -160,7 +168,15 @@ def download_uv(progress_callback=None, cancel_check=None):
         with open(temp_path, "wb") as f:
             f.write(content.data())
 
-        _log(f"Download complete ({len(content)} bytes), extracting...")
+        # uv is run by Setup: only the published archive is used.
+        problem = check_archive(temp_path, archive_name, UV_SHA256)
+        if problem:
+            _log(f"uv download rejected: {problem}", Qgis.MessageLevel.Critical)
+            return False, (
+                f"The downloaded uv archive failed its integrity check ({problem}). "
+                "A proxy or security product may have altered the download.")
+
+        _log(f"Download complete ({len(content)} bytes, SHA-256 verified), extracting...")
 
         if progress_callback:
             progress_callback(60, "Extracting uv...")
@@ -191,7 +207,11 @@ def download_uv(progress_callback=None, cancel_check=None):
                 return False, "uv binary not found in archive"
 
             dest = get_uv_path()
-            shutil.copy2(uv_binary, dest)
+            # Copy under a temporary name and rename: a copy cut short
+            # never leaves a damaged uv at its final path.
+            partial = dest + ".partial"
+            shutil.copy2(uv_binary, partial)
+            os.replace(partial, dest)
 
             # Set executable permissions on Unix
             if sys.platform != "win32":

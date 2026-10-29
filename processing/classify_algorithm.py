@@ -42,7 +42,7 @@ from qgis.core import (
 from qgis.PyQt.QtCore import QVariant
 
 from ..config import PLUGIN_NAME, TILE_DEFAULT_BUFFER_M
-from ..core.memory import plan_processing
+from ..core.memory import bytes_per_tile_point, plan_processing
 from ..core.registry import CLASSIFIERS, MODELS
 from ..utils.class_mapping import output_codes_json, output_model_spec, supports_output_codes, validate_model_output_field
 from ..utils.compat import scoped_enum
@@ -205,17 +205,18 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             "a square tile side.</li>"
             "<li><b>Tile buffer in metres</b> - context halo around "
             "each tile; predictions inside the buffer are discarded. "
-            "<code>0</code> (default) uses exactly the context the model "
-            "needs (Airborne LitePT-L 91.5 m, Mobile mapping and Railway 35 m, "
-            "SegFormer 3D 34 m), with which tiled results equal untiled "
-            "ones; a smaller value is raised to it.</li>"
+            "<code>0</code> (default) uses the context the model needs "
+            "(Airborne LitePT-L 91.5 m, Mobile mapping and Railway 35 m, "
+            "SegFormer 3D 34 m); a smaller value is raised to it.</li>"
             "<li><b>Files larger than RAM</b> are streamed automatically: "
             "when a file would not fit in memory, it is read in chunks, the "
             "points of each tile go to temporary files in a work folder inside "
             "the output folder (removed at the end), one tile is classified at "
-            "a time and the output is written as it goes. A file that does not "
-            "fit in one piece is tiled automatically. The log says when either "
-            "happens. <b>Always stream from disk</b> forces streaming.</li>"
+            "a time and the output is written as it goes. The log says when "
+            "that happens. Without tiling, a file that does not fit in memory "
+            "in one piece is refused with the advice to enable tiling. "
+            "<b>Always stream from disk</b> forces streaming, with or "
+            "without tiling.</li>"
             "<li><b>Input units</b> - the model works in metres. By "
             "default the unit is read from the file's CRS (WKT or GeoTIFF "
             "keys) and feet are converted before inference; the log says "
@@ -437,6 +438,17 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
 
     # ------------------------------------------------------------------
     def processAlgorithm(self, parameters, context, feedback):  # noqa: N802
+        from ..core.run_lock import exclusive_run
+
+        # One run at a time in the session (the dock and Processing share
+        # the GPU and the RAM the memory plan counts on).
+        try:
+            with exclusive_run(feedback.isCanceled, feedback.pushInfo):
+                return self._process_algorithm(parameters, context, feedback)
+        except InterruptedError:
+            raise QgsProcessingException(self.tr("Cancelled."))
+
+    def _process_algorithm(self, parameters, context, feedback):
         import numpy as np
 
         classifier, engines = self._requested_engines(parameters, context, feedback)
@@ -571,6 +583,7 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             _classify_tiled,
             _ensure_asprs_classification_capacity,
             _resolve_output_path,
+            output_record_length,
             _strip_copc_vlrs,
             _write_las,
         )
@@ -582,14 +595,24 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             field_name = validate_label_field(reader.header.point_format, field_name, laspy)
             n_points = int(reader.header.point_count)
             record_length = int(reader.header.point_format.size)
+            new_records = output_record_length(
+                reader.header.point_format, field_name, spec.class_mapping)
         # Tiling is the user's choice; streaming follows from the memory the
-        # file needs (TILE_STREAMING forces it, as in 1.0 to 1.3.2).
+        # file needs, and TILE_STREAMING forces it (with or without tiling).
         mode, reason = plan_processing(n_points, record_length, tile_enabled,
-                                       force_streaming=tile_enabled and tile_streaming)
+                                       force_streaming=tile_streaming,
+                                       bytes_per_point=bytes_per_tile_point(spec.family),
+                                       output_record_length=new_records)
+        if mode == "too_large":
+            raise QgsProcessingException(self.tr(
+                f"Not enough memory to classify {input_path.name} in one piece: {reason} "
+                "Set 'Tile large files' (TILE_ENABLED) and run again: the file is then "
+                "classified tile by tile, and streamed from disk when it does not fit "
+                "in memory."))
         if reason:
             feedback.pushInfo(self.tr(f"{input_path.name}: {reason}"))
-        if not tile_enabled and mode != "untiled":
-            tile_auto = True
+        if not tile_enabled and mode == "streaming":
+            tile_auto = True  # TILE_STREAMING without tiling: automatic tiles
         output_path = _resolve_output_path(input_path, output_folder, suffix)
         self._guard_input_output_collision(input_path, output_path)
 
@@ -624,6 +647,7 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
         # (see LitePTBackend.set_reference_origin, core.tiling.resolve_buffer).
         predict_fn.set_reference_origin = getattr(backend, "set_reference_origin", None)
         predict_fn.context_buffer = context_buffer
+        predict_fn.bytes_per_point = bytes_per_tile_point(spec.family)
 
         # ---- Streaming dispatch (writes the output directly) ----------------
         is_asprs_field = field_name.lower() == ASPRS_CLASSIFICATION_FIELD
@@ -788,7 +812,10 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
                 f"Output {output_path.name} already exists - overwriting."
             ))
         feedback.pushInfo(self.tr(f"Writing {output_path.name}..."))
-        _write_las(las, output_path, laspy)
+        try:
+            _write_las(las, output_path, laspy, cancel_callback=feedback.isCanceled)
+        except InterruptedError:
+            raise QgsProcessingException(self.tr("Cancelled."))
 
         log_info(f"Processing algorithm wrote {output_path}")
 

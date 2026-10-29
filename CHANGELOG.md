@@ -42,27 +42,34 @@ and the project follows [Semantic Versioning](https://semver.org/).
   arrays (32 bytes per point instead of about 90), and LitePT-L's voxelisation
   builds its keys chunk by chunk and replaces `np.unique` by a stable sort
   (identical representatives and projection, about half the peak memory on
-  dense data).
-- **Tiling and streaming no longer change the labels.** Each tile placed the
-  model's crops (LitePT-L) or blocks (SegFormer 3D) on a grid anchored at its
-  own corner, so tiled labels differed from an untiled run of the same file
-  (0.35 to 0.55 % on a street tile cut into 100 m tiles), and splitting a
-  dense tile would have changed them again. Every tile now uses the file's
-  origin, and the buffer is by default exactly the context the model needs:
-  twice the crop radius plus one crop spacing for LitePT-L (91.5 m Airborne,
-  35 m Mobile mapping and Railway, less on GPUs under 16 GB), one block for
-  SegFormer 3D (33.6 m). Measured on a 1.08 M-point street tile cut into 60 m
-  tiles: identical labels to the untiled run for all four engines. The Buffer
-  setting is now *Automatic* (0) by default; a saved 50 m (the old default)
-  becomes automatic, a larger value is used as given, a smaller one is raised
-  to the model's need.
+  tiles of more than 4 M points). Measured on a 17 M-point dense tile: 146 to
+  115 bytes per point for the whole tile.
+- **Tiles give the labels of an untiled run.** Each tile placed the model's
+  crops (LitePT-L) or blocks (SegFormer 3D) on a grid anchored at its own
+  corner, so tiled labels differed from an untiled run of the same file (0.35
+  to 0.55 % on a street tile cut into 100 m tiles), and splitting a dense tile
+  would have changed them again. Every tile now uses the file's origin, and
+  the buffer is by default the context the model needs: twice the crop radius
+  plus one crop spacing for LitePT-L (91.5 m Airborne, 35 m Mobile mapping and
+  Railway, less on GPUs under 16 GB), one block for SegFormer 3D (33.6 m).
+  SegFormer 3D then gives the untiled labels by construction. For LitePT-L it
+  is measured: with the default tiles, identical labels on a street tile, a
+  26 M-point mobile mapping corridor and a DALES airborne tile (real model,
+  14 M points). LitePT-L places its "fill" crops (for the points its regular
+  crops miss) one after another, so on very dense data cut into many small
+  tiles a few labels near tile edges can still differ; untiled results are
+  those of the earlier versions. The Buffer setting is now *Automatic* (0) by
+  default; a saved 50 m (the old default) becomes automatic, a larger value is
+  used as given, a smaller one is raised to the model's need.
 - **Tiling and streaming are one option.** The dock keeps *Tile large files*;
-  the *Streaming I/O* checkbox is gone. The plugin reads each file's header,
-  compares the memory an in-memory run needs with the memory free at that
-  moment, and streams the file from disk when it does not fit; a file that
-  cannot be classified in one piece is tiled automatically. The log says when
-  either happens. In Processing, `TILE_STREAMING` keeps working and now means
-  "always stream from disk"; unticked, the choice is automatic.
+  the *Streaming I/O* checkbox is gone. With it ticked, the plugin reads each
+  file's header, compares the memory an in-memory run needs with the memory
+  free at that moment, and streams the file from disk when it does not fit;
+  the log says so. Unticked, each file is classified in one piece, as asked:
+  a file too large for the free memory is refused before it is read, with the
+  memory it needs and the advice to tick *Tile large files* (until then it
+  failed with an out-of-memory error). In Processing, `TILE_STREAMING` keeps
+  working and now means "always stream from disk".
 - **Faster LitePT-L inference.** The neighbour search that builds each crop is
   bounded by the crop radius: the same points are selected (identical for 600
   crops of real street data), 16 % faster on dense street data, and the search
@@ -72,6 +79,51 @@ and the project follows [Semantic Versioning](https://semver.org/).
   usually on C: and often the fullest drive. It checks the free space of that
   drive before it starts and refuses with the amount needed when it cannot
   hold the files.
+
+### Also in 1.3.3 (package rebuilt on 2026-10-29 after an independent review)
+- **Memory planning per engine.** SegFormer 3D's block grouping is computed
+  per chunk of points (512 to 192 bytes per point, labels unchanged), and the
+  plan uses each engine's own figure. It also counts the second copy of the
+  point records when the output needs a LAS 1.4 format upgrade or a new
+  field, and on Windows the commit limit as well as the free RAM.
+- Streaming freed a tile only after the next one had been read and
+  classified; each tile is now released first.
+- **Dense tiles.** A tile that the file-wide count grid could not split (a very
+  large extent, or a few stray points far away) is planned again on a fine
+  grid of its own points. A tile that still exceeds the memory budget is
+  reported with the memory it needs, also when no other tile was split and in
+  the in-memory tiled path.
+- **Streaming checks.** Header bounds that do not contain every point no longer
+  make the run fail after the inference: the file is partitioned again with
+  the true bounds. The free space is checked for the output file too, again
+  after dense tiles are split and before the output is written. An input file
+  that changed during the run (another program still writing it) is refused
+  instead of receiving labels computed for other points.
+- A cancelled in-memory run no longer publishes the output it was writing.
+- **One classification at a time** per QGIS session: a dock run and a
+  Processing run started together now run one after the other (they share
+  the GPU memory, its allocator setting and the RAM the plan counts on).
+  Closing the dock during a run no longer mixes that run's last messages into
+  the next run's log.
+- Processing: `TILE_STREAMING` now streams with `TILE_ENABLED` off as well.
+- Units: a CRS unit factor of zero, a negative one or one that is not a number
+  is ignored (the unit's name or the units override decides), and a kilometre
+  unit given without a factor is read as kilometres.
+- GPU allocator: PyTorch's own variables (`PYTORCH_ALLOC_CONF`, and the older
+  `PYTORCH_CUDA_ALLOC_CONF`) are applied as set, also after a mode forced
+  earlier in the same session.
+- **Setup.** Blackwell datacenter GPUs (compute capability 10: B200, GB200,
+  GB300) get the CUDA 12.8 PyTorch they need. The GPU check after the
+  installation says when the installed PyTorch has no code for the GPU
+  instead of advising a driver update. The environments of other Python
+  versions (a second QGIS install) are kept, each Python version gets its own
+  portable Python, and stale environments are removed only after a successful
+  installation. The portable Python and uv archives are checked against their
+  published SHA-256 before use, a uv that does not run is downloaded again,
+  and detecting the GPU or checking the portable Python no longer blocks the
+  QGIS window. Repair dependencies retries a failed spconv installation (RTX
+  50 series) by adding only spconv. "Permission denied" is no longer reported
+  as an antivirus block.
 
 ## [1.3.2] - 2026-10-23
 

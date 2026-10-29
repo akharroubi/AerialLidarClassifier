@@ -31,8 +31,12 @@ def validate_output_paths(inputs, outputs):
 
 
 @contextmanager
-def atomic_output_path(destination):
-    """Publish only a successfully closed output, on the same filesystem."""
+def atomic_output_path(destination, before_publish=None):
+    """Publish only a successfully closed output, on the same filesystem.
+
+    ``before_publish`` (optional) runs after the output is complete and
+    before it replaces ``destination``; it raises to keep the previous file
+    (a cancelled run, an input that changed during the run)."""
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=f".{destination.stem}.partial-",
@@ -41,9 +45,50 @@ def atomic_output_path(destination):
     temporary = Path(name)
     try:
         yield temporary
+        if before_publish is not None:
+            before_publish()
         os.replace(str(temporary), str(destination))
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def output_record_length(point_format, field_name, class_mapping) -> int:
+    """Length of the new point records the output needs, 0 when the labels
+    are written into the existing records (for the memory plan: old and new
+    records then exist together). New records come from a LAS 1.4 format
+    upgrade (an ASPRS code above 31 on point formats 0 to 5) or a new extra
+    field; 8 and 4 bytes cover the growth of the record."""
+    field = (field_name or "classification").strip() or "classification"
+    size = int(point_format.size)
+    if field.lower() == "classification":
+        codes = [int(info.asprs_code) for info in class_mapping.values()]
+        if codes and max(codes) > 31 and int(point_format.id) < 6:
+            return size + 8
+        return 0
+    if field not in point_format.dimension_names:
+        return size + 4
+    return 0
+
+
+def file_signature(path):
+    """Size and modification time of a file, to detect a change during a run."""
+    stat = os.stat(str(path))
+    return int(stat.st_size), int(stat.st_mtime_ns)
+
+
+def require_unchanged(path, signature):
+    """Raise if ``path`` no longer has ``signature`` (see file_signature):
+    the labels computed from it would be attached to other points."""
+    try:
+        current = file_signature(path)
+    except OSError as exc:
+        raise RuntimeError(f"The input file {Path(path).name} is no longer readable ({exc}); "
+                           "no output published.") from exc
+    if current != tuple(signature):
+        raise RuntimeError(
+            f"The input file {Path(path).name} changed during the run (size or modification "
+            "time), so the computed labels may not match its points; no output published. "
+            "Run again once the file is no longer being written.")
 
 
 def validate_label_field(point_format, name, laspy_module):

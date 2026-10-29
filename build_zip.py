@@ -10,8 +10,10 @@ plugin for QGIS and for the repository, so it must never change.
 Only an explicit list of runtime files is packed (no tests, reports,
 caches, weights or stray files): model weights download on first use
 from the GitHub releases listed in core/registry.py. Timestamps are fixed
-and text files use LF, so the same source always gives the same bytes; a
-SHA-256 sidecar is written next to the ZIP.
+and text files use LF, so the same source gives the same files; the
+compressed bytes (and the SHA-256 sidecar written next to the ZIP) are
+the same with the same zlib, i.e. the same Python build (the published
+1.3.x archives are built with Python 3.14).
 
 The build refuses an archive larger than 25 MB (the repository limit),
 containing binaries or weights, with any Bandit finding, Flake8

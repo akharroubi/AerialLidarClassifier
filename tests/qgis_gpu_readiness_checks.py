@@ -6,6 +6,7 @@ from pathlib import Path
 
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 from qgis.core import QgsApplication
+from qgis.PyQt.QtCore import QCoreApplication
 app = QgsApplication([], False)
 app.initQgis()
 
@@ -120,6 +121,11 @@ class GpuReadiness(unittest.TestCase):
                                     "compute_cap": 8.9, "driver_version": "580.97"})):
             with patch.object(venv, "detect_nvidia_gpu", return_value=(True, info)):
                 dock = dialog_module.DepsInstallDockWidget()
+                # Detected in a background thread (nvidia-smi can be slow);
+                # the label is filled when its signal arrives.
+                self.assertIn("Detecting", dock.gpu_label.text())
+                self.assertTrue(dock._gpu_probe.wait(10000))
+                QCoreApplication.processEvents()
                 texts[name] = dock.gpu_label.text()
                 dock.deleteLater()
         self.assertIn("RTX 5080 Laptop GPU (16303 MB)", texts["rtx50"])

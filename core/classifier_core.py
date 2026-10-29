@@ -56,6 +56,54 @@ def sliding_blocks_point_indices(pts, block_size, overlap_ratio, origin=None):
     steps = np.maximum(steps, 0)
     dims = steps + 1  # number of blocks along each axis
 
+    # Block memberships, computed per chunk of points: every point's
+    # candidate blocks depend on that point alone, so the concatenated
+    # result is the same as one pass over the whole cloud, without its
+    # temporaries of about 500 bytes per point (eight candidate blocks per
+    # point, three int64 indices, float64 bounds and masks each).
+    N = pts.shape[0]
+    block_parts, point_parts = [], []
+    for start in range(0, N, _BLOCK_CHUNK):
+        ids, members = _block_memberships(
+            pts[start:start + _BLOCK_CHUNK], p_min, stride, bs, dims, ndim)
+        block_parts.append(ids)
+        point_parts.append(members + start)
+    block_ids = np.concatenate(block_parts)
+    point_ids = np.concatenate(point_parts)
+    del block_parts, point_parts
+
+    unique_bids, groups = npi.group_by(block_ids, point_ids)
+
+    # Decode block origins
+    if ndim == 3:
+        ix_u = unique_bids // (dims[1] * dims[2])
+        rem = unique_bids % (dims[1] * dims[2])
+        iy_u = rem // dims[2]
+        iz_u = rem % dims[2]
+        origins = np.vstack([
+            p_min[0] + ix_u * stride[0],
+            p_min[1] + iy_u * stride[1],
+            p_min[2] + iz_u * stride[2],
+        ]).T
+    else:
+        ix_u = unique_bids // dims[1]
+        iy_u = unique_bids % dims[1]
+        origins = np.vstack([
+            p_min[0] + ix_u * stride[0],
+            p_min[1] + iy_u * stride[1],
+        ]).T
+
+    return origins, [np.array(g, int) for g in groups]
+
+
+# Points per chunk when computing block memberships (about 130 MB of
+# temporaries per chunk).
+_BLOCK_CHUNK = 250_000
+
+
+def _block_memberships(pts, p_min, stride, bs, dims, ndim):
+    """Block ids and the (chunk-local) point index of every point-in-block
+    membership, in point order, then candidate order."""
     # Compute each point’s “primary” block index along each dimension
     rel = (pts - p_min) / stride
     idx0 = np.floor(rel).astype(int)  # shape (N, ndim)
@@ -100,28 +148,7 @@ def sliding_blocks_point_indices(pts, block_size, overlap_ratio, origin=None):
         block_ids = (ix * dims[1] + iy).ravel()[mask.ravel()]
 
     point_ids = np.repeat(np.arange(N), mask.shape[1])[mask.ravel()]
-    unique_bids, groups = npi.group_by(block_ids, point_ids)
-
-    # Decode block origins
-    if ndim == 3:
-        ix_u = unique_bids // (dims[1] * dims[2])
-        rem = unique_bids % (dims[1] * dims[2])
-        iy_u = rem // dims[2]
-        iz_u = rem % dims[2]
-        origins = np.vstack([
-            p_min[0] + ix_u * stride[0],
-            p_min[1] + iy_u * stride[1],
-            p_min[2] + iz_u * stride[2],
-        ]).T
-    else:
-        ix_u = unique_bids // dims[1]
-        iy_u = unique_bids % dims[1]
-        origins = np.vstack([
-            p_min[0] + ix_u * stride[0],
-            p_min[1] + iy_u * stride[1],
-        ]).T
-
-    return origins, [np.array(g, int) for g in groups]
+    return block_ids, point_ids
 
 
 def resolve_device(device) -> str:
@@ -287,6 +314,8 @@ def predict_blocks(model, configs, device, pcd, if_bottom_only=False,
         nb_inverse_idxs.append(nb_inverse_idx)
         # within-voxel point indices from the point cloud
         nb_pcd_idxs.append(nb_pcd_idx)
+    # Every block now has its own arrays; the groups are no longer needed.
+    del block_idx_groups
 
     progress_callback(15)
 

@@ -132,10 +132,12 @@ _TORCH_VERSION_CAP_BY_CUDA = {
     "cu128": "2.12",
 }
 
-# Blackwell (sm_120+) requires cu128.
+# Blackwell requires cu128: compute capability 10.x (B200, GB200, GB300) and
+# 12.x (RTX 50 series). The cu126 wheels stop at Hopper (sm_90) and ship no
+# PTX, so they cannot run on these GPUs at all.
 # On Windows, prefer cu126 for broader compatibility with newer packages
 # (e.g., sam3) when the driver supports it; otherwise fall back to cu124.
-_MIN_COMPUTE_CAP_FOR_CU128 = 12.0
+_MIN_COMPUTE_CAP_FOR_CU128 = 10.0
 
 # Cache for detect_nvidia_gpu() â€” avoids re-running nvidia-smi.
 _gpu_detect_cache = None  # type: Optional[Tuple[bool, dict]]
@@ -629,8 +631,8 @@ def _select_cuda_index(gpu_info: dict) -> Optional[str]:
 
     Returns ``None`` only when the driver is older than the requirement
     of every known CUDA toolkit (i.e. CPU install is the only safe
-    option). Blackwell GPUs (sm_120+) need cu128 specifically and do
-    not cascade.
+    option). Blackwell GPUs (sm_100 and sm_120) need cu128 specifically
+    and do not cascade.
 
     Args:
         gpu_info: Dict with GPU information from detect_nvidia_gpu().
@@ -944,16 +946,33 @@ def _is_antivirus_error(stderr: str) -> bool:
     """
     stderr_lower = stderr.lower()
     patterns = [
-        "access is denied",
-        "winerror 5",
         "winerror 225",
-        "permission denied",
         "operation did not complete successfully because the file contains a virus",
         # uv signatures when python.exe was quarantined out from under it
         "failed to inspect python interpreter",
         "failed to query python interpreter",
     ]
     return any(p in stderr_lower for p in patterns)
+
+
+def _is_access_denied_error(stderr: str) -> bool:
+    """A file the installer needs could not be opened or replaced. On its
+    own this does not say why (a file still in use, a read-only folder,
+    an access rule, sometimes a security scan)."""
+    stderr_lower = stderr.lower()
+    return any(p in stderr_lower for p in (
+        "access is denied", "winerror 5", "winerror 32", "permission denied"))
+
+
+def _format_access_denied_help(package_name: str) -> str:
+    return (
+        "Failed to install {pkg}: the system refused access to a file in {cache}. "
+        "Usually a file is still in use (QGIS itself after an earlier run, another "
+        "program, a security scan) or the folder is not writable for your account. "
+        "Restart QGIS and try again; if it fails again, check that you can write to "
+        "that folder, or set AERIAL_LIDAR_CLASSIFIER_CACHE_DIR to a folder you can "
+        "write to.".format(pkg=package_name, cache=CACHE_DIR)
+    )
 
 
 def _format_antivirus_help(package_name: str) -> str:
@@ -2510,6 +2529,11 @@ def _install_spconv(
     return True, ""
 
 
+# Why the last _verify_cuda_in_venv() failed, when it can tell
+# ("no_kernels_for": the GPU architecture the installed torch lacks).
+_last_cuda_check: dict = {}
+
+
 def _verify_cuda_in_venv(venv_dir: str) -> bool:
     """Run a CUDA smoke test inside the venv.
 
@@ -2523,16 +2547,30 @@ def _verify_cuda_in_venv(venv_dir: str) -> bool:
     env = _get_clean_env_for_venv()
     subprocess_kwargs = _get_subprocess_kwargs()
 
+    # The architecture check comes before the first kernel: a wheel without
+    # code for this GPU (no sm_XY and no PTX it can compile) fails with an
+    # obscure "no kernel image" error, which is not a driver problem.
     cuda_test_code = (
         "import torch; "
         "print('torch=' + torch.__version__); "
         "print('cuda_built=' + str(torch.version.cuda)); "
         "assert torch.cuda.is_available(), 'CUDA not available'; "
         "print('device=' + torch.cuda.get_device_name(0)); "
+        "major, minor = torch.cuda.get_device_capability(0); "
+        "archs = torch.cuda.get_arch_list(); "
+        "sm = [int(a[3:]) for a in archs if a.startswith('sm_') and a[3:].isdigit()]; "
+        "ptx = [int(a[8:]) for a in archs if a.startswith('compute_') and a[8:].isdigit()]; "
+        "cap = major * 10 + minor; "
+        "ok = (not (sm or ptx) or any(s // 10 == major and s <= cap for s in sm) "
+        "or any(p <= cap for p in ptx)); "
+        "print('arch=sm_%d%d built=%s' % (major, minor, ','.join(archs))); "
+        "print('arch_ok=' + str(ok)); "
+        "assert ok, 'NO_KERNELS_FOR_GPU'; "
         "t = torch.zeros(1, device='cuda'); "
         "torch.cuda.synchronize(); "
         "print('CUDA OK')"
     )
+    _last_cuda_check.clear()
 
     try:
         # Retry once because CUDA initialization can be transiently slow/flaky
@@ -2559,6 +2597,12 @@ def _verify_cuda_in_venv(venv_dir: str) -> bool:
                 ),
                 Qgis.MessageLevel.Warning,
             )
+            if "NO_KERNELS_FOR_GPU" in err or "arch_ok=False" in out:
+                # Deterministic: a retry gives the same answer.
+                arch = next((line.split()[0][5:] for line in out.splitlines()
+                             if line.startswith("arch=")), "")
+                _last_cuda_check["no_kernels_for"] = arch or "this GPU"
+                return False
             if attempt == 1:
                 time.sleep(2)
         return False
@@ -2980,6 +3024,8 @@ def install_dependencies(
                     return False, _format_application_control_help()
                 if _is_antivirus_error(install_error_msg):
                     return False, _format_antivirus_help(package_name)
+                if _is_access_denied_error(install_error_msg):
+                    return False, _format_access_denied_help(package_name)
                 if last_returncode is not None and _is_windows_process_crash(
                     last_returncode
                 ):
@@ -3252,6 +3298,8 @@ def install_dependencies(
                     return False, _format_application_control_help()
                 if _is_antivirus_error(error_output):
                     return False, _format_antivirus_help(failed_pkg)
+                if _is_access_denied_error(error_output):
+                    return False, _format_access_denied_help(failed_pkg)
                 if result.returncode is not None and _is_windows_process_crash(
                     result.returncode
                 ):
@@ -3551,7 +3599,15 @@ def verify_venv(
 
 
 def cleanup_old_venv_directories() -> List[str]:
-    """Remove old venv directories that don't match current Python version.
+    """Remove the stale environments of other Python versions.
+
+    Several QGIS installs (an LTR and a newer release, a Flatpak and a
+    distribution package) can share the plugin's folder with different
+    Python versions; each has its own ``venv_py3.X``. An environment with a
+    current install marker is in use by such an install and is kept. Only
+    environments without a marker or with an older install schema (built
+    by an earlier release, rebuilt anyway at their next use) are removed.
+    Called after the current environment is ready, never before.
 
     Returns:
         List of removed directory paths.
@@ -3570,6 +3626,12 @@ def cleanup_old_venv_directories() -> List[str]:
                 and entry_cmp != current_cmp
             ):
                 old_path = os.path.join(CACHE_DIR, entry)
+                marker = _read_install_marker(old_path) if os.path.isdir(old_path) else None
+                if marker is not None and marker.get(
+                        "install_schema_version") == _INSTALL_SCHEMA_VERSION:
+                    _log(f"Kept the environment of another Python version: {old_path}",
+                         Qgis.MessageLevel.Info)
+                    continue
                 if os.path.isdir(old_path):
                     try:
                         shutil.rmtree(old_path)
@@ -3845,13 +3907,42 @@ def missing_venv_packages(marker: Optional[dict] = None) -> List[str]:
     return [name for name in expected if name.lower() not in installed]
 
 
+def spconv_retry_pending(marker: Optional[dict] = None) -> List[str]:
+    """spconv build(s) whose installation failed in an earlier attempt
+    (``spconv_error`` in the marker), for a retry that only adds them."""
+    if marker is None:
+        marker = _read_install_marker()
+    if not marker or marker.get("cuda_mode") != "cuda" or not marker.get("spconv_error"):
+        return []
+    expected = _spconv_extra_for(marker.get("cuda_index"))
+    installed = {str(name).lower() for name in (marker.get("packages") or [])}
+    return [name for name in expected if name.lower() not in installed]
+
+
 def venv_completion_pending() -> bool:
-    """True when the ready environment only lacks packages that
-    ``complete_venv_packages`` adds (no rebuild needed)."""
+    """True when the environment only lacks packages that
+    ``complete_venv_packages`` adds (no rebuild needed): packages a newer
+    release installs, or a spconv build whose earlier attempt failed."""
     marker = _read_install_marker()
     if marker is None or marker.get("install_schema_version") != _INSTALL_SCHEMA_VERSION:
         return False
-    return bool(missing_venv_packages(marker))
+    return bool(missing_venv_packages(marker) or spconv_retry_pending(marker))
+
+
+def completion_status_message() -> str:
+    """What the Setup panel says when it offers complete_venv_packages."""
+    marker = _read_install_marker() or {}
+    missing = missing_venv_packages(marker)
+    if missing:
+        return completion_message(missing)
+    retry = spconv_retry_pending(marker)
+    if retry:
+        error = str(marker.get("spconv_error") or "")[:160]
+        return (
+            f"An earlier attempt to add {', '.join(retry)} failed ({error}). Click the "
+            "button to try again: only spconv is downloaded; PyTorch and the other "
+            "packages are kept.")
+    return ""
 
 
 def completion_message(missing: List[str]) -> str:
@@ -3876,12 +3967,18 @@ def complete_venv_packages(
     that do not need the package; Reinstall Dependencies remains the way
     to retry from scratch.
     """
-    from .uv_manager import get_uv_path, uv_exists
+    from .uv_manager import download_uv, get_uv_path, uv_exists
 
     marker = _read_install_marker() or {}
-    missing = missing_venv_packages(marker)
+    missing = missing_venv_packages(marker) or spconv_retry_pending(marker)
     if not missing:
         return True, "Virtual environment ready"
+    if not uv_exists():
+        # spconv is installed with uv only; a failed uv download during
+        # Setup is why some environments lack it.
+        uv_ok, uv_msg = download_uv(cancel_check=cancel_check)
+        if not uv_ok:
+            _log(f"uv download failed: {uv_msg}", Qgis.MessageLevel.Warning)
     build = _spconv_build_for(marker.get("cuda_index"))
     if build is None:
         return True, "Virtual environment ready"
@@ -3941,9 +4038,9 @@ def complete_venv_packages(
         _log(f"spconv-{build} could not be added: {error}", Qgis.MessageLevel.Warning)
         return False, (
             f"spconv-{build} could not be added to the environment: {error[:200]}. "
-            "The Airborne classifier runs SegFormer 3D meanwhile. Click Reinstall "
-            "Dependencies for a full rebuild, or report the Setup log on the "
-            "issue tracker."
+            "The Airborne classifier runs SegFormer 3D meanwhile. Use Repair "
+            "dependencies to try again (only spconv is downloaded), or report the "
+            "Setup log on the issue tracker."
         )
     report(100, "Environment completed")
     _log(f"Added spconv-{build} {versions.get(f'spconv-{build}', '')} to the environment",
@@ -4035,10 +4132,6 @@ def create_venv_and_install(
     if rosetta_warning:
         _log(rosetta_warning, Qgis.MessageLevel.Warning)
 
-    removed_venvs = cleanup_old_venv_directories()
-    if removed_venvs:
-        _log(f"Removed {len(removed_venvs)} old venv directories", Qgis.MessageLevel.Info)
-
     # Step 1: Download Python standalone (0-10%)
     if not standalone_python_exists():
         python_version = get_python_full_version()
@@ -4117,9 +4210,12 @@ def create_venv_and_install(
             cancel_check=cancel_check,
         )
         if not uv_success:
-            # Non-fatal: fall back to pip for venv creation and installation
+            # Non-fatal: fall back to pip for venv creation and installation.
+            # spconv (LitePT-L on CUDA) needs uv: its attempt is recorded as
+            # failed, and Repair dependencies adds it later.
             _log(
-                "uv download failed (will use pip instead): {}".format(uv_msg),
+                "uv download failed (will use pip instead; spconv for LitePT-L "
+                "needs uv and is added by Repair dependencies): {}".format(uv_msg),
                 Qgis.MessageLevel.Warning,
             )
         else:
@@ -4195,6 +4291,12 @@ def create_venv_and_install(
                     "driver) and 'sudo nvidia-modprobe -u -c=0' (it creates the "
                     "CUDA device the sandbox needs), restart QGIS and click "
                     "Reinstall Dependencies, or install the CPU version (button below).")
+            if _last_cuda_check.get("no_kernels_for"):
+                return False, (
+                    f"The installed PyTorch ({torch_index_in_use}) has no GPU code for this "
+                    f"GPU ({_last_cuda_check['no_kernels_for']}); a driver update does not "
+                    "change that. Please report the Setup log on the issue tracker; "
+                    "meanwhile install the CPU version (button below).")
             return False, ("PyTorch was installed but its GPU (CUDA) test failed on this computer. Update the NVIDIA driver and click Reinstall Dependencies, or install the CPU version (button below).")
 
     if not is_valid:
@@ -4256,6 +4358,11 @@ def create_venv_and_install(
         # QGIS's NumPy the packages were chosen for (None: no constraint).
         "host_numpy": (_host_numpy_pin(VENV_DIR) or "==").split("==", 1)[1] or None,
     })
+
+    removed_venvs = cleanup_old_venv_directories()
+    if removed_venvs:
+        _log(f"Removed {len(removed_venvs)} stale environment(s) of other Python versions",
+             Qgis.MessageLevel.Info)
 
     if progress_callback:
         progress_callback(100, "All dependencies installed and verified")

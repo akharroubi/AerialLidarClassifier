@@ -249,10 +249,12 @@ class ReleaseChecks(unittest.TestCase):
                         self.assertEqual(extract.call_count, 1)
 
     def test_partial_python_executable_is_not_ready(self):
+        # 1.3.3: standalone_python_exists() checks files only (main thread);
+        # Setup runs the interpreter and downloads it again when it fails
+        # (qgis_review_fix_checks.test_partial_python_is_downloaded_again).
         with tempfile.TemporaryDirectory() as folder:
             p = Path(folder) / 'python.exe'; p.write_bytes(b'partial')
-            with patch.object(pm, 'get_standalone_python_path', return_value=str(p)):
-                self.assertFalse(pm.standalone_python_exists())
+            self.assertFalse(pm.verify_standalone_python(str(p))[0])
 
     def test_vertical_epsg_and_geographic_override(self):
         result = units.units_from_geokeys({1024: 1, 3076: 9001, 4096: 6360})
@@ -446,7 +448,9 @@ class ReleaseChecks(unittest.TestCase):
                         spec.class_mapping, laspy, lambda p: None, lambda: False, model_spec=spec)
             self.assertFalse(output.exists())
             warnings = []
-            tight = types.SimpleNamespace(total=10 ** 12, used=10 ** 12, free=21_000 * 32 + 10)
+            # Just above the minimum: 32 bytes per point and one sidecar's overhead.
+            tight = types.SimpleNamespace(total=10 ** 12, used=10 ** 12,
+                                          free=21_000 * 32 + streaming.SIDECAR_FILE_OVERHEAD + 10)
             with patch.object(streaming.shutil, 'disk_usage', return_value=tight):
                 streaming._check_temp_space(Path(folder), 21_000, [(0, 0, 100, 100)], 50.0, warnings.append)
             self.assertTrue(warnings and 'may need up to' in warnings[0])

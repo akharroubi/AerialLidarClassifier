@@ -16,15 +16,18 @@ from qgis.PyQt.QtCore import pyqtSignal
 from ..config import TILE_DEFAULT_BUFFER_M
 from ..core.backends import create_backend
 from ..core.registry import get_model
-from ..core.memory import plan_processing, tile_point_budget
-from ..core.tiling import PointCountGrid, compute_tile_grid, resolve_buffer, split_dense_tiles
+from ..core.memory import (BYTES_PER_TILE_POINT, bytes_per_tile_point, plan_processing,
+                           tile_point_budget)
+from ..core.tiling import (PointCountGrid, compute_tile_grid, refine_dense_plans, resolve_buffer,
+                           split_dense_tiles)
 from ..utils.compat import scoped_enum
 from ..utils.class_mapping import output_model_spec, supports_output_codes, validate_model_output_field
 from ..utils.las_units import resolve_units
 from ..utils.las_utils import strip_copc_vlrs as _strip_copc_vlrs
 from ..utils.logger import LOG_TAG, log_error, log_info, log_warning, set_thread_sink
 from ..utils.model_manager import ModelManager
-from ..utils.output_safety import (add_extra_dim_preserving_raw, atomic_output_path, validate_output_paths, validate_label_field,
+from ..utils.output_safety import (output_record_length,  # noqa: F401 (Processing imports it here)
+                                   add_extra_dim_preserving_raw, atomic_output_path, validate_output_paths, validate_label_field,
                                    read_complete, checked_predictions, label_values, assign_labels,
                                    add_label_metadata, upgrade_header_preserving_fields,
                                    convert_points_preserving_fields, extra_dim_description)
@@ -102,9 +105,18 @@ def _resolve_output_path(
     return out_dir / f"{stem}{suffix}{ext}"
 
 
-def _write_las(las, out_path: Path, laspy_module) -> None:
-    """Write a LasData object as plain LAS or LAZ based on extension."""
-    with atomic_output_path(out_path) as temporary:
+def _write_las(las, out_path: Path, laspy_module, cancel_callback=None) -> None:
+    """Write a LasData object as plain LAS or LAZ based on extension.
+
+    With ``cancel_callback``, a cancellation during the write keeps the
+    previous output: the new file is discarded instead of published."""
+    def before_publish():
+        if cancel_callback is not None and cancel_callback():
+            raise InterruptedError("Classification cancelled; previous output retained.")
+
+    if cancel_callback is not None and cancel_callback():
+        raise InterruptedError("Classification cancelled; previous output retained.")
+    with atomic_output_path(out_path, before_publish=before_publish) as temporary:
         kwargs = {}
         if out_path.suffix.lower() == ".laz":
             kwargs["laz_backend"] = laspy_module.LazBackend.LazrsParallel
@@ -164,8 +176,20 @@ def _classify_tiled(
     grid = PointCountGrid(float(xy[:, 0].min()), float(xy[:, 1].min()),
                           float(xy[:, 0].max()), float(xy[:, 1].max()))
     grid.add(xy[:, 0], xy[:, 1])
-    budget = tile_point_budget()
+    bytes_per_point = getattr(predict_fn, "bytes_per_point", BYTES_PER_TILE_POINT)
+    budget = tile_point_budget(bytes_per_point=bytes_per_point)
     plans = split_dense_tiles(tiles, grid, buffer_m, budget)
+
+    def in_window(window):
+        return ((xy[:, 0] >= window[0]) & (xy[:, 0] <= window[2])
+                & (xy[:, 1] >= window[1]) & (xy[:, 1] <= window[3]))
+
+    def local_grid(_index, window):
+        inside = in_window(window)
+        fine = PointCountGrid(*window)
+        fine.add(xy[inside, 0], xy[inside, 1])
+        return fine
+    plans = refine_dense_plans(tiles, plans, grid, buffer_m, budget, local_grid)
     if any(len(plan) > 1 for plan in plans):
         dense = sum(len(plan) > 1 for plan in plans)
         tiles = [piece for plan in plans for piece in plan]
@@ -184,7 +208,8 @@ def _classify_tiled(
         set_origin(pcd.min(axis=0))
     try:
         result = _classify_tiles(tiles, pcd, xy, predict_fn, progress_callback,
-                                 cancel_callback, buffer_m, predictions, assigned)
+                                 cancel_callback, buffer_m, predictions, assigned,
+                                 budget=budget, bytes_per_point=bytes_per_point)
     finally:
         if set_origin is not None:
             set_origin(None)
@@ -192,7 +217,8 @@ def _classify_tiled(
 
 
 def _classify_tiles(tiles, pcd, xy, predict_fn, progress_callback, cancel_callback,
-                    buffer_m, predictions, assigned):
+                    buffer_m, predictions, assigned, budget=None,
+                    bytes_per_point=BYTES_PER_TILE_POINT):
     n_tiles = len(tiles)
     for i, (tx0, ty0, tx1, ty1) in enumerate(tiles):
         if cancel_callback():
@@ -209,6 +235,15 @@ def _classify_tiles(tiles, pcd, xy, predict_fn, progress_callback, cancel_callba
             continue
 
         buffer_idx = np.where(in_buffer)[0]
+        if budget is not None and len(buffer_idx) > budget:
+            log_warning(
+                f"Tiled inference: tile {i + 1}/{n_tiles} holds {len(buffer_idx):,} points with "
+                f"its buffer, more than the memory budget of {budget:,}: the {buffer_m:g} m of "
+                "context the model needs around it is that dense, so a smaller tile would not "
+                f"hold fewer. It needs about "
+                f"{len(buffer_idx) * bytes_per_point / 1024 ** 3:.1f} GB; "
+                "the run continues. If it runs out of memory, close other applications."
+            )
         in_core_local = (
             (xy[buffer_idx, 0] >= tx0) & (xy[buffer_idx, 0] < tx1)
             & (xy[buffer_idx, 1] >= ty0) & (xy[buffer_idx, 1] < ty1)
@@ -304,9 +339,16 @@ class ClassificationTask(QgsTask):
 
     # ------------------------------------------------------------------
     def run(self) -> bool:
+        from ..core.run_lock import exclusive_run
+
         set_thread_sink(self.log_message.emit)
         try:
-            return self._run()
+            # One run at a time (the dock and Processing share the GPU and
+            # the RAM the memory plan counts on).
+            with exclusive_run(self.isCanceled, log_info):
+                return self._run()
+        except InterruptedError:
+            return False
         finally:
             set_thread_sink(None)
 
@@ -381,6 +423,7 @@ class ClassificationTask(QgsTask):
             # buffer (see LitePTBackend.set_reference_origin, resolve_buffer).
             predict_fn.set_reference_origin = getattr(backend, "set_reference_origin", None)
             predict_fn.context_buffer = lambda: getattr(backend, "context_buffer_m", None)
+            predict_fn.bytes_per_point = bytes_per_tile_point(self.spec.family)
 
             for i, fp in enumerate(self.files):
                 if self.isCanceled():
@@ -468,18 +511,29 @@ class ClassificationTask(QgsTask):
     def _plan(self, fp, laspy) -> str:
         """"untiled", "tiled" or "streaming" for this file.
 
-        Tiling is the user's choice; streaming follows from the memory the
-        file needs (see core.memory.plan_processing), so a file that does
-        not fit in RAM is streamed from disk without a separate option.
-        ``tile_streaming`` (scripts, tests, the Processing parameter of
-        1.0 to 1.3.2) forces streaming. Each automatic switch is logged.
+        Tiling is the user's choice; with it, streaming follows from the
+        memory the file needs (see core.memory.plan_processing), so a file
+        that does not fit in RAM is streamed from disk without a separate
+        option. Without it, a file too large for one piece is refused.
+        ``tile_streaming`` (scripts, tests, Processing's TILE_STREAMING)
+        forces streaming, with or without tiling. Each automatic switch is
+        logged.
         """
         with laspy.open(str(fp)) as reader:
             n_points = int(reader.header.point_count)
             record_length = int(reader.header.point_format.size)
+            new_records = output_record_length(
+                reader.header.point_format, self.field_name, self.class_mapping)
         mode, reason = plan_processing(
             n_points, record_length, self.tile_enabled,
-            force_streaming=self.tile_streaming and self.tile_enabled)
+            force_streaming=self.tile_streaming,
+            bytes_per_point=bytes_per_tile_point(self.spec.family),
+            output_record_length=new_records)
+        if mode == "too_large":
+            raise RuntimeError(
+                f"Not enough memory to classify {fp.name} in one piece: {reason} "
+                "Tick 'Tile large files' and run again: the file is then classified "
+                "tile by tile, and streamed from disk when it does not fit in memory.")
         if reason:
             log_info(f"{fp.name}: {reason}")
         return mode
@@ -606,7 +660,7 @@ class ClassificationTask(QgsTask):
 
         add_label_metadata(las.header, self.spec, field)
         _strip_copc_vlrs(las)
-        _write_las(las, out_path, laspy)
+        _write_las(las, out_path, laspy, cancel_callback=self.isCanceled)
         return out_path
 
     # ------------------------------------------------------------------

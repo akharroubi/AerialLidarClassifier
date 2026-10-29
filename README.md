@@ -215,8 +215,8 @@ qgis_process run aeriallidar:classify_point_cloud -- \
 | `FIELD_NAME` | `classification` (default). The Airborne classifier also accepts a new name (raw model classes in an extra field) |
 | `OUTPUT_CODES_JSON` | mobile mapping and railway, optional: codes keyed by model class ID, e.g. `{"5":70,"6":71,"7":72}`; blank keeps the defaults |
 | `LOAD_AS_LAYER` | add the result to the project |
-| `TILE_ENABLED`, `TILE_SIZE_M`, `TILE_BUFFER_M` | tiling; size `0` is automatic (about 10 M points per tile); buffer `0` (default) is the context the model needs, with which tiles give the same labels as an untiled run |
-| `TILE_STREAMING` | always stream from disk; otherwise a file is streamed automatically when it does not fit in RAM |
+| `TILE_ENABLED`, `TILE_SIZE_M`, `TILE_BUFFER_M` | tiling; size `0` is automatic (about 10 M points per tile); buffer `0` (default) is the context the model needs (see *Tiling, streaming and large files*) |
+| `TILE_STREAMING` | always stream from disk (with or without `TILE_ENABLED`); otherwise a file is streamed automatically when it does not fit in RAM |
 | `UNITS` | `0` auto-detect, `1` metres, `2` international feet, `3` US survey feet |
 
 For example, mobile mapping with your own user-defined codes for poles,
@@ -454,41 +454,50 @@ feet) or the `UNITS` parameter in Processing.
   buffer; only the core of each tile is written. Tile size is automatic (about
   10 M points per tile at the file's average density) or set in metres. The
   file is read into RAM once and the model works on one tile at a time.
-- **Tiling does not change the labels.** Every tile places the model's crops
-  (LitePT-L) or blocks (SegFormer 3D) on the same grid as an untiled run of
-  the whole file, and the buffer is, by default, exactly the context the
-  model needs: 91.5 m for Airborne LitePT-L, 35 m for Mobile mapping and
-  Railway (less on GPUs under 16 GB, where the crops are smaller), 34 m for
-  SegFormer 3D. Measured on a 1.08 M-point street tile cut into 100 m tiles:
-  identical labels to the untiled run for LitePT-L Airborne and Mobile
-  Mapping and for SegFormer 3D. A buffer set larger is used as given; a smaller one is raised to
-  the model's need.
+- **Tiles give the labels of an untiled run.** Every tile places the model's
+  crops (LitePT-L) or blocks (SegFormer 3D) on the same grid as an untiled run
+  of the whole file, and the buffer is, by default, the context the model
+  needs: 91.5 m for Airborne LitePT-L, 35 m for Mobile mapping and Railway
+  (less on GPUs under 16 GB, where the crops are smaller), 34 m for SegFormer
+  3D. For SegFormer 3D this gives the untiled labels by construction. For
+  LitePT-L, the default tiles gave identical labels on a street tile, a
+  26 M-point mobile mapping corridor and a DALES airborne tile (real model).
+  LitePT-L places its "fill" crops (for the points its regular crops miss)
+  one after another, so on very dense data cut into many small tiles a few
+  labels near tile edges can differ. A buffer set larger is used as given; a
+  smaller one is raised to the model's need.
 - **Streaming is automatic.** Before each file the plugin reads its header and
   compares the memory an in-memory run needs (the point records, the
   coordinates and one tile) with the memory free at that moment. A file that
   does not fit is streamed from disk: read in chunks, the points of each tile
   kept in temporary files, one tile classified at a time, the output written
-  as it goes, about 2 bytes per point in RAM for the whole file. A file meant
-  to run in one piece (tiling unticked) that does not fit in one piece is
-  tiled automatically. The log says when either happens. The temporary tile
+  as it goes, about 2 bytes per point in RAM for the whole file. The log says
+  when that happens. With tiling unticked, each file is classified in one
+  piece; a file too large for the free memory is refused before it is read,
+  with the memory it needs and the advice to tick *Tile large files*. The temporary tile
   files take about 32 bytes per point (more with the buffers) in a work folder
   inside the output folder, on the drive you chose for the results, and are
   removed at the end; the run checks the free space of that drive before it
-  starts and says how much it needs. In Processing, `TILE_STREAMING` forces
-  streaming.
+  starts and says how much it needs, for the output file as well. It also
+  checks that the header's bounds hold every point (and partitions the file
+  again when they do not) and that the input file does not change during the
+  run. In Processing, `TILE_STREAMING` forces streaming.
 - **Dense tiles are split.** Point density is rarely uniform: along a mobile
   mapping trajectory a tile sized from the average density can hold twenty
   times more points than its neighbours. While reading the file, the plugin
   counts the points on a fine grid, and every tile whose buffered window holds
   more points than half of the free RAM allows is cut in two, recursively,
   across the densest direction, before inference. The log says how many tiles
-  were split. Splitting stops when the model's context around a piece holds
+  were split; a tile the file-wide grid is too coarse for (a very large
+  extent, a few stray points far away) is planned again on a fine grid of its
+  own points. Splitting stops when the model's context around a piece holds
   most of its points; if such a piece is still over the budget, the log says
-  so and the run continues.
+  so with the memory it needs, and the run continues.
 
-The predictions take about 2 bytes per point for the whole file. Run one job
-at a time on very large data, and untick *Load classified files in QGIS* for
-long batches.
+The predictions take about 2 bytes per point for the whole file. Runs started
+in the same QGIS session (the dock, Processing, the Graphical Modeler) go one
+at a time: a second run waits for the first and the log says so. Untick *Load
+classified files in QGIS* for long batches.
 
 To keep the GPU free for other work, choose the Airborne classifier and untick
 *Use GPU*: its SegFormer 3D engine then runs on the CPU. *Clear GPU memory* releases unused cached memory
@@ -536,8 +545,9 @@ All models run inside a QGIS background task, so QGIS stays responsive.
   hardest class: check them where they matter.
 - *Other* collects every remaining object (buildings, signals, cabinets,
   trains...), so it is a broad class.
-- Very large files: use tiling (a buffer of 10 m or more keeps context at the
-  tile edges) or streaming.
+- Very large files: tick *Tile large files*; the buffer is set automatically
+  (35 m, the model's context), and files larger than the free RAM are
+  streamed from disk.
 - The results are provided as is, without warranty (see the licences). Check
   them before using them for asset management, maintenance planning or any
   safety-related work.

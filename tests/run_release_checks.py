@@ -24,7 +24,7 @@ from pathlib import Path
 TESTS = Path(__file__).resolve().parent
 QGIS_SCRIPTS = ("qgis_release_checks.py", "qgis_mls_checks.py", "qgis_rail_checks.py",
                 "qgis_gpu_readiness_checks.py", "qgis_pointcloud_view_checks.py",
-                "qgis_numpy_host_checks.py")
+                "qgis_numpy_host_checks.py", "qgis_review_fix_checks.py")
 GPU_SCRIPTS = ("qgis_mls_gpu.py", "qgis_rail_gpu.py")
 DEFAULTS = {
     "venv": os.environ.get("ALC_VENV_PYTHON", str(

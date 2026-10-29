@@ -11,7 +11,7 @@ import sys
 
 from ..config import PLUGIN_NAME
 
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import QThread, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QCheckBox,
@@ -24,6 +24,22 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+class _GpuProbe(QThread):
+    """detect_nvidia_gpu() off the GUI thread: nvidia-smi can take up to
+    20 s to answer (a laptop GPU waking up). Its result is cached, so the
+    install that follows does not ask again."""
+
+    detected = pyqtSignal(bool, object)
+
+    def run(self):
+        try:
+            from ..utils.venv_manager import detect_nvidia_gpu
+            has_gpu, gpu_info = detect_nvidia_gpu()
+        except Exception:
+            has_gpu, gpu_info = False, {}
+        self.detected.emit(bool(has_gpu), dict(gpu_info or {}))
 
 
 class DepsInstallDockWidget(QDockWidget):
@@ -189,17 +205,29 @@ class DepsInstallDockWidget(QDockWidget):
         self._detect_gpu()
 
     def _detect_gpu(self):
-        """Detect GPU and update the GPU info label."""
+        """Detect the GPU in a background thread and update the GPU info
+        label when it answers."""
+        from ..utils.thread_lifetime import retain_thread
+
+        self._gpu_detected = False
+        self.cpu_only.setVisible(False)
+        self.gpu_label.setText("Detecting the GPU...")
+        self._gpu_probe = retain_thread(_GpuProbe())
+        self._gpu_probe.detected.connect(self._show_gpu)
+        self._gpu_probe.start()
+
+    def _show_gpu(self, has_gpu, gpu_info):
+        """Update the GPU info label from the detection result."""
         self._gpu_detected = False
         try:
             from ..utils.venv_manager import (
-                _select_cuda_index, _spconv_extra_for, _spconv_is_fallback,
-                detect_nvidia_gpu)
+                _select_cuda_index, _spconv_extra_for, _spconv_is_fallback)
 
-            has_gpu, gpu_info = detect_nvidia_gpu()
             self._gpu_detected = bool(has_gpu)
-            # The CPU-only choice only means something next to a GPU.
-            self.cpu_only.setVisible(self._gpu_detected)
+            # The CPU-only choice only means something next to a GPU (and
+            # not when the panel only adds missing packages).
+            self.cpu_only.setVisible(
+                self._gpu_detected and not getattr(self, "_completion_mode", False))
             if has_gpu:
                 name = gpu_info.get("name", "Unknown GPU")
                 memory_mb = gpu_info.get("memory_mb")
@@ -279,6 +307,7 @@ class DepsInstallDockWidget(QDockWidget):
 
     def show_install_ui(self):
         """Show the install button, hide progress and status."""
+        self._completion_mode = False
         self.install_button.show()
         self.cancel_button.hide()
         self.progress_frame.hide()
@@ -291,6 +320,7 @@ class DepsInstallDockWidget(QDockWidget):
         adds (spconv's build for RTX 50 series): offer to add them in place
         instead of a reinstall."""
         self.show_install_ui()
+        self._completion_mode = True
         self.install_button.setText("Add missing packages")
         self.cpu_only.setChecked(False)
         self.cpu_only.hide()

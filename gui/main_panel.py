@@ -216,7 +216,10 @@ class ClassifierDockWidget(QDockWidget):
 
         # Cancel any running classification task and disconnect its
         # signals so completion callbacks do not reach into a deleted
-        # dock object after we are gone.
+        # dock object after we are gone, and its last messages (it may
+        # still be unloading the model) do not enter the next run's log.
+        # A run started after the dock reopens waits for this one to end
+        # (core.run_lock).
         if self.task is not None:
             try:
                 if not self.task.isCanceled():
@@ -226,7 +229,8 @@ class ClassifierDockWidget(QDockWidget):
             for signal_name in (
                 "progressChanged",
                 "taskCompleted",
-                    "taskTerminated"):
+                "taskTerminated",
+                    "log_message"):
                 try:
                     getattr(self.task, signal_name).disconnect()
                 except Exception:
@@ -783,8 +787,10 @@ class ClassifierDockWidget(QDockWidget):
             "than the free memory allows are split further.\n\n"
             "Files that do not fit in RAM are streamed from disk automatically "
             "(tiles kept in temporary files in the output folder, removed at "
-            "the end), and a file that cannot be classified in one piece is "
-            "tiled automatically. The log says when that happens."
+            "the end). The log says when that happens.\n\n"
+            "Unticked, each file is classified in one piece; a file too large "
+            "for the free memory is refused with a message asking to tick "
+            "this option."
         )
         self.tile_check.toggled.connect(self._update_tile_controls_enabled)
         lay.addWidget(self.tile_check)
@@ -822,9 +828,8 @@ class ClassifierDockWidget(QDockWidget):
         self.tile_buffer_spin.setToolTip(
             "Context around each tile; predictions in the buffer are "
             "discarded.\n\n"
-            "Automatic (recommended) uses exactly the context the model "
-            "needs, with which tiled and streamed results are the same as "
-            "an untiled run: 91.5 m for Airborne LitePT-L, 35 m for Mobile "
+            "Automatic (recommended) uses the context the model needs: "
+            "91.5 m for Airborne LitePT-L, 35 m for Mobile "
             "mapping and Railway (less on small GPUs), 34 m for SegFormer "
             "3D. A larger value is used as given; a smaller one is raised "
             "to the model's need."
@@ -834,8 +839,8 @@ class ClassifierDockWidget(QDockWidget):
         lay.addLayout(perf_form)
 
         streaming_note = QLabel(
-            "Files larger than the free memory are streamed from disk "
-            "automatically.")
+            "With tiling, files larger than the free memory are streamed from "
+            "disk automatically.")
         streaming_note.setWordWrap(True)
         streaming_note.setStyleSheet(_secondary_text(streaming_note))
         lay.addWidget(streaming_note)

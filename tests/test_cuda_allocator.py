@@ -46,6 +46,7 @@ class AllocatorMode(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
         os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
+        os.environ.pop("PYTORCH_ALLOC_CONF", None)
         os.environ.pop(alloc.ENV_OVERRIDE, None)
         alloc._PLATFORM_UNSUPPORTED = False
         self.addCleanup(setattr, alloc, "_PLATFORM_UNSUPPORTED", False)
@@ -168,11 +169,40 @@ class AllocatorMode(unittest.TestCase):
             self.configure(torch, lambda i: True)
 
     def test_user_environment_setting_is_respected_in_automatic_mode(self):
+        # Applied explicitly, so a mode forced earlier in the session is undone.
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:False"
+        torch = _FakeTorch()
+        self.assertEqual(self.configure(torch, lambda i: True, mode="expandable"), "expandable")
+        self.assertEqual(self.configure(torch, lambda i: True, mode="auto"), "standard")
+        self.assertEqual(torch.calls[-1], "expandable_segments:False")
+        self.assertIn("PYTORCH_CUDA_ALLOC_CONF", self.messages[-1])
+
+    def test_new_environment_name_is_read_too(self):
+        for platform, value, expected in (("win32", "True", "expandable"),
+                                          ("linux", "False", "standard")):
+            os.environ["PYTORCH_ALLOC_CONF"] = f"expandable_segments:{value}"
+            try:
+                torch = _FakeTorch()
+                self.assertEqual(self.configure(torch, lambda i: True, mode="auto",
+                                                platform=platform), expected)
+                self.assertEqual(torch.calls[0], f"expandable_segments:{value}")
+                self.assertIn("PYTORCH_ALLOC_CONF", self.messages[-1])
+            finally:
+                os.environ.pop("PYTORCH_ALLOC_CONF", None)
+
+    def test_unreadable_environment_value_is_left_alone(self):
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:maybe"
         torch = _FakeTorch()
         self.assertEqual(self.configure(torch, lambda i: True), "unchanged")
         self.assertEqual(torch.calls, [])
-        self.assertIn("PYTORCH_CUDA_ALLOC_CONF", self.messages[0])
+
+    def test_failure_with_environment_expandable_names_the_variable(self):
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+        torch = _FakeTorch()
+        self.assertEqual(self.configure(torch, lambda i: True, platform="linux"), "expandable")
+        with self.assertRaisesRegex(RuntimeError, "PYTORCH_CUDA_ALLOC_CONF"):
+            alloc.recover_from_allocator_failure(
+                torch, RuntimeError("CUDA driver error: unknown error"))
 
     def test_standard_setting_skips_the_probe(self):
         torch = _FakeTorch(fail=RuntimeError("must not be allocated"))

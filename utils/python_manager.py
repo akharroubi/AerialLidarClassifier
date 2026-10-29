@@ -29,6 +29,9 @@ CACHE_DIR = (
     or os.environ.get("AERIAL_LIDAR_CLASSIFIER_VENV_DIR")
     or os.path.expanduser("~/.qgis_aerial_lidar_classifier")
 )
+# The portable Python of releases up to 1.3.2, one folder for every QGIS.
+# A QGIS with another Python version now gets its own folder (see
+# get_standalone_dir), so two QGIS installs no longer replace each other's.
 STANDALONE_DIR = os.path.join(CACHE_DIR, "python_standalone")
 
 # Release tag from python-build-standalone
@@ -145,13 +148,43 @@ def get_python_full_version() -> str:
     return f"{version_tuple[0]}.{version_tuple[1]}.0"
 
 
+def _installed_minor(standalone_dir: str) -> Optional[Tuple[int, int]]:
+    """Python version of a portable Python folder, from its files only
+    (no process is started): ``python3XY.dll`` on Windows,
+    ``lib/python3.X`` elsewhere."""
+    python_dir = os.path.join(standalone_dir, "python")
+    try:
+        names = os.listdir(python_dir if sys.platform == "win32"
+                           else os.path.join(python_dir, "lib"))
+    except OSError:
+        return None
+    for name in names:
+        low = name.lower()
+        if sys.platform == "win32":
+            if low.startswith("python3") and low.endswith(".dll") and low[7:-4].isdigit():
+                return 3, int(low[7:-4])
+        elif low.startswith("python3.") and low[8:].isdigit():
+            return 3, int(low[8:])
+    return None
+
+
 def get_standalone_dir() -> str:
     """Get the directory where Python standalone is installed.
+
+    The folder of releases up to 1.3.2 (``python_standalone``) when it
+    holds this QGIS's Python version, else ``python_standalone_3.X``: a
+    second QGIS with another Python version keeps the first one's folder.
 
     Returns:
         Path to the standalone Python directory.
     """
-    return STANDALONE_DIR
+    version = get_qgis_python_version()
+    versioned = os.path.join(CACHE_DIR, f"python_standalone_{version[0]}.{version[1]}")
+    if os.path.isdir(versioned):
+        return versioned
+    if _installed_minor(STANDALONE_DIR) == version:
+        return STANDALONE_DIR
+    return versioned
 
 
 def get_standalone_python_path() -> str:
@@ -160,7 +193,7 @@ def get_standalone_python_path() -> str:
     Returns:
         Path to the Python executable.
     """
-    python_dir = os.path.join(STANDALONE_DIR, "python")
+    python_dir = os.path.join(get_standalone_dir(), "python")
     if sys.platform == "win32":
         return os.path.join(python_dir, "python.exe")
     else:
@@ -168,13 +201,17 @@ def get_standalone_python_path() -> str:
 
 
 def standalone_python_exists() -> bool:
-    """Check if standalone Python is already installed.
+    """Check if standalone Python for this QGIS's version is installed.
+
+    Files only, no process is started: safe on the main thread (the
+    dock calls it when it opens). Setup runs the interpreter itself
+    (verify_standalone_python) before using it.
 
     Returns:
         True if the standalone Python executable exists.
     """
-    python_path = get_standalone_python_path()
-    return os.path.exists(python_path) and verify_standalone_python()[0]
+    return (os.path.exists(get_standalone_python_path())
+            and _installed_minor(get_standalone_dir()) == get_qgis_python_version())
 
 
 def _get_platform_info() -> Tuple[str, str]:
@@ -264,11 +301,15 @@ def download_python_standalone(
     Returns:
         Tuple of (success, message).
     """
-    if standalone_python_exists():
+    if standalone_python_exists() and verify_standalone_python()[0]:
         _log("Python standalone already exists", Qgis.MessageLevel.Info)
         return True, "Python standalone already installed"
 
+    from .download_hashes import PYTHON_STANDALONE_SHA256, check_archive
+
     url = get_download_url()
+    archive_name = url.rsplit("/", 1)[-1]
+    target_dir = get_standalone_dir()
     python_version = get_python_full_version()
 
     _log(f"Downloading Python {python_version} from: {url}", Qgis.MessageLevel.Info)
@@ -319,8 +360,17 @@ def download_python_standalone(
         with open(temp_path, "wb") as f:
             f.write(content.data())
 
+        # The interpreter is run below: only the published archive is used.
+        problem = check_archive(temp_path, archive_name, PYTHON_STANDALONE_SHA256)
+        if problem:
+            _log(f"Python download rejected: {problem}", Qgis.MessageLevel.Critical)
+            return False, (
+                f"The downloaded Python archive failed its integrity check ({problem}). "
+                "A proxy or security product may have altered the download; try "
+                "again, or report the Setup log on the issue tracker.")
+
         _log(
-            f"Download complete ({len(content)} bytes), extracting...",
+            f"Download complete ({len(content)} bytes, SHA-256 verified), extracting...",
             Qgis.MessageLevel.Info)
 
         if progress_callback:
@@ -336,25 +386,25 @@ def download_python_standalone(
         if progress_callback:
             progress_callback(9, "Verifying Python installation...")
 
-        relative_python = os.path.relpath(get_standalone_python_path(), STANDALONE_DIR)
+        relative_python = os.path.relpath(get_standalone_python_path(), get_standalone_dir())
         success, verify_msg = verify_standalone_python(os.path.join(staging, relative_python))
 
         if success:
             if cancel_check and cancel_check():
                 return False, "Download cancelled"
             # Keep the old runtime until the replacement has passed verification.
-            if os.path.exists(STANDALONE_DIR):
+            if os.path.exists(target_dir):
                 backup = tempfile.mkdtemp(prefix="python-backup-", dir=CACHE_DIR)
                 os.rmdir(backup)
-                os.replace(STANDALONE_DIR, backup)
+                os.replace(target_dir, backup)
                 try:
-                    os.replace(staging, STANDALONE_DIR)
+                    os.replace(staging, target_dir)
                 except Exception:
-                    os.replace(backup, STANDALONE_DIR)
+                    os.replace(backup, target_dir)
                     raise
                 shutil.rmtree(backup, ignore_errors=True)
             else:
-                os.replace(staging, STANDALONE_DIR)
+                os.replace(staging, target_dir)
             if progress_callback:
                 progress_callback(10, f"Python {python_version} installed")
             _log("Python standalone installed successfully", Qgis.MessageLevel.Success)
@@ -368,22 +418,20 @@ def download_python_standalone(
         error_msg = f"Installation failed: {str(e)}"
         _log(error_msg, Qgis.MessageLevel.Critical)
 
-        if sys.platform == "win32":
-            error_lower = str(e).lower()
-            if any(
-                w in error_lower for w in (
-                    "denied",
-                    "access",
-                    "permission")):
-                antivirus_help = (
-                    "This may be caused by antivirus software blocking "
-                    "the extraction.\nPlease try:\n"
-                    "  1. Temporarily disable your antivirus\n"
-                    "  2. Add an exclusion for: {}\n"
-                    "  3. Try the installation again".format(STANDALONE_DIR)
-                )
-                _log(antivirus_help, Qgis.MessageLevel.Warning)
-                error_msg = f"{error_msg}\n\n{antivirus_help}"
+        error_lower = str(e).lower()
+        if isinstance(e, PermissionError) or any(
+                w in error_lower for w in ("access is denied", "permission denied",
+                                           "winerror 5", "winerror 32")):
+            access_help = (
+                "The system refused access to a file while extracting Python into "
+                f"{CACHE_DIR}. Usually a file is still in use (another program, a "
+                "security scan) or the folder is not writable for your account. "
+                "Restart QGIS and try again; if it fails again, check that you can "
+                "write to that folder, or set AERIAL_LIDAR_CLASSIFIER_CACHE_DIR to "
+                "a folder you can write to."
+            )
+            _log(access_help, Qgis.MessageLevel.Warning)
+            error_msg = f"{error_msg}\n\n{access_help}"
 
         return False, error_msg
     finally:
@@ -467,11 +515,12 @@ def remove_standalone_python() -> Tuple[bool, str]:
     Returns:
         Tuple of (success, message).
     """
-    if not os.path.exists(STANDALONE_DIR):
+    target_dir = get_standalone_dir()
+    if not os.path.exists(target_dir):
         return True, "Standalone Python not installed"
 
     try:
-        shutil.rmtree(STANDALONE_DIR)
+        shutil.rmtree(target_dir)
         _log("Removed standalone Python installation", Qgis.MessageLevel.Success)
         return True, "Standalone Python removed"
     except Exception as e:

@@ -90,9 +90,9 @@ def resolve_buffer(requested_m, predict_fn) -> tuple:
     """Buffer a tiled run uses, and a log line saying how it was chosen.
 
     ``predict_fn.context_buffer`` (set by the callers) returns the loaded
-    model's need: the buffer with which a tile's core gets exactly the
-    labels of an untiled run (LitePT-L: twice the crop radius; SegFormer
-    3D: one block). ``requested_m`` 0 or less means automatic (the need);
+    model's need: the context a tile's core needs to get the crops or
+    blocks of an untiled run (LitePT-L: twice the crop radius plus one
+    spacing; SegFormer 3D: one block). ``requested_m`` 0 or less means automatic (the need);
     a larger value is used as given, a smaller one is raised to the need.
     """
     requested = float(requested_m or 0.0)
@@ -104,11 +104,11 @@ def resolve_buffer(requested_m, predict_fn) -> tuple:
         buffer = requested if requested > 0 else TILE_FALLBACK_BUFFER_M
         return buffer, f"Tile buffer {buffer:g} m."
     if requested <= 0:
-        return need, (f"Tile buffer {need:g} m (automatic: the context the model needs, "
-                      "so tiles give the same labels as an untiled run).")
+        return need, (f"Tile buffer {need:g} m (automatic: the context the model needs "
+                      "around each tile).")
     if requested < need:
         return need, (f"Tile buffer raised from {requested:g} m to {need:g} m, the context "
-                      "the model needs for tiles to give the same labels as an untiled run.")
+                      "the model needs around each tile.")
     return requested, f"Tile buffer {requested:g} m (the model needs at least {need:g} m)."
 
 
@@ -264,4 +264,146 @@ def split_dense_tiles(
             stack.append(best[2])
             stack.append(best[1])
         result.append(leaves)
+    return result
+
+
+def window_of(tile: Tile, buffer_m: float) -> Tile:
+    """The buffered window of a tile."""
+    b = float(buffer_m)
+    return (tile[0] - b, tile[1] - b, tile[2] + b, tile[3] + b)
+
+
+def _cell_range(grid: PointCountGrid, low: float, high: float, axis: int) -> tuple[int, int]:
+    """First and last grid cell along ``axis`` that the half-open interval
+    [low, high) overlaps (clipped to the grid)."""
+    origin, size = (grid.x0, grid.nx) if axis == 0 else (grid.y0, grid.ny)
+    first = int(math.floor((low - origin) / grid.cell))
+    last = int(math.ceil((high - origin) / grid.cell)) - 1
+    first = min(max(first, 0), size - 1)
+    last = min(max(last, first), size - 1)
+    return first, last
+
+
+def _occupied_box(grid: PointCountGrid, piece: Tile):
+    """The part of ``piece`` covered by grid cells that hold points (cell
+    edges, clipped to the piece), or None when it holds none. The rest of
+    the piece holds no point counted by the grid."""
+    import numpy as np
+
+    i0, i1 = _cell_range(grid, piece[0], piece[2], 0)
+    j0, j1 = _cell_range(grid, piece[1], piece[3], 1)
+    block = grid.counts.reshape(grid.ny, grid.nx)[j0:j1 + 1, i0:i1 + 1]
+    rows = np.flatnonzero(block.any(axis=1))
+    cols = np.flatnonzero(block.any(axis=0))
+    if not len(rows):
+        return None
+    x0 = max(piece[0], grid.x0 + (i0 + int(cols[0])) * grid.cell)
+    x1 = min(piece[2], grid.x0 + (i0 + int(cols[-1]) + 1) * grid.cell)
+    y0 = max(piece[1], grid.y0 + (j0 + int(rows[0])) * grid.cell)
+    y1 = min(piece[3], grid.y0 + (j0 + int(rows[-1]) + 1) * grid.cell)
+    # The parts around this box stay pieces of their own, so a point the
+    # grid counted in an edge cell while lying beyond it is still in one.
+    return x0, y0, x1, y1
+
+
+def _around(piece: Tile, box: Tile) -> list[Tile]:
+    """``piece`` minus ``box`` as up to four rectangles (half-open cores)."""
+    rest = []
+    if box[0] > piece[0]:
+        rest.append((piece[0], piece[1], box[0], piece[3]))
+    if box[2] < piece[2]:
+        rest.append((box[2], piece[1], piece[2], piece[3]))
+    if box[1] > piece[1]:
+        rest.append((box[0], piece[1], box[2], box[1]))
+    if box[3] < piece[3]:
+        rest.append((box[0], box[3], box[2], piece[3]))
+    return rest
+
+
+def _gap_cuts(grid: PointCountGrid, box: Tile, axis: int) -> list[float]:
+    """Coordinates, strictly inside ``box`` along ``axis``, where a run of
+    grid cells holding points starts after a run of empty ones."""
+    import numpy as np
+
+    i0, i1 = _cell_range(grid, box[0], box[2], 0)
+    j0, j1 = _cell_range(grid, box[1], box[3], 1)
+    block = grid.counts.reshape(grid.ny, grid.nx)[j0:j1 + 1, i0:i1 + 1]
+    occupied = block.any(axis=0) if axis == 0 else block.any(axis=1)
+    starts = np.flatnonzero(occupied[1:] & ~occupied[:-1]) + 1
+    first, origin = (i0, grid.x0) if axis == 0 else (j0, grid.y0)
+    low, high = (box[0], box[2]) if axis == 0 else (box[1], box[3])
+    cuts = [origin + (first + int(s)) * grid.cell for s in starts]
+    return [c for c in cuts if low < c < high]
+
+
+def _compact_parts(grid: PointCountGrid, piece: Tile) -> list[tuple[Tile, bool]]:
+    """``piece`` as rectangles that partition it: ``(part, True)`` for compact
+    groups of grid cells holding points, ``(part, False)`` for parts with
+    no point. Groups are separated where whole rows or columns of cells are
+    empty (a street and a stray point kilometres away)."""
+    box = _occupied_box(grid, piece)
+    if box is None:
+        return [(piece, False)]
+    parts = [(rest, False) for rest in _around(piece, box)]
+    for axis in (0, 1):
+        cuts = _gap_cuts(grid, box, axis)
+        if not cuts:
+            continue
+        edges = [box[axis]] + cuts + [box[axis + 2]]
+        for low, high in zip(edges, edges[1:]):
+            sub = (low, box[1], high, box[3]) if axis == 0 else (box[0], low, box[2], high)
+            parts.extend(_compact_parts(grid, sub))
+        return parts
+    parts.append((box, True))
+    return parts
+
+
+def refine_dense_plans(
+    tiles: list[Tile],
+    plans: list[list[Tile]],
+    grid: PointCountGrid,
+    buffer_m: float,
+    max_points: int,
+    local_grid,
+    min_core_m: float | None = None,
+    min_gain: float = 0.9,
+) -> list[list[Tile]]:
+    """Plan again, on a finer count grid, the pieces that ``split_dense_tiles``
+    left over budget while the file-wide grid is coarse for them.
+
+    The file-wide grid has at most 2048 cells per side, so on a large extent
+    (or one stretched by a few stray points far away) a cell can be wider
+    than a useful cut. Such a piece is first divided into the compact groups
+    of cells that hold its points and parts with no point (_compact_parts);
+    each group over the budget gets a count grid of its own window and is
+    split on it: ``local_grid(index, window)`` returns a PointCountGrid over
+    ``window`` holding the points of that window (``index``: the tile the
+    piece comes from, whose points include the piece's). The piece is
+    replaced by those pieces, which partition it exactly. Returns the plans.
+    """
+    limit = max(int(max_points), 1)
+    result = []
+    for index, plan in enumerate(plans):
+        refined: list[Tile] = []
+        for piece in plan:
+            if grid.count(*window_of(piece, buffer_m)) <= limit:
+                refined.append(piece)
+                continue
+            parts = _compact_parts(grid, piece)
+            if not any(occupied and grid.cell > 2.0 * max(
+                    0.5, max(w[2] - w[0], w[3] - w[1]) / 2048.0)
+                    for part, occupied in parts for w in [window_of(part, buffer_m)]):
+                refined.append(piece)  # the file-wide grid is fine enough here
+                continue
+            for part, occupied in parts:
+                window = window_of(part, buffer_m)
+                fine_cell = max(0.5, max(window[2] - window[0], window[3] - window[1]) / 2048.0)
+                if (not occupied or grid.count(*window) <= limit
+                        or grid.cell <= 2.0 * fine_cell):
+                    refined.append(part)
+                    continue
+                fine = local_grid(index, window)
+                refined.extend(split_dense_tiles([part], fine, buffer_m, limit,
+                                                 min_core_m=min_core_m, min_gain=min_gain)[0])
+        result.append(refined)
     return result

@@ -57,22 +57,35 @@ changelog=
           streaming mode: tiles are sized from the average density, so a
           tile along the trajectory could hold 20 times more points than its
           neighbours. Points are now counted while the file is read and every
-          tile over the memory budget is split before inference. Each tile
-          also needs about half the memory per point. Streaming keeps its
-          temporary tile files in the output folder (not on C:) and checks
-          the free space of that drive before it starts.
+          tile over the memory budget is split before inference (on a finer
+          grid when needed). Streaming tiles need about 20 % less memory per
+          point, SegFormer 3D about 60 % less, and the memory plan uses each
+          engine's own figure. Streaming keeps its temporary tile files in the
+          output folder (not on C:) and checks the free space of that drive
+          before it starts.
         - LitePT-L is faster: the neighbour search of each crop is bounded
           by the crop radius (same points, 16 % faster on dense street data,
           much faster in sparse areas).
-        - Tiling and streaming no longer change the labels: every tile uses
-          the file's origin for the model's crops or blocks, and the buffer
-          is automatically the context the model needs (91.5 m Airborne,
-          35 m Mobile mapping and Railway, 33.6 m SegFormer 3D). Measured:
-          identical labels to an untiled run for all four engines.
-        - Tiling and streaming are one option: "Tile large files". A file
-          that does not fit in the free memory is streamed from disk
-          automatically, and the log says so. In Processing, TILE_STREAMING
-          now means "always stream".
+        - Tiles give the labels of an untiled run: every tile uses the
+          file's origin for the model's crops or blocks, and the buffer is
+          automatically the context the model needs (91.5 m Airborne, 35 m
+          Mobile mapping and Railway, 33.6 m SegFormer 3D). Identical labels
+          with the default tiles on street, corridor and airborne data; on
+          very dense data cut into many small tiles a few labels near tile
+          edges can differ. Untiled results are unchanged.
+        - Tiling and streaming are one option: "Tile large files". With it,
+          a file that does not fit in the free memory is streamed from disk
+          automatically, and the log says so. Without it, a file too large
+          for one piece is refused with the advice to tick the option. In
+          Processing, TILE_STREAMING now means "always stream", with or
+          without tiling.
+        - Rebuilt on 2026-10-29 after an independent review: header bounds,
+          disk space and input changes checked during streaming; cancel
+          respected until the output is published; one run at a time per
+          QGIS session; unit factors validated; Setup supports Blackwell
+          datacenter GPUs, keeps other Python versions' environments,
+          verifies the Python and uv downloads, retries spconv alone and no
+          longer blocks QGIS while detecting the GPU.
     1.3.2
         - "CUDA driver error" at the first GPU allocation (shared vGPU
           profiles such as an A10-8Q, some Windows drivers with RTX A6000

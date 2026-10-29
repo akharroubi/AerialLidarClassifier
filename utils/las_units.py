@@ -19,6 +19,7 @@ tests do not).
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Optional
 
 import numpy as np
@@ -214,17 +215,23 @@ def _factor_from_name(name: str) -> Optional[float]:
         if "us" in n or "survey" in n:
             return US_SURVEY_FOOT
         return INTERNATIONAL_FOOT
-    if "met" in n:
-        return METRE
+    # "kilometre" contains "met": test it first.
     if "kilomet" in n:
         return 1000.0
+    if "met" in n:
+        return METRE
     return None
 
 
 def _unit_node_factor(unit: _Node) -> Optional[float]:
+    """Metres per unit: the node's number when it is a valid length (finite,
+    positive), else the unit's name. A broken number (0, negative, NaN) in
+    the file's metadata would otherwise collapse or mirror the cloud."""
     for arg in unit.args[1:]:
         if isinstance(arg, float):
-            return arg
+            if math.isfinite(arg) and arg > 0:
+                return arg
+            break
     if unit.args and isinstance(unit.args[0], str):
         return _factor_from_name(unit.args[0])
     return None

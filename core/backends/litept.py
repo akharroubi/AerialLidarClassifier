@@ -79,8 +79,8 @@ class LitePTBackend:
 
     @property
     def context_buffer_m(self) -> float:
-        """Buffer a tile needs so that its core gets exactly the labels of an
-        untiled run (with the file's origin, see set_reference_origin).
+        """Buffer a tile needs so that its core gets the crops of an untiled
+        run (with the file's origin, see set_reference_origin).
 
         A core point is reached by crops centred up to one radius away; the
         regular centre of a grid cell is the first point of the cell, so the
@@ -89,7 +89,14 @@ class LitePTBackend:
         coverage up to one more radius away. Hence two radii plus one
         spacing. Measured in 1.3.3 (Airborne, 60 m and 40 m tiles): 67
         labels of 1.08 M differ at radius + spacing, none at this value.
-        Valid after load(), which may reduce the crops on small GPUs."""
+
+        Not a guarantee: the fill crops are placed one after another in
+        cloud order, each where the previous ones left a gap, so on dense
+        data (where fill crops do much of the covering) a tile edge can
+        move them further than any buffer and change a few labels near the
+        tile edges. The placement is kept as it is, so that untiled results
+        stay those of the published versions. Valid after load(), which may
+        reduce the crops on small GPUs."""
         return 2.0 * float(self.max_radius) + float(self.center_spacing)
 
     def set_reference_origin(self, origin) -> None:
@@ -551,7 +558,11 @@ def _voxel_cells(local: np.ndarray, start: int, grid_size: float) -> np.ndarray:
     """Integer voxel coordinates of one chunk, as floor(float64(local) / grid)."""
     chunk = local[start:start + _CHUNK].astype(np.float64)
     chunk /= float(grid_size)
-    return np.floor(chunk, out=chunk).astype(np.int64)
+    np.floor(chunk, out=chunk)
+    # A float beyond the int64 range would wrap silently in the cast below.
+    if len(chunk) and (chunk.max() >= 2.0 ** 62 or chunk.min() <= -2.0 ** 62):
+        raise ValueError("Cloud extent too large for a 64-bit voxel key at this grid size")
+    return chunk.astype(np.int64)
 
 
 def _voxel_partition(local: np.ndarray, grid_size: float):
@@ -559,10 +570,12 @@ def _voxel_partition(local: np.ndarray, grid_size: float):
     raw -> representative index.
 
     Same result as np.unique(keys, return_index=True, return_inverse=True)
-    on the voxel keys followed by a stable renumbering, at about a quarter of
-    the peak memory (GitHub issue 10: a 211 M-point tile needed more than
-    20 GB here). The keys are built chunk by chunk, the stable sort gives the
-    first occurrence of each key, and the projection is stored as int32.
+    on the voxel keys followed by a stable renumbering, at about half the
+    peak memory on large tiles (measured: 89 to 44 B per point on 16 M
+    points; little change below the 4 M-point chunk) (GitHub issue 10: a
+    211 M-point tile needed more than 20 GB here). The keys are built chunk
+    by chunk, the stable sort gives the first occurrence of each key, and
+    the projection is stored as int32.
     """
     n = len(local)
     lo = np.full(3, np.iinfo(np.int64).max, dtype=np.int64)
