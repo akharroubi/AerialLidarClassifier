@@ -264,6 +264,64 @@ class ReviewFixChecks(unittest.TestCase):
             np.testing.assert_array_equal(np.asarray(laspy.read(output).classification),
                                           _expected(original))
 
+    def test_forced_units_contradicting_the_crs_are_reported(self):
+        """Units forced to metres (left from an earlier file), then a file whose
+        CRS is in US survey feet: a warning for that file in the log and in
+        the task's list for the dock's end-of-run message."""
+        rng = np.random.default_rng(9)
+        wkt = ('PROJCS["NAD83 / California zone 5 (ftUS)",GEOGCS["NAD83",DATUM["NAD83",'
+               'SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],'
+               'UNIT["degree",0.0174532925199433]],PROJECTION["Lambert_Conformal_Conic_2SP"],'
+               'UNIT["US survey foot",0.304800609601219]]')
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / 'feet.las'
+            h = laspy.LasHeader(point_format=6, version='1.4')
+            h.scales = [0.01, 0.01, 0.01]
+            h.vlrs.append(laspy.vlrs.known.WktCoordinateSystemVlr(wkt))
+            d = laspy.LasData(h)
+            d.x, d.y, d.z = rng.uniform(0, 100, (3, 500))
+            d.write(source)
+            warnings = []
+            task = tasks.ClassificationTask([source], Path(folder), '_c', spec.id, 'cpu',
+                                            'classification', units_override='metre')
+            with patch.object(tasks, 'log_warning', warnings.append):
+                task._plan(source, laspy)
+            self.assertTrue(any('feet.las' in w and 'US survey' in w for w in warnings), warnings)
+            self.assertEqual(len(task.unit_warnings), 1)
+            task = tasks.ClassificationTask([source], Path(folder), '_c', spec.id, 'cpu',
+                                            'classification', units_override='auto')
+            task._plan(source, laspy)
+            self.assertEqual(task.unit_warnings, [])
+
+    def test_dock_forgets_forced_units_and_shows_them_while_set(self):
+        panel_module = module('gui.main_panel')
+        settings = {f"{module('config').SETTINGS_PREFIX}/input_units": 'metre'}
+
+        class Settings:
+            def value(self, key, default=None, **kwargs):
+                return settings.get(key, default)
+
+            def setValue(self, key, value):
+                settings[key] = value
+        with patch.object(panel_module, 'QgsSettings', Settings), \
+                patch.object(panel_module, 'get_gpu_info', return_value={'available': False}), \
+                patch.object(panel_module.ModelManager, 'is_model_available', return_value=True):
+            panel = panel_module.ClassifierDockWidget(None)
+            try:
+                self.assertEqual(panel.units_combo.currentData(), 'auto')  # not restored
+                self.assertTrue(panel.units_note.isHidden())
+                panel.units_combo.setCurrentIndex(panel.units_combo.findData('metre'))
+                self.assertFalse(panel.units_note.isHidden())
+                self.assertIn('forced to Metres', panel.units_note.text())
+                pushed = []
+                panel.iface = types.SimpleNamespace(messageBar=lambda: types.SimpleNamespace(
+                    pushMessage=lambda *a, **k: pushed.append((a, k))))
+                panel.task = types.SimpleNamespace(unit_warnings=['feet.las: its CRS is in US survey feet'])
+                panel._push_unit_warnings()
+                self.assertTrue(pushed and 'feet.las' in pushed[0][0][1])
+            finally:
+                panel.close()
+
     def test_plan_counts_the_upgraded_records(self):
         # Railway codes above 31 on a point format 3 file: the output needs
         # LAS 1.4 records next to the old ones.

@@ -82,10 +82,12 @@ changelog=
         - Rebuilt on 2026-10-29 after an independent review: header bounds,
           disk space and input changes checked during streaming; cancel
           respected until the output is published; one run at a time per
-          QGIS session; unit factors validated; Setup supports Blackwell
-          datacenter GPUs, keeps other Python versions' environments,
-          verifies the Python and uv downloads, retries spconv alone and no
-          longer blocks QGIS while detecting the GPU.
+          QGIS session; unit factors validated; forced input units are no
+          longer remembered between sessions, are shown next to Run, and
+          every file whose CRS states another unit is reported; Setup
+          supports Blackwell datacenter GPUs, keeps other Python versions'
+          environments, verifies the Python and uv downloads, retries spconv
+          alone and no longer blocks QGIS while detecting the GPU.
     1.3.2
         - "CUDA driver error" at the first GPU allocation (shared vGPU
           profiles such as an A10-8Q, some Windows drivers with RTX A6000

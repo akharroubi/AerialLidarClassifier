@@ -597,6 +597,12 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             record_length = int(reader.header.point_format.size)
             new_records = output_record_length(
                 reader.header.point_format, field_name, spec.class_mapping)
+            try:
+                conflict = resolve_units(reader.header, units_override).conflict
+            except ValueError:
+                conflict = ""
+        if conflict:
+            feedback.pushWarning(self.tr(f"{input_path.name}: {conflict}"))
         # Tiling is the user's choice; streaming follows from the memory the
         # file needs, and TILE_STREAMING forces it (with or without tiling).
         mode, reason = plan_processing(n_points, record_length, tile_enabled,

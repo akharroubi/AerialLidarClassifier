@@ -444,7 +444,10 @@ The output keeps the original coordinates, scales and CRS.
 
 To force a unit when the header is missing or wrong, use *Advanced parameters >
 Input units* in the dock (auto-detect, metres, international feet, US survey
-feet) or the `UNITS` parameter in Processing.
+feet) or the `UNITS` parameter in Processing. A forced unit applies to every
+file of the run: the dock shows a note next to *Run* while it is set, every file
+whose CRS states another unit is reported (log and message after the run; a
+warning in Processing), and the choice returns to auto-detect when QGIS starts.
 
 ---
 

@@ -109,6 +109,13 @@ and the project follows [Semantic Versioning](https://semver.org/).
 - Units: a CRS unit factor of zero, a negative one or one that is not a number
   is ignored (the unit's name or the units override decides), and a kilometre
   unit given without a factor is read as kilometres.
+- **Forced input units are no longer remembered and never silent.** A unit
+  forced in the dock (Advanced parameters > Input units) applied to every
+  later file, also after a restart, so a file in feet could be read as metres
+  without notice. The choice now returns to auto-detect when QGIS starts, a
+  note next to Run shows while a unit is forced, and every file whose CRS
+  states another unit is reported in the log and in a message after the run
+  (in Processing, as a warning for that file).
 - GPU allocator: PyTorch's own variables (`PYTORCH_ALLOC_CONF`, and the older
   `PYTORCH_CUDA_ALLOC_CONF`) are applied as set, also after a mode forced
   earlier in the same session.

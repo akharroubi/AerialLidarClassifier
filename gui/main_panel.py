@@ -312,9 +312,9 @@ class ClassifierDockWidget(QDockWidget):
             f"{SETTINGS_PREFIX}/tile_buffer_m",
             TILE_DEFAULT_BUFFER_M,
             type=float)
-        self._saved_units = str(
-            s.value(f"{SETTINGS_PREFIX}/input_units", "auto") or "auto"
-        )
+        # Not restored: a forced unit is meant for the files at hand, and a
+        # remembered one would silently apply to later files in other units.
+        self._saved_units = "auto"
         self._saved_allocator = str(
             s.value(f"{SETTINGS_PREFIX}/{ALLOCATOR_SETTING}", ALLOCATOR_AUTO) or ALLOCATOR_AUTO
         )
@@ -378,10 +378,6 @@ class ClassifierDockWidget(QDockWidget):
         )
         s.setValue(
             f"{SETTINGS_PREFIX}/tile_buffer_m", self.tile_buffer_spin.value()
-        )
-        s.setValue(
-            f"{SETTINGS_PREFIX}/input_units",
-            self.units_combo.currentData() or "auto",
         )
         s.setValue(
             f"{SETTINGS_PREFIX}/classifier_id", self.model_combo.currentData() or "",
@@ -862,8 +858,12 @@ class ClassifierDockWidget(QDockWidget):
             "The model works in metres. By default the unit is read from "
             "each file's CRS (WKT or GeoTIFF keys) and feet are converted "
             "before inference; the log says what was found. Force metres "
-            "or feet when the header is missing or wrong."
+            "or feet when the header is missing or wrong.\n\n"
+            "A forced unit applies to every file of the run (the log warns "
+            "about each file whose CRS says otherwise) and returns to "
+            "auto-detect when QGIS restarts."
         )
+        self.units_combo.currentIndexChanged.connect(self._update_units_note)
         units_form.addRow("Units:", self.units_combo)
         lay.addLayout(units_form)
 
@@ -947,6 +947,14 @@ class ClassifierDockWidget(QDockWidget):
         # Hidden until the first run: an idle "0 %" bar only takes room.
         self.progress_bar.hide()
         lay.addWidget(self.progress_bar)
+
+        # Visible next to Run while a unit is forced (Advanced parameters
+        # may be collapsed).
+        self.units_note = QLabel()
+        self.units_note.setWordWrap(True)
+        self.units_note.setStyleSheet(f"color: {_WARN};")
+        self.units_note.hide()
+        lay.addWidget(self.units_note)
 
         btn_row = QHBoxLayout()
         btn_row.setSpacing(6)
@@ -1652,6 +1660,34 @@ class ClassifierDockWidget(QDockWidget):
             self._remove_stale_views(outputs, views)
 
         self._push_completion_message(summary, outputs)
+        self._push_unit_warnings()
+
+    def _update_units_note(self, *_):
+        """Show, next to Run, that the input units are forced."""
+        if not hasattr(self, "units_note"):
+            return
+        key = self.units_combo.currentData() or "auto"
+        if key == "auto":
+            self.units_note.hide()
+            return
+        self.units_note.setText(
+            f"Input units forced to {self.units_combo.currentText()} for every file "
+            "(Advanced parameters > Input units). Files whose CRS says otherwise are "
+            "reported in the log. Back to auto-detect when QGIS restarts.")
+        self.units_note.show()
+
+    def _push_unit_warnings(self):
+        """After a run: the files whose CRS contradicts the forced units."""
+        warnings = list(getattr(self.task, "unit_warnings", []) or []) if self.task else []
+        if not warnings:
+            return
+        names = ", ".join(w.split(":", 1)[0] for w in warnings[:3])
+        more = f" and {len(warnings) - 3} more" if len(warnings) > 3 else ""
+        self.iface.messageBar().pushMessage(
+            PLUGIN_NAME,
+            f"Check the units: the CRS of {names}{more} says another unit than the forced "
+            f"input units ({self.units_combo.currentText()}). See the log.",
+            level=Qgis.MessageLevel.Warning, duration=0)
 
     def _push_completion_message(self, summary, outputs):
         """Success message with 'Open folder' and, unless hidden, the course."""
@@ -1681,6 +1717,7 @@ class ClassifierDockWidget(QDockWidget):
         self._running = False
         self.cancel_btn.setEnabled(False)
         self._check_model()
+        self._push_unit_warnings()
 
         if self.task and self.task.error_message:
             self.current_file_label.setText("Error - see the Log below.")

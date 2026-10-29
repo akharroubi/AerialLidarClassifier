@@ -329,6 +329,8 @@ class ClassificationTask(QgsTask):
         self.tile_streaming = bool(tile_streaming)
 
         self.output_files = []
+        # Files whose CRS states another unit than the forced input units.
+        self.unit_warnings = []
         self.prepare_qgis_view = bool(prepare_qgis_view)
         self.view_files = {}
         self.error_message = None
@@ -524,6 +526,7 @@ class ClassificationTask(QgsTask):
             record_length = int(reader.header.point_format.size)
             new_records = output_record_length(
                 reader.header.point_format, self.field_name, self.class_mapping)
+            self._warn_units_conflict(fp, reader.header)
         mode, reason = plan_processing(
             n_points, record_length, self.tile_enabled,
             force_streaming=self.tile_streaming,
@@ -537,6 +540,20 @@ class ClassificationTask(QgsTask):
         if reason:
             log_info(f"{fp.name}: {reason}")
         return mode
+
+    def _warn_units_conflict(self, fp, header) -> None:
+        """Say so, per file, when the forced input units contradict the
+        unit the file's CRS states (the dock reports the files at the end)."""
+        if (self.units_override or "auto") == "auto":
+            return
+        try:
+            units = resolve_units(header, self.units_override)
+        except ValueError:
+            return
+        if units.conflict:
+            message = f"{fp.name}: {units.conflict}"
+            log_warning(message)
+            self.unit_warnings.append(message)
 
     # ------------------------------------------------------------------
     def _process_one_streaming(

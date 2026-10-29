@@ -181,6 +181,29 @@ def test_override_wins_over_header():
     assert units.resolve_units(Header(), None).is_metric
 
 
+def _header_with(wkt):
+    class WktCoordinateSystemVlr:
+        string = wkt
+
+    class Header:
+        vlrs = [WktCoordinateSystemVlr()] if wkt else []
+        evlrs = []
+    return Header()
+
+
+def test_override_contradicting_the_crs_is_reported():
+    # A file in US survey feet run with the units forced to metres (the
+    # forced choice of an earlier file): reported, metres still used.
+    u = units.resolve_units(_header_with(WKT1_COMPOUND_FTUS), "metre")
+    assert u.is_metric
+    assert "US survey" in u.conflict and "forced to metres" in u.conflict
+    # Same unit as the CRS, no CRS at all, or auto-detect: nothing to report.
+    assert units.resolve_units(_header_with(WKT2_METRIC), "metre").conflict == ""
+    assert units.resolve_units(_header_with(WKT1_COMPOUND_FTUS), "us_foot").conflict == ""
+    assert units.resolve_units(_header_with(None), "us_foot").conflict == ""
+    assert units.resolve_units(_header_with(WKT1_COMPOUND_FTUS), "auto").conflict == ""
+
+
 def test_apply_scales_a_copy():
     u = units.LinearUnits(FT_US, 1.0, "test")
     pts = np.array([[1000.0, 2000.0, 30.0]])

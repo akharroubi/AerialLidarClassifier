@@ -68,6 +68,14 @@ def unit_label(factor: float) -> str:
     return f"{factor:g} m unit"
 
 
+def unit_plural(factor: float) -> str:
+    """The unit as in "the CRS is in ...": metres, US survey feet..."""
+    names = {"metre": "metres", "US survey foot": "US survey feet",
+             "foot": "international feet", "kilometre": "kilometres"}
+    label = unit_label(factor)
+    return names.get(label, label + "s")
+
+
 @dataclass
 class LinearUnits:
     """Factors that turn the file's XY and Z into metres, and where they came from."""
@@ -77,6 +85,9 @@ class LinearUnits:
     source: str
     detected: bool = True   # False: the header said nothing, metres assumed
     angular: bool = False   # geographic CRS (degrees): no linear factor
+    # With a units override: why it contradicts the unit the file's CRS
+    # states ("" when it does not, or when the CRS states none).
+    conflict: str = ""
 
     @property
     def is_metric(self) -> bool:
@@ -447,7 +458,18 @@ def resolve_units(header, override: Optional[str] = None) -> LinearUnits:
         return detected
     if key in _OVERRIDE_FACTORS:
         factor = _OVERRIDE_FACTORS[key]
+        conflict = ""
+        if detected is not None and detected.detected and (
+                abs(detected.xy_to_m - factor) > 1e-9 or abs(detected.z_to_m - factor) > 1e-9):
+            same = abs(detected.xy_to_m - detected.z_to_m) < 1e-9
+            stated = (unit_plural(detected.xy_to_m) if same
+                      else f"{unit_plural(detected.xy_to_m)} (XY) and "
+                           f"{unit_plural(detected.z_to_m)} (Z)")
+            forced = unit_plural(factor)
+            conflict = (f"its CRS is in {stated}, but the input units are forced to "
+                        f"{forced}: {forced} are used. If the CRS is right, set Input "
+                        "units back to auto-detect and run again.")
         return LinearUnits(
-            factor, factor, f"user override: {unit_label(factor)}",
+            factor, factor, f"user override: {unit_label(factor)}", conflict=conflict,
         )
     return detected
