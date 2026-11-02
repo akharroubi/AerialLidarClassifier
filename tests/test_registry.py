@@ -125,7 +125,7 @@ def test_user_defined_default_codes_start_at_64_without_gaps():
 
 
 def test_classifiers_cover_every_model_once():
-    assert [c.id for c in registry.CLASSIFIERS] == ["airborne", "mobile_mapping", "railway"]
+    assert [c.id for c in registry.CLASSIFIERS] == ["airborne", "mobile_mapping", "railway", "power_lines"]
     assert registry.DEFAULT_CLASSIFIER_ID == "airborne"
     engines = [spec.id for c in registry.CLASSIFIERS for spec in c.engines]
     assert sorted(engines) == sorted(spec.id for spec in registry.MODELS)
@@ -134,6 +134,33 @@ def test_classifiers_cover_every_model_once():
         classifier = registry.classifier_for_model(spec.id)
         assert spec in classifier.engines
     assert registry.get_classifier("railway") is registry.RAILWAY
+    assert registry.get_classifier("power_lines") is registry.POWER_LINES
+
+
+def test_locked_classifiers_point_to_the_course_and_keep_their_models():
+    # 1.3.4: Railway and Power lines are not run by the plugin; access is
+    # granted on the author's Cohort page. The free classifiers are untouched.
+    assert not registry.AIRBORNE.locked and not registry.MOBILE_MAPPING.locked
+    assert registry.RAILWAY.locked and registry.POWER_LINES.locked
+    # The railway model stays declared (legacy MODEL index 3, saved codes,
+    # cached weights keep their meaning) and the public weights URL is unchanged.
+    assert registry.RAILWAY.engines == (registry.LITEPT_L_RAIL,)
+    assert registry.RAILWAY.primary is registry.LITEPT_L_RAIL
+    assert registry.MODELS[3] is registry.LITEPT_L_RAIL
+    assert registry.LITEPT_L_RAIL.weights_urls[0].endswith("/v1.3/litept_l_rail_5cm_fp16.pth")
+    assert registry.POWER_LINES.engines == () and registry.POWER_LINES.primary is None
+    for classifier in (registry.RAILWAY, registry.POWER_LINES):
+        assert classifier.access_url == "https://maven.com/geomatics/qgis3d"
+        assert "Cohort" in classifier.access and "course" not in classifier.access
+        assert "Maven" not in classifier.access and "Maven" not in classifier.access_button
+        assert classifier.access_message().endswith(" https://maven.com/geomatics/qgis3d")
+        assert classifier.access_button == "Join the Cohort"
+    assert "not distributed with the plugin" in registry.POWER_LINES.description
+    assert registry.model_locked(registry.LITEPT_L_RAIL.id)
+    for spec in (registry.LITEPT_L_DALES, registry.SEGFORMER3D_URBANFILTERING, registry.LITEPT_L_MLS):
+        assert not registry.model_locked(spec.id)
+    assert not registry.model_locked("unknown") and not registry.model_locked(None)
+    assert registry.select_engine(registry.POWER_LINES, "cuda", lambda spec, device: True) is None
     for bad in (None, "", "unknown"):
         for lookup in (registry.get_classifier, registry.classifier_for_model):
             try:
@@ -148,7 +175,7 @@ def test_select_engine_prefers_litept_and_falls_back_only_for_airborne():
     def runs(ready):
         return lambda spec, device: spec.supports_device(device) and (spec.family != "litept" or ready)
 
-    airborne, mls, rail = registry.CLASSIFIERS
+    airborne, mls, rail, _power_lines = registry.CLASSIFIERS
     assert registry.select_engine(airborne, "cuda", runs(True)) is registry.LITEPT_L_DALES
     for device, ready in (("cuda", False), ("cpu", True), ("mps", True), ("cpu", False)):
         assert registry.select_engine(airborne, device, runs(ready)) is registry.SEGFORMER3D_URBANFILTERING

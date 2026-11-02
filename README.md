@@ -3,7 +3,9 @@
 <p align="center"><img src="assets/logo_128.png" alt="LiDAR AI Classifier logo" width="128" height="128"></p>
 
 Deep-learning semantic segmentation of airborne, mobile mapping and railway
-LiDAR (LAS / LAZ / COPC) inside QGIS 3.34+ and QGIS 4, with three classifiers:
+LiDAR (LAS / LAZ / COPC) inside QGIS 3.34+ and QGIS 4. Two classifiers are
+free; the railway and power line models are reserved for the participants of
+the author's live Cohort (see *Classifiers reserved for the Cohort* below):
 
 - **Airborne classifier**: LitePT-L Airborne, a point transformer from
   [prs-eth/LitePT](https://github.com/prs-eth/LitePT) using 10 cm voxels and
@@ -16,9 +18,25 @@ LiDAR (LAS / LAZ / COPC) inside QGIS 3.34+ and QGIS 4, with three classifiers:
   architecture with 5 cm voxels. Nine classes (ground, low vegetation,
   high vegetation, building, pole-like, vehicle, fence/barrier, wire, unknown),
   XYZ only, with editable output codes. NVIDIA GPU required.
-- **Railway classifier** (new in 1.3): LitePT-L Railway, 5 cm voxels. Seven
-  classes (ground and track bed, rail, pole, wire, vegetation, fence, other),
-  XYZ only, with editable output codes. NVIDIA GPU required.
+- **Railway classifier** (since 1.3, reserved for the Cohort since 1.3.4):
+  LitePT-L Railway, 5 cm voxels. Seven classes (ground and track bed, rail,
+  pole, wire, vegetation, fence, other), XYZ only, editable output codes,
+  NVIDIA GPU required. The plugin lists it and shows where access is granted.
+- **Power lines classifier** (1.3.4): the power line corridor model is not
+  distributed with the plugin. The entry shows where access is granted.
+
+### Classifiers reserved for the Cohort
+
+Since 1.3.4 the Railway and Power lines classifiers are reserved for the
+participants of the author's live Cohort,
+[LiDAR Point Clouds Processing in QGIS](https://maven.com/geomatics/qgis3d?utm_source=github&utm_medium=readme&utm_campaign=qgis3d)
+Selecting one of them in the dock shows an access notice with a
+button to the Cohort page and keeps *Run classification* disabled; in
+Processing, `CLASSIFIER=2` or `3` (and `MODEL=3` in the 1.0 to 1.2 algorithm)
+stop with the same message. Nothing else changes: the railway weights
+published with release v1.3 stay where they are, saved output codes keep
+their meaning and the parameter indexes do not move. The Airborne and Mobile
+mapping classifiers are free and unaffected.
 
 Until version 1.1 the plugin was called **Aerial LiDAR Classifier**. The
 installation folder is still `Aerial_LiDAR_Classifier`, so an update keeps
@@ -69,11 +87,12 @@ viewing copy when loading the result.
 
 ## Features
 
-- **Three classifiers, one interface.** Pick Airborne, Mobile mapping or
-  Railway in the dock or with the `CLASSIFIER` parameter in Processing. If the
-  selected classifier cannot run on the computer, the dock says why; the
-  Airborne classifier then runs its SegFormer 3D engine and says so.
-- **Your class codes for mobile mapping and railway.** Each class gets the
+- **One interface for every classifier.** Pick Airborne or Mobile mapping in
+  the dock or with the `CLASSIFIER` parameter in Processing. If the selected
+  classifier cannot run on the computer, the dock says why; the Airborne
+  classifier then runs its SegFormer 3D engine and says so. Railway and Power
+  lines are listed too and show where access is granted.
+- **Your class codes for mobile mapping (and railway).** Each class gets the
   code you choose (0 to 255), saved per classifier, or merged with another
   class by giving both the same code. The editor shows the ASPRS meaning of
   every code.
@@ -140,8 +159,9 @@ downloads:
   [`uv`](https://github.com/astral-sh/uv), a fast package installer,
 - PyTorch and the LiDAR packages (~1 to 3 GB depending on CUDA), plus `spconv`
   (~100 MB) on NVIDIA GPUs,
-- the model weights: LitePT-L Airborne, Mobile Mapping and Railway (~172 MB
-  each) on NVIDIA GPUs, SegFormer 3D (~18 MB) everywhere.
+- the model weights: LitePT-L Airborne and Mobile Mapping (~172 MB each) on
+  NVIDIA GPUs, SegFormer 3D (~18 MB) everywhere. The railway weights are no
+  longer downloaded by Setup.
 
 It usually takes 5 to 15 minutes, and QGIS stays usable meanwhile. Everything
 is stored under `~/.qgis_aerial_lidar_classifier/` (the weights under the
@@ -159,9 +179,10 @@ never switches from GPU to CPU by itself.
 2. Drag `.las` / `.laz` / `.copc.laz` files into the input list, or pick point
    cloud layers already loaded in the project.
 3. Choose the classifier for the acquisition: **Airborne** for aerial LiDAR,
-   **Mobile mapping** for street mobile mapping (vehicle, backpack) data,
-   **Railway** for railway corridors. For mobile mapping and railway,
-   *Class codes: Edit output codes...* sets the code of each class.
+   **Mobile mapping** for street mobile mapping (vehicle, backpack) data. For
+   mobile mapping, *Class codes: Edit output codes...* sets the code of each
+   class. **Railway** and **Power lines** show an access notice instead (see
+   *Classifiers reserved for the Cohort*).
 4. Choose an output folder (it defaults to the folder of the first file).
 5. Click **Run classification**.
 
@@ -209,7 +230,7 @@ qgis_process run aeriallidar:classify_point_cloud -- \
 | Parameter | Values |
 |-----------|--------|
 | `INPUT` | LAS, LAZ or COPC file |
-| `CLASSIFIER` | `0` Airborne, `1` Mobile mapping, `2` Railway |
+| `CLASSIFIER` | `0` Airborne, `1` Mobile mapping. `2` Railway and `3` Power lines stop with the access notice (see *Classifiers reserved for the Cohort*) |
 | `OUTPUT_FOLDER`, `SUFFIX` | output location, default suffix `_classified` |
 | `DEVICE` | `0` Auto, `1` GPU (CUDA), `2` CPU, `3` GPU (Apple MPS) |
 | `FIELD_NAME` | `classification` (default). The Airborne classifier also accepts a new name (raw model classes in an extra field) |
@@ -245,7 +266,8 @@ panel.
 **Scripts and models from versions 1.0 to 1.2** keep working: they use the
 algorithm `aeriallidar:classify_lidar`, whose `MODEL` parameter selects one
 model by index (`0` LitePT-L Airborne, `1` SegFormer 3D Airborne, `2` LitePT-L
-Mobile Mapping, and now `3` LitePT-L Railway) and runs exactly that model. It is
+Mobile Mapping, `3` LitePT-L Railway) and runs exactly that model; since 1.3.4,
+`3` stops with the access notice. It is
 hidden from the Toolbox but still runs from saved models, Python and
 `qgis_process`, and a saved model step keeps its model when edited.
 
@@ -540,6 +562,10 @@ All models run inside a QGIS background task, so QGIS stays responsive.
 
 ### Railway classifier: scope and limits
 
+Since 1.3.4 the plugin itself does not run this classifier (see *Classifiers
+reserved for the Cohort*); these notes describe the model for the Cohort
+participants.
+
 - Made for railway corridors scanned by mobile mapping systems (train-mounted
   or similar). Dense helicopter LiDAR and static terrestrial scans of tracks
   and stations gave usable results in visual checks.
@@ -579,8 +605,8 @@ Dependencies*, or click *Install the CPU version instead*.
 ### "Needs an NVIDIA GPU", "GPU use is switched off", "LitePT dependencies missing" or "SegFormer 3D engine"
 
 The LitePT-L models run only on NVIDIA GPUs, with the `spconv` library of the
-plugin's environment. Where they cannot run, the Mobile mapping and Railway
-classifiers are unavailable and the Airborne classifier uses SegFormer 3D; the
+plugin's environment. Where they cannot run, the Mobile mapping
+classifier is unavailable and the Airborne classifier uses SegFormer 3D; the
 status tooltip and the log say why.
 
 - *GPU use is switched off*: tick *Use GPU* in *Advanced parameters*.

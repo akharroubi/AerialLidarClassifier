@@ -45,6 +45,13 @@ tasks = importlib.import_module(ROOT.name + ".workers.classifier_task")
 registry = importlib.import_module(ROOT.name + ".core.registry")
 manager_module = importlib.import_module(ROOT.name + ".utils.model_manager")
 RAIL = registry.LITEPT_L_RAIL
+if registry.RAILWAY.locked:
+    # Since 1.3.4 the plugin does not run the railway model (access through
+    # the author's Cohort): the refusal is checked by qgis_rail_checks.py and
+    # e2e_qgis_process.py --model rail; a real inference run is impossible here.
+    print("SKIPPED: the Railway classifier is locked in this version "
+          f"({registry.RAILWAY.access_message()})", flush=True)
+    raise SystemExit(0)
 torch = tasks._get_torch()
 if not torch.cuda.is_available():
     raise SystemExit("This release check requires a real NVIDIA GPU")

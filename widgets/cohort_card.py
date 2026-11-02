@@ -13,10 +13,10 @@ from qgis.PyQt.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QToolButton, QVBoxLayout,
 )
 
-from ..config import SETTINGS_PREFIX
+from ..config import COURSE_TITLE, COURSE_URL, SETTINGS_PREFIX
 
-COHORT_URL = "https://maven.com/geomatics/qgis3d"
-COHORT_TITLE = "LiDAR Point Clouds Processing in QGIS"
+COHORT_URL = COURSE_URL
+COHORT_TITLE = COURSE_TITLE
 COHORT_PITCH = (
     "Learn classification, terrain models, COPC and 3D editing live "
     "with Abderrazzaq Kharroubi, the author of this plugin."

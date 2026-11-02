@@ -4,6 +4,29 @@ All notable changes to **LiDAR AI Classifier** will be documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/).
 
+## [1.3.4] - 2026-11-02
+
+### Changed
+- **The Railway classifier is reserved for the participants of the author's
+  live Cohort** (LiDAR Point Clouds Processing in QGIS). It stays
+  in the classifier list; selecting it shows where access is granted, with a
+  button to the Cohort page, and Run stays disabled. In Processing, choosing
+  it (`CLASSIFIER=2`, or `MODEL=3` in the 1.0 to 1.2 algorithm) stops the
+  algorithm with the same message. The model itself is unchanged: its
+  weights, published with release v1.3, are neither removed nor replaced,
+  saved output codes keep their meaning and the `MODEL` and `CLASSIFIER`
+  indexes do not move. Setup no longer downloads the railway weights.
+- The Airborne and Mobile mapping classifiers are not affected and stay free.
+
+### Added
+- **Power lines classifier** entry (`CLASSIFIER=3`): the power line corridor
+  model is not distributed with the plugin; it is available to the Cohort
+  participants, and the entry shows where access is granted. The dock's
+  Setup, weights import and output-code editor are inactive for it, and
+  Processing refuses it with the same message.
+- The Cohort page is one constant (`config.COURSE_URL`), used by the Cohort
+  invitation, the About dialog and the access notices.
+
 ## [1.3.3] - 2026-10-28
 
 ### Fixed

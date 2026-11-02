@@ -507,6 +507,12 @@ class ClassifierDockWidget(QDockWidget):
         status_row.addWidget(self.device_label)
         outer.addLayout(status_row)
 
+        # Row 3, only for a classifier the free plugin does not run: where
+        # access is granted, with the button to that page.
+        from ..widgets.access_card import AccessCard
+        self.access_card = AccessCard(parent=strip)
+        outer.addWidget(self.access_card)
+
         return strip
 
     def _vline(self) -> QFrame:
@@ -1070,10 +1076,12 @@ class ClassifierDockWidget(QDockWidget):
 
     def _update_output_codes_button(self, _text=None):
         spec = self._current_spec()
-        editable = supports_output_codes(spec)
+        # A locked classifier edits nothing: its codes keep their saved
+        # values and the Airborne field name comes back.
+        editable = spec is not None and supports_output_codes(spec) and not self._current_classifier().locked
         previous_id = self._output_field_model_id
         previous_editable = previous_id is not None and supports_output_codes(get_model(previous_id))
-        self._output_field_model_id = spec.id
+        self._output_field_model_id = spec.id if spec is not None else None
         self.field_edit.blockSignals(True)
         if editable:
             # Remember the airborne field only when leaving an airborne
@@ -1103,7 +1111,7 @@ class ClassifierDockWidget(QDockWidget):
 
     def _edit_output_codes(self):
         spec = self._current_spec()
-        if not supports_output_codes(spec):
+        if spec is None or not supports_output_codes(spec) or self._current_classifier().locked:
             return
         from ..dialogs.class_mapping_dialog import ClassMappingDialog
         dialog = ClassMappingDialog(spec, self._output_codes_by_model.get(spec.id), self)
@@ -1127,6 +1135,27 @@ class ClassifierDockWidget(QDockWidget):
         device = self._current_device()
         spec = select_engine(classifier, device, self._model_runs_here)
         self._update_output_codes_button()
+        self.access_card.set_classifier(classifier)
+        self.import_btn.setEnabled(not classifier.locked)
+        if classifier.locked:
+            # Not part of the free plugin: the card says where access is
+            # granted; nothing is downloaded, checked or run.
+            self.model_ready = False
+            self.model_gate_ok = False
+            self.engine_note = ""
+            self.model_gate_message = classifier.access_message()
+            self.import_btn.setToolTip(
+                f"{classifier.display_name}: no weights to import; see the notice below.")
+            self.model_label.setText(
+                f"<span style='color:{_WARN};'>●</span> Access through the Cohort")
+            classes = self._refresh_classifier_tooltips(device)
+            self.model_label.setToolTip(
+                f"{html.escape(classifier.access, quote=False)}<hr>{classes}")
+            if self.model_gate_message != getattr(self, "_last_model_gate_message", ""):
+                self._log(f"{classifier.display_name}: {self.model_gate_message}")
+            self._last_model_gate_message = self.model_gate_message
+            self._update_run_button()
+            return
         manager = ModelManager(spec)
         self.import_btn.setToolTip(
             f"Import a weights file for {spec.display_name} (offline computers); "
@@ -1194,6 +1223,13 @@ class ClassifierDockWidget(QDockWidget):
 
     def _classifier_tooltip(self, classifier, device):
         spec = select_engine(classifier, device, self._model_runs_here)
+        access = (f"<i>{html.escape(classifier.access, quote=False)}</i><br>"
+                  if classifier.locked else "")
+        if spec is None:
+            return (
+                f"<b>{html.escape(classifier.display_name)}</b><br>"
+                f"{html.escape(classifier.description)}<br>{access}"
+            )
         selected = (output_model_spec(spec, self._output_codes_by_model.get(spec.id))
                     if supports_output_codes(spec) else spec)
         rows = "".join(
@@ -1207,7 +1243,7 @@ class ClassifierDockWidget(QDockWidget):
                 else "Written to the LAS classification field (ASPRS codes).")
         return (
             f"<b>{html.escape(classifier.display_name)}</b><br>"
-            f"{html.escape(classifier.description)}<br>"
+            f"{html.escape(classifier.description)}<br>{access}"
             f"On this computer: {html.escape(spec.display_name)}, "
             f"{len(spec.class_mapping)} classes.<br>"
             "<table cellspacing='0' cellpadding='1'>"
@@ -1272,7 +1308,12 @@ class ClassifierDockWidget(QDockWidget):
         return True
 
     def _import_model_file(self):
+        classifier = self._current_classifier()
         spec = self._current_spec()
+        if spec is None or classifier.locked:
+            self.message_bar.pushMessage(
+                classifier.access_message(), Qgis.MessageLevel.Info, duration=8)
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, f"Import {spec.display_name} weights", "",
             "PyTorch weights (*.pth *.pt);;All files (*)",
@@ -1517,6 +1558,12 @@ class ClassifierDockWidget(QDockWidget):
 
     def _missing_before_run(self) -> str:
         """First thing the user still has to do, or "" when Run can start."""
+        classifier = self._current_classifier()
+        if classifier.locked:
+            # Before the file and folder advice: nothing runs this classifier.
+            # The full text is in the card at the top and in the log.
+            return (f"{classifier.display_name}: access through the Cohort. "
+                    "Use the button in the classifier strip above.")
         if not self.files:
             return "Add LAS / LAZ / COPC files to the list above."
         if not self.output_widget.filePath():
@@ -1579,9 +1626,10 @@ class ClassifierDockWidget(QDockWidget):
             device = "cpu"
         classifier = self._current_classifier()
         spec = select_engine(classifier, device, self._model_runs_here)
-        if not spec.supports_device(device):
+        if classifier.locked or spec is None or not spec.supports_device(device):
             self.message_bar.pushMessage(
-                self.model_gate_message, Qgis.MessageLevel.Warning, duration=8,
+                classifier.access_message() if classifier.locked else self.model_gate_message,
+                Qgis.MessageLevel.Warning, duration=8,
             )
             self._running = False
             self.cancel_btn.setEnabled(False)

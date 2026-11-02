@@ -57,11 +57,12 @@ class AboutDialog(QDialog):
             "Semantic segmentation of airborne, mobile mapping and railway "
             "LiDAR (LAS / LAZ / COPC) with deep-learning models, written to "
             "the LAS classification field.\n\n"
-            "Three classifiers: Airborne, Mobile mapping and Railway, each a "
-            "LitePT-L model for NVIDIA GPUs. Without a compatible NVIDIA GPU "
-            "the Airborne classifier runs the SegFormer 3D engine (GPU or "
-            "CPU). Mobile mapping (nine classes) and Railway (seven classes) "
-            "have editable codes; rails get the ASPRS Rail code 10 by default."
+            "Free classifiers: Airborne and Mobile mapping, each a LitePT-L "
+            "model for NVIDIA GPUs. Without a compatible NVIDIA GPU the "
+            "Airborne classifier runs the SegFormer 3D engine (GPU or CPU). "
+            "Mobile mapping (nine classes) has editable codes.\n\n"
+            "The Railway and Power lines classifiers are reserved for the "
+            "participants of the author's live Cohort below."
         )
         desc.setWordWrap(True)
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)

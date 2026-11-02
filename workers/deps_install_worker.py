@@ -151,15 +151,18 @@ class DepsInstallWorker(QThread):
         straight away. A failure here does not fail the setup: the first
         run of a model downloads whatever is still missing.
         """
-        from ..core.registry import MODELS
+        from ..core.registry import MODELS, model_locked
         from ..utils.model_manager import ModelManager
         from ..utils.venv_manager import _read_install_marker
 
         marker = _read_install_marker() or {}
         device = "cuda" if self._cuda_enabled else "cpu"
+        # Models of a locked classifier (access granted elsewhere) are not
+        # fetched: the plugin would never run them.
         wanted = [
             spec for spec in MODELS
             if spec.supports_device(device)
+            and not model_locked(spec.id)
             and (spec.family != "litept" or marker.get("spconv_version"))
         ]
         failed = []

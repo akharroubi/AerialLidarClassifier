@@ -20,10 +20,10 @@ from unittest.mock import patch  # noqa: E402
 
 import laspy  # noqa: E402
 import numpy as np  # noqa: E402
+from dataclasses import replace  # noqa: E402
 from qgis.core import (  # noqa: E402
     QgsPointCloudLayer, QgsProcessingContext, QgsProcessingException, QgsProcessingFeedback,
 )
-from qgis.PyQt.QtCore import QTimer  # noqa: E402
 
 app = base.app
 module = base.module
@@ -36,6 +36,15 @@ config = base.config
 RAIL = registry.get_model('litept_l_rail_5cm')
 MLS = base.MLS
 DEFAULT_CODES = [2, 10, 15, 14, 5, 64, 1]
+ACCESS_URL = 'https://maven.com/geomatics/qgis3d'
+
+
+def unlock_railway(stack):
+    """Lift the 1.3.4 lock for one test: the railway path itself must keep working
+    (Cohort participants' access, a later release), independently of the gate."""
+    unlocked = tuple(replace(c, access='') if c.id == 'railway' else c for c in registry.CLASSIFIERS)
+    stack.enter_context(patch.object(registry, 'CLASSIFIERS', unlocked))
+    stack.enter_context(patch.object(processing, 'CLASSIFIERS', unlocked))
 
 
 def rail_predictions(xyz, progress=None, cancel=None):
@@ -87,9 +96,15 @@ class RailChecks(unittest.TestCase):
         # The legacy MODEL parameter stores an engine index: the first three never move.
         self.assertEqual([s.id for s in registry.MODELS],
                          ['litept_l_dales_10cm', 'segformer3d_urbanfiltering', MLS.id, RAIL.id])
-        self.assertEqual([c.id for c in registry.CLASSIFIERS], ['airborne', 'mobile_mapping', 'railway'])
+        self.assertEqual([c.id for c in registry.CLASSIFIERS],
+                         ['airborne', 'mobile_mapping', 'railway', 'power_lines'])
         self.assertEqual([c.display_name for c in registry.CLASSIFIERS],
-                         ['Airborne classifier', 'Mobile mapping classifier', 'Railway classifier'])
+                         ['Airborne classifier', 'Mobile mapping classifier', 'Railway classifier',
+                          'Power lines classifier'])
+        # 1.3.4: both are listed and locked; the free ones are untouched.
+        self.assertEqual([c.locked for c in registry.CLASSIFIERS], [False, False, True, True])
+        self.assertTrue(registry.model_locked(RAIL.id))
+        self.assertFalse(registry.model_locked(MLS.id))
         self.assertEqual(registry.AIRBORNE.engines,
                          (registry.LITEPT_L_DALES, registry.SEGFORMER3D_URBANFILTERING))
         self.assertEqual(registry.RAILWAY.engines, (RAIL,))
@@ -104,6 +119,9 @@ class RailChecks(unittest.TestCase):
         self.assertEqual([mapping.supports_output_codes(s) for s in registry.MODELS],
                          [False, False, True, True])
         self.assertIn('Railway classifier', algorithm.shortHelpString())
+        self.assertIn('Power lines classifier', algorithm.shortHelpString())
+        self.assertIn(ACCESS_URL, algorithm.shortHelpString())
+        self.assertIn('Not run by the plugin', algorithm.shortHelpString())
         self.assertIn('Rail 10', algorithm.shortHelpString())
         self.assertIn('SegFormer 3D engine', algorithm.shortHelpString())
         self.assertIn('aeriallidar:classify_lidar', algorithm.shortHelpString())
@@ -255,6 +273,7 @@ class RailChecks(unittest.TestCase):
                 original = base.make_source(source)
                 backend = RailStubBackend()
                 factory = base.MlsChecks.processing_patches(self, stack, backend)
+                unlock_railway(stack)
                 feedback = RecordingFeedback()
                 result = algorithm.processAlgorithm(
                     self.processing_params(algorithm, source, folder, stream, codes),
@@ -278,6 +297,7 @@ class RailChecks(unittest.TestCase):
             source = Path(folder) / 'input.las'
             base.make_source(source)
             factory = base.MlsChecks.processing_patches(self, stack, RailStubBackend())
+            unlock_railway(stack)
             parameters = self.processing_params(algorithm, source, folder)
             # ID 8 exists for Mobile Mapping but not for Railway.
             for invalid in ('{"8":3}', '{"9":1}', '{"6":256}', '{"0":3}', '{"6":true}', '{broken}'):
@@ -294,6 +314,7 @@ class RailChecks(unittest.TestCase):
             source = Path(folder) / 'input.las'
             base.make_source(source)
             factory = base.MlsChecks.processing_patches(self, stack, RailStubBackend(), cuda=False)
+            unlock_railway(stack)
             parameters = self.processing_params(algorithm, source, folder)
             parameters[algorithm.DEVICE] = 0
             with self.assertRaisesRegex(QgsProcessingException, 'Railway'):
@@ -345,19 +366,45 @@ class RailChecks(unittest.TestCase):
             # Auto device without CUDA: SegFormer 3D.
             engine, _, _ = self.run_processing(dict(airborne, **{algorithm.DEVICE: 0}), cuda=False)
             self.assertEqual(engine, 'segformer3d_urbanfiltering')
-            # Railway and Mobile mapping never fall back to an airborne engine.
-            for index, expected in ((1, MLS.id), (2, RAIL.id), ('2', RAIL.id), (2.0, RAIL.id)):
+            # Mobile mapping never falls back to an airborne engine.
+            for index in (1, '1', 1.0):
                 engine, _, _ = self.run_processing(dict(airborne, **{'CLASSIFIER': index}))
-                self.assertEqual(engine, expected)
-            with self.assertRaisesRegex(QgsProcessingException, 'Railway'):
-                self.run_processing(dict(airborne, **{'CLASSIFIER': 2, algorithm.DEVICE: 2}))
+                self.assertEqual(engine, MLS.id)
+            # 1.3.4: Railway (2) and Power lines (3) stop before any check, with
+            # the access page, whatever the device.
+            for index in (2, '2', 2.0, 3, '3'):
+                for device in (1, 2):
+                    with self.subTest(classifier=index, device=device), \
+                            self.assertRaisesRegex(QgsProcessingException, ACCESS_URL):
+                        self.run_processing(dict(airborne, **{'CLASSIFIER': index, algorithm.DEVICE: device}))
+            with self.assertRaisesRegex(QgsProcessingException, 'Railway classifier: not run by the plugin'):
+                self.run_processing(dict(airborne, **{'CLASSIFIER': 2}))
+            with self.assertRaisesRegex(QgsProcessingException, 'Power lines classifier: not run by the plugin'):
+                self.run_processing(dict(airborne, **{'CLASSIFIER': 3}))
+            # With the lock lifted (course build) Railway runs its own model, never another.
+            with ExitStack() as unlocked:
+                unlock_railway(unlocked)
+                for index in (2, '2', 2.0):
+                    engine, _, _ = self.run_processing(dict(airborne, **{'CLASSIFIER': index}))
+                    self.assertEqual(engine, RAIL.id)
+                with self.assertRaisesRegex(QgsProcessingException, 'Railway'):
+                    self.run_processing(dict(airborne, **{'CLASSIFIER': 2, algorithm.DEVICE: 2}))
             # Without CLASSIFIER (Python calls that omit it) the default is Airborne.
             engine, _, _ = self.run_processing({k: v for k, v in airborne.items() if k != 'CLASSIFIER'})
             self.assertEqual(engine, 'litept_l_dales_10cm')
             # 1.0 - 1.2 algorithm: MODEL selects that exact engine, never another.
             legacy = {k: v for k, v in airborne.items() if k != 'CLASSIFIER'}
+            # MODEL=3 (LitePT-L Railway) is refused with the access page since 1.3.4.
+            with self.assertRaisesRegex(QgsProcessingException, 'LitePT-L Railway \\(5 cm\\) is not run by the plugin'):
+                self.run_processing(dict(legacy, MODEL=3), legacy=True)
+            with self.assertRaisesRegex(QgsProcessingException, ACCESS_URL):
+                self.run_processing(dict(legacy, MODEL='3'), legacy=True)
+            with ExitStack() as unlocked:
+                unlock_railway(unlocked)
+                engine, _, _ = self.run_processing(dict(legacy, MODEL=3), legacy=True)
+                self.assertEqual(engine, RAIL.id)
             for index, expected in ((0, 'litept_l_dales_10cm'), (1, 'segformer3d_urbanfiltering'),
-                                    (2, MLS.id), (3, RAIL.id), ('2', MLS.id), (None, 'litept_l_dales_10cm')):
+                                    (2, MLS.id), ('2', MLS.id), (None, 'litept_l_dales_10cm')):
                 with self.subTest(model=index):
                     params = dict(legacy, MODEL=index) if index is not None else dict(legacy)
                     engine, warnings, _ = self.run_processing(params, legacy=True)
@@ -382,11 +429,11 @@ class RailChecks(unittest.TestCase):
             # NULL result are refused like any other invalid value.
             expression_blanks = (QgsProperty.fromExpression("''"), QgsProperty.fromExpression("'NULL'"),
                                  QgsProperty.fromExpression("'  '"), QgsProperty.fromExpression('NULL'))
-            bad = (3, '9', -2, '2.9', 2.5, 'garbage', 'NULL', True, QgsProperty.fromExpression('99'),
+            bad = (4, '9', -2, '2.9', 2.5, 'garbage', 'NULL', True, QgsProperty.fromExpression('99'),
                    QgsProperty.fromExpression("'text'")) + expression_blanks
             for value in bad:
                 with self.subTest(classifier=value), \
-                        self.assertRaisesRegex(QgsProcessingException, 'CLASSIFIER must be an integer from 0 to 2'):
+                        self.assertRaisesRegex(QgsProcessingException, 'CLASSIFIER must be an integer from 0 to 3'):
                     self.run_processing(dict(params, CLASSIFIER=value))
             for value in (4, '7', -1, QgsProperty.fromExpression('4'),
                           QgsProperty.fromExpression('1 + 3')) + expression_blanks:
@@ -402,12 +449,24 @@ class RailChecks(unittest.TestCase):
                     self.assertEqual(engine, 'litept_l_dales_10cm')
                     engine, _, _ = self.run_processing(dict(legacy, MODEL=omitted), legacy=True)
                     self.assertEqual(engine, 'litept_l_dales_10cm')
-            # Valid expressions select what they compute.
-            engine, _, _ = self.run_processing(dict(params, CLASSIFIER=QgsProperty.fromExpression('1 + 1')))
-            self.assertEqual(engine, RAIL.id)
-            engine, _, _ = self.run_processing(dict(legacy, MODEL=QgsProperty.fromExpression('3')),
+            # Valid expressions select what they compute, the lock included.
+            engine, _, _ = self.run_processing(dict(params, CLASSIFIER=QgsProperty.fromExpression('0 + 1')))
+            self.assertEqual(engine, MLS.id)
+            engine, _, _ = self.run_processing(dict(legacy, MODEL=QgsProperty.fromExpression('2')),
                                                legacy=True)
-            self.assertEqual(engine, RAIL.id)
+            self.assertEqual(engine, MLS.id)
+            for expression in ('1 + 1', '3'):
+                with self.assertRaisesRegex(QgsProcessingException, ACCESS_URL):
+                    self.run_processing(dict(params, CLASSIFIER=QgsProperty.fromExpression(expression)))
+            with self.assertRaisesRegex(QgsProcessingException, ACCESS_URL):
+                self.run_processing(dict(legacy, MODEL=QgsProperty.fromExpression('3')), legacy=True)
+            with ExitStack() as unlocked:
+                unlock_railway(unlocked)
+                engine, _, _ = self.run_processing(dict(params, CLASSIFIER=QgsProperty.fromExpression('1 + 1')))
+                self.assertEqual(engine, RAIL.id)
+                engine, _, _ = self.run_processing(dict(legacy, MODEL=QgsProperty.fromExpression('3')),
+                                                   legacy=True)
+                self.assertEqual(engine, RAIL.id)
 
     def test_graphical_modeler_editor_keeps_the_chosen_model(self):
         """Opening and accepting a saved model step keeps its model or classifier.
@@ -428,7 +487,7 @@ class RailChecks(unittest.TestCase):
         if registry_.providerById(provider.id()) is None:
             registry_.addProvider(provider)
         cases = [('aeriallidar:classify_lidar', 'MODEL', index) for index in range(4)]
-        cases += [('aeriallidar:classify_point_cloud', 'CLASSIFIER', index) for index in range(3)]
+        cases += [('aeriallidar:classify_point_cloud', 'CLASSIFIER', index) for index in range(4)]
         for algorithm_id, name, index in cases:
             with self.subTest(algorithm=algorithm_id, value=index):
                 algorithm = registry_.algorithmById(algorithm_id)
@@ -449,9 +508,17 @@ class RailChecks(unittest.TestCase):
                 self.assertEqual(int(values[name]), index, values)
                 other = 'CLASSIFIER' if name == 'MODEL' else 'MODEL'
                 self.assertNotIn(other, values)
-                resolved = algorithm._requested_engines(values, QgsProcessingContext(), QgsProcessingFeedback())
-                expected = (registry.MODELS[index],) if name == 'MODEL' else registry.CLASSIFIERS[index].engines
-                self.assertEqual(resolved[1], expected)
+                # The editor keeps the index; a locked choice is then refused at run
+                # time with the access page, never mapped to another model.
+                locked = (registry.model_locked(registry.MODELS[index].id) if name == 'MODEL'
+                          else registry.CLASSIFIERS[index].locked)
+                if locked:
+                    with self.assertRaisesRegex(QgsProcessingException, ACCESS_URL):
+                        algorithm._requested_engines(values, QgsProcessingContext(), QgsProcessingFeedback())
+                else:
+                    resolved = algorithm._requested_engines(values, QgsProcessingContext(), QgsProcessingFeedback())
+                    expected = (registry.MODELS[index],) if name == 'MODEL' else registry.CLASSIFIERS[index].engines
+                    self.assertEqual(resolved[1], expected)
 
     def test_rail_weights_are_published_not_bundled(self):
         self.assertEqual(RAIL.weights_urls, (
@@ -470,7 +537,8 @@ class RailChecks(unittest.TestCase):
                     f'{prefix}/model_id': 'litept_l_dales_10cm',
                     f'{prefix}/field_name': 'my_raw_ids',
                     f'{prefix}/airborne_field_name': 'my_raw_ids',
-                    f'{prefix}/output_codes/{MLS.id}': json.dumps({'5': 99})}
+                    f'{prefix}/output_codes/{MLS.id}': json.dumps({'5': 99}),
+                    f'{prefix}/output_codes/{RAIL.id}': json.dumps({'6': 65})}
 
         class Settings:
             def value(self, key, default=None, **kwargs):
@@ -487,75 +555,110 @@ class RailChecks(unittest.TestCase):
                 self.assertEqual(panel.field_edit.text(), 'my_raw_ids')
                 self.assertTrue(panel.mms_codes_row.isHidden())
                 self.assertEqual([panel.model_combo.itemText(i) for i in range(panel.model_combo.count())],
-                                 ['Airborne classifier', 'Mobile mapping classifier', 'Railway classifier'])
+                                 ['Airborne classifier', 'Mobile mapping classifier', 'Railway classifier',
+                                  'Power lines classifier'])
                 # 1.2 saved the LitePT-L Airborne model id: Airborne classifier, which
                 # runs its SegFormer 3D engine on this GPU-less test machine.
                 self.assertEqual(panel.model_combo.currentData(), 'airborne')
                 self.assertEqual(panel._current_spec(), registry.SEGFORMER3D_URBANFILTERING)
                 self.assertTrue(panel.model_gate_ok)
                 self.assertIn('SegFormer 3D engine', panel.model_label.text())
-                # Airborne -> Mobile mapping -> Railway -> Airborne keeps the
-                # user's raw-ID field name (1.2 replaced it by 'classification').
-                for index, (classifier_id, spec) in enumerate(
-                        (('mobile_mapping', MLS), ('railway', RAIL)), start=1):
-                    panel.model_combo.setCurrentIndex(index)
-                    self.assertEqual(panel.model_combo.currentData(), classifier_id)
-                    self.assertEqual(panel._current_spec(), spec)
-                    self.assertFalse(panel.mms_codes_row.isHidden())
-                    self.assertEqual(panel.field_edit.text(), 'classification')
-                    self.assertFalse(panel.field_edit.isEnabled())
-                self.assertIn('Rail: 10', panel.mms_codes_btn.toolTip())
-                self.assertIn('Fence: 64', panel.mms_codes_btn.toolTip())
+                self.assertTrue(panel.access_card.isHidden())
+                # Airborne -> Mobile mapping keeps the user's raw-ID field name
+                # for later (1.2 replaced it by 'classification').
+                panel.model_combo.setCurrentIndex(1)
+                self.assertEqual(panel.model_combo.currentData(), 'mobile_mapping')
+                self.assertEqual(panel._current_spec(), MLS)
+                self.assertFalse(panel.mms_codes_row.isHidden())
+                self.assertEqual(panel.field_edit.text(), 'classification')
+                self.assertFalse(panel.field_edit.isEnabled())
+                self.assertIn('Pole like: 99', panel.mms_codes_btn.toolTip())
+                self.assertTrue(panel.access_card.isHidden())
+                self.assertTrue(panel.import_btn.isEnabled())
+                # 1.3.4: Railway is locked. The classifier still names its engine,
+                # but nothing is editable, importable or runnable, and the card
+                # says where access is granted.
+                access_module = module('widgets.access_card')
+                panel.model_combo.setCurrentIndex(2)
+                self.assertEqual(panel.model_combo.currentData(), 'railway')
+                self.assertEqual(panel._current_spec(), RAIL)
+                self.assertTrue(panel.mms_codes_row.isHidden())
+                self.assertTrue(panel.field_edit.isEnabled())
+                self.assertEqual(panel.field_edit.text(), 'my_raw_ids')
                 self.assertFalse(panel.model_gate_ok)
-                self.assertIn('LitePT-L Railway', panel.model_gate_message)
-                editor_error = []
-
-                def edit_and_accept():
-                    dialog = app.activeModalWidget()
-                    try:
-                        self.assertIsInstance(dialog, dialog_module.ClassMappingDialog)
-                        self.assertEqual(dialog.windowTitle(), 'LitePT-L Railway output class codes')
-                        self.assertEqual(len(dialog._spins), 7)
-                        self.assertEqual(dialog.table.item(1, 1).text(), 'Rail')
-                        self.assertEqual(dialog.table.item(1, 4).text(), 'Rail')
-                        self.assertEqual(dialog.table.item(5, 4).text(), 'User definable')
-                        dialog._spins[2].setValue(30)
-                        self.assertEqual(dialog.table.item(1, 4).text(), 'Reserved')
-                        dialog._spins[2].setValue(10)
-                        dialog._spins[6].setValue(65)
-                        dialog.accept()
-                    except BaseException as error:
-                        editor_error.append(error)
-                        if dialog is not None:
-                            dialog.reject()
-
-                QTimer.singleShot(0, edit_and_accept)
+                self.assertEqual(panel.model_gate_message, registry.RAILWAY.access_message())
+                self.assertIn(ACCESS_URL, panel.model_gate_message)
+                self.assertIn('Access through the Cohort', panel.model_label.text())
+                self.assertFalse(panel.access_card.isHidden())
+                self.assertEqual(panel.access_card.title.text(), 'Railway classifier: access through the Cohort')
+                self.assertEqual(panel.access_card.text.text(), registry.RAILWAY.access)
+                self.assertEqual(panel.access_card.button.text(), 'Join the Cohort \u2197')
+                self.assertFalse(panel.import_btn.isEnabled())
+                self.assertFalse(panel.run_btn.isEnabled())
+                self.assertIn('access through the Cohort', panel.run_btn.toolTip())
+                with patch.object(access_module.QDesktopServices, 'openUrl', return_value=True) as browser:
+                    panel.access_card.button.click()
+                    url = browser.call_args.args[0].toString()
+                self.assertTrue(url.startswith(ACCESS_URL + '?'), url)
+                self.assertIn('utm_content=access_railway', url)
+                # Neither the editor nor the import dialog opens for a locked classifier.
                 panel._edit_output_codes()
-                if editor_error:
-                    raise editor_error[0]
+                panel._import_model_file()
+                self.assertIsNone(app.activeModalWidget())
+                # Power lines: no engine at all, the same notice.
+                panel.model_combo.setCurrentIndex(3)
+                self.assertEqual(panel.model_combo.currentData(), 'power_lines')
+                self.assertIsNone(panel._current_spec())
+                self.assertTrue(panel.mms_codes_row.isHidden())
+                self.assertEqual(panel.field_edit.text(), 'my_raw_ids')
+                self.assertFalse(panel.model_gate_ok)
+                self.assertFalse(panel.access_card.isHidden())
+                self.assertEqual(panel.access_card.title.text(), 'Power lines classifier: access through the Cohort')
+                self.assertFalse(panel.run_btn.isEnabled())
+                panel._edit_output_codes()
+                panel._import_model_file()
+                self.assertIsNone(app.activeModalWidget())
+                # The railway code editor itself still works (Cohort participants).
+                dialog = dialog_module.ClassMappingDialog(RAIL, panel._output_codes_by_model.get(RAIL.id), panel)
+                self.assertEqual(dialog.windowTitle(), 'LitePT-L Railway output class codes')
+                self.assertEqual(len(dialog._spins), 7)
+                self.assertEqual(dialog.table.item(1, 1).text(), 'Rail')
+                self.assertEqual(dialog.table.item(1, 4).text(), 'Rail')
+                self.assertEqual(dialog.table.item(5, 4).text(), 'User definable')
+                dialog._spins[2].setValue(30)
+                self.assertEqual(dialog.table.item(1, 4).text(), 'Reserved')
+                dialog._spins[2].setValue(10)
+                self.assertEqual(dialog.output_codes()[6], 65)
+                dialog.close()
                 self.assertEqual(panel._output_codes_by_model[RAIL.id][6], 65)
                 self.assertEqual(panel._output_codes_by_model[MLS.id][5], 99)
                 # Class lists: every selector item, the selector and the status line.
                 from qgis.PyQt.QtCore import Qt
-                tips = [panel.model_combo.itemData(i, Qt.ItemDataRole.ToolTipRole) for i in range(3)]
+                tips = [panel.model_combo.itemData(i, Qt.ItemDataRole.ToolTipRole) for i in range(4)]
                 self.assertIn('On this computer: SegFormer 3D Airborne (30 cm), 7 classes', tips[0])
                 self.assertIn('Building</td><td align=\'right\'>&nbsp;&nbsp;6<', tips[0])
                 self.assertIn('Pole like</td><td align=\'right\'>&nbsp;&nbsp;99<', tips[1])
+                self.assertNotIn('<i>', tips[0])
+                self.assertNotIn('<i>', tips[1])
                 self.assertIn('LitePT-L Railway (5 cm), 7 classes', tips[2])
                 self.assertIn("Rail</td><td align='right'>&nbsp;&nbsp;10</td><td>&nbsp;&nbsp;Rail<", tips[2])
                 # The saved custom fence code (65) shows at once, with its meaning.
                 self.assertIn("Fence</td><td align='right'>&nbsp;&nbsp;65</td><td>&nbsp;&nbsp;User definable", tips[2])
                 self.assertIn('#E31A1C', tips[2])
-                self.assertEqual(panel.model_combo.toolTip(), tips[2])
-                self.assertTrue(panel.model_label.toolTip().endswith(tips[2]))
-                self.assertTrue(panel.model_label.toolTip().startswith(
-                    'LitePT-L Railway (5 cm) runs on NVIDIA CUDA GPUs only.<hr>'))
-                saved = json.loads(settings[f'{prefix}/output_codes/{RAIL.id}'])
-                self.assertEqual(saved, {'1': 2, '2': 10, '3': 15, '4': 14, '5': 5, '6': 65, '7': 1})
+                self.assertIn('<i>Access to the Railway model is granted through the live Cohort', tips[2])
+                self.assertIn('<b>Power lines classifier</b>', tips[3])
+                self.assertIn('<i>Access to the Power lines model is granted', tips[3])
+                self.assertNotIn('<table', tips[3])
+                self.assertEqual(panel.model_combo.toolTip(), tips[3])
+                self.assertTrue(panel.model_label.toolTip().startswith('Access to the Power lines model'))
+                self.assertTrue(panel.model_label.toolTip().endswith(tips[3]))
                 panel.model_combo.setCurrentIndex(0)
                 self.assertTrue(panel.mms_codes_row.isHidden())
                 self.assertTrue(panel.field_edit.isEnabled())
                 self.assertEqual(panel.field_edit.text(), 'my_raw_ids')
+                self.assertTrue(panel.access_card.isHidden())
+                self.assertTrue(panel.import_btn.isEnabled())
+                self.assertTrue(panel.model_gate_ok)
                 panel.model_combo.setCurrentIndex(2)
                 panel._save_settings()
                 self.assertEqual(settings[f'{prefix}/classifier_id'], 'railway')

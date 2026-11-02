@@ -6,9 +6,11 @@ which LAS dimensions and compute devices it needs, and how it is licensed.
 The dock, the Processing algorithm, the model manager and the installer
 all read this table; nothing else in the plugin hard-codes a model.
 
-Users choose a classifier (Airborne, Mobile mapping, Railway), declared at
-the end of this file; each classifier runs the first of its models
-(engines) that works on the computer.
+Users choose a classifier (Airborne, Mobile mapping, Railway, Power
+lines), declared at the end of this file; each classifier runs the first
+of its models (engines) that works on the computer. A classifier whose
+``access`` text is set is not part of the free plugin: the dock and
+Processing show where access is granted instead of running it.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
-from ..config import DEFAULT_CLASS_MAPPING, ClassInfo
+from ..config import COURSE_TITLE, COURSE_URL, DEFAULT_CLASS_MAPPING, ClassInfo
 
 _CORE_DIR = Path(__file__).resolve().parent
 _GITHUB_RELEASES = "https://github.com/akharroubi/AerialLidarClassifier/releases/download"
@@ -280,12 +282,31 @@ class Classifier:
     description: str
     # Preference order: the first engine that can run on the computer is
     # used. Airborne falls back to SegFormer 3D where LitePT-L cannot run
-    # (no NVIDIA CUDA GPU, macOS, or no spconv build for the GPU).
-    engines: Tuple[ModelSpec, ...]
+    # (no NVIDIA CUDA GPU, macOS, or no spconv build for the GPU). Empty
+    # for a classifier whose model is not distributed with the plugin.
+    engines: Tuple[ModelSpec, ...] = ()
+    # Set when the classifier is not part of the free plugin: one or two
+    # sentences saying where access is granted. The dock shows them with a
+    # button to ``access_url``; Processing refuses the run with them. The
+    # engines (if any) stay declared so their weights, codes and settings
+    # keep their meaning, but nothing runs them.
+    access: str = ""
+    access_url: str = COURSE_URL
+    access_button: str = "Join the Cohort"
 
     @property
-    def primary(self) -> ModelSpec:
-        return self.engines[0]
+    def primary(self) -> Optional[ModelSpec]:
+        return self.engines[0] if self.engines else None
+
+    @property
+    def locked(self) -> bool:
+        """True when the plugin does not run this classifier (see ``access``)."""
+        return bool(self.access) or not self.engines
+
+    def access_message(self) -> str:
+        """The access text with the page to visit, for logs and Processing."""
+        text = self.access or f"{self.display_name}: no model is distributed with the plugin."
+        return f"{text} {self.access_url}"
 
 
 AIRBORNE = Classifier(
@@ -308,10 +329,34 @@ RAILWAY = Classifier(
     display_name="Railway classifier",
     description="Railway corridor LiDAR. LitePT-L at 5 cm, NVIDIA CUDA GPU.",
     engines=(LITEPT_L_RAIL,),
+    # Since 1.3.4 the railway model is reserved for the participants of the
+    # author's Cohort. Its ModelSpec stays declared: the legacy Processing
+    # MODEL index 3, saved output codes and cached weights keep their meaning.
+    access=(
+        "Access to the Railway model is granted through the live Cohort "
+        f"{COURSE_TITLE}, taught by the plugin author. The Airborne and "
+        "Mobile mapping classifiers stay free."
+    ),
+    access_button="Join the Cohort",
+)
+POWER_LINES = Classifier(
+    id="power_lines",
+    display_name="Power lines classifier",
+    description=(
+        "Power line corridor LiDAR. The model is not distributed with the "
+        "plugin: it is available to the participants of the author's Cohort."
+    ),
+    engines=(),
+    access=(
+        "Access to the Power lines model is granted through the live Cohort "
+        f"{COURSE_TITLE}, taught by the plugin author. The Airborne and "
+        "Mobile mapping classifiers stay free."
+    ),
+    access_button="Join the Cohort",
 )
 
 # Processing saves CLASSIFIER as an index: append only.
-CLASSIFIERS: Tuple[Classifier, ...] = (AIRBORNE, MOBILE_MAPPING, RAILWAY)
+CLASSIFIERS: Tuple[Classifier, ...] = (AIRBORNE, MOBILE_MAPPING, RAILWAY, POWER_LINES)
 DEFAULT_CLASSIFIER_ID = AIRBORNE.id
 
 
@@ -331,13 +376,26 @@ def classifier_for_model(model_id: Optional[str]) -> Classifier:
 
 
 def select_engine(classifier: Classifier, device: str,
-                  runs_here: Callable[[ModelSpec, str], bool]) -> ModelSpec:
+                  runs_here: Callable[[ModelSpec, str], bool]) -> Optional[ModelSpec]:
     """First engine of ``classifier`` that ``runs_here`` on ``device``.
 
     When none can run, the primary engine is returned so its device or
-    dependency gate can explain what is missing.
+    dependency gate can explain what is missing. ``None`` for a classifier
+    without engines (its ``access`` text says where the model is).
     """
     for spec in classifier.engines:
         if runs_here(spec, device):
             return spec
     return classifier.primary
+
+
+def model_locked(model_id: Optional[str]) -> bool:
+    """True when the classifier owning ``model_id`` is not run by the plugin.
+
+    The legacy Processing MODEL parameter names an engine directly, so the
+    lock of its classifier has to be looked up from the model side.
+    """
+    try:
+        return classifier_for_model(model_id).locked
+    except KeyError:
+        return False

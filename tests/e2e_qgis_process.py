@@ -3,8 +3,10 @@
     python tests/e2e_qgis_process.py --model rail --zip dist/lidar_ai_classifier_v1.3.0.zip \
         --input <reference LAS> --work <scratch parent> [--public] [--qgis3 BAT] [--qgis4 BAT]
 
---model is mls (Mobile mapping) or rail (Railway). Both runtimes are
-required. Each run gets a new private directory below --work; existing files
+--model is mls (Mobile mapping) or rail (Railway). Since 1.3.4 the Railway
+classifier is locked (access through the author's Cohort): for --model rail the
+test checks that both runtimes refuse the run, name the access page, request no
+weights and write no output. Both runtimes are required. Each run gets a new private directory below --work; existing files
 and profiles are never removed. The test serves the released weights on
 localhost (or, with --public, lets the plugin download them from the URL in
 the ZIP's registry), checks the real first-use download and its SHA-256, then
@@ -47,7 +49,9 @@ TARGETS = {
             "default": _MLS_CODES, "custom": {**_MLS_CODES, 5: 200, 6: 201, 7: 255}},
     "rail": {"id": "litept_l_rail_5cm", "registry": "LITEPT_L_RAIL",
              "weights": "litept_l_rail_5cm_fp16.pth", "model_index": 3, "classifier_index": 2,
-             "default": _RAIL_CODES, "custom": {**_RAIL_CODES, 2: 200, 6: 17, 7: 255}},
+             "default": _RAIL_CODES, "custom": {**_RAIL_CODES, 2: 200, 6: 17, 7: 255},
+             # 1.3.4: the plugin refuses the railway model and names the Cohort page.
+             "locked": True, "access_url": "https://maven.com/geomatics/qgis3d"},
 }
 TARGET = TARGETS["mls"]
 WEIGHTS = TARGET["weights"]
@@ -307,24 +311,39 @@ def main():
                 code, seconds = run_qgis_process(launchers[label], profile, Path(args.cache).resolve(), algorithm,
                                                  params, work / f"{label}.log")
                 entry.update(exit_code=code, seconds=round(seconds, 1))
-                if code:
-                    raise ValueError(f"qgis_process exited with status {code}; see {entry['log']}")
-                cached = (profile / "profiles" / "default" / "AerialLidarClassifier" / "models"
-                          / TARGET["id"] / WEIGHTS)
-                downloaded = args.public or f"/{WEIGHTS}" in server.weight_requests[requests_before:]
-                entry["weights_source"] = public_url if args.public else "localhost"
-                if not downloaded or not cached.is_file() or sha256(cached) != expected_hash:
-                    raise ValueError("Fresh-profile download or cached SHA-256 verification failed")
-                entry["cached_weights_sha256"] = expected_hash
-                outputs = sorted(out_dir.glob("*_classified.la*")) if out_dir.exists() else []
-                if len(outputs) != 1:
-                    raise ValueError(f"Expected one classified output, found {len(outputs)}")
-                problems, labels[label] = check(source_path, outputs[0], codes)
-                entry.update(output=str(outputs[0]), points=len(labels[label]), problems=problems)
-                if problems:
-                    failed = True
-                if sha256(source_path) != source_hash:
-                    raise ValueError("The source input file was modified")
+                if TARGET.get("locked"):
+                    # The refusal is the expected result: non-zero exit, the
+                    # access page in the message, no weights request, no output.
+                    log_text = Path(entry["log"]).read_text(encoding="utf-8", errors="replace")
+                    if not code:
+                        raise ValueError("qgis_process ran a locked classifier (exit status 0)")
+                    if TARGET["access_url"] not in log_text:
+                        raise ValueError(f"The refusal does not name the access page; see {entry['log']}")
+                    if server is not None and server.weight_requests[requests_before:]:
+                        raise ValueError("The weights of a locked model were requested")
+                    if out_dir.exists() and list(out_dir.glob("*_classified.la*")):
+                        raise ValueError("A locked classifier wrote an output file")
+                    entry.update(refused=True, weights_requested=False)
+                    labels[label] = None
+                else:
+                    if code:
+                        raise ValueError(f"qgis_process exited with status {code}; see {entry['log']}")
+                    cached = (profile / "profiles" / "default" / "AerialLidarClassifier" / "models"
+                              / TARGET["id"] / WEIGHTS)
+                    downloaded = args.public or f"/{WEIGHTS}" in server.weight_requests[requests_before:]
+                    entry["weights_source"] = public_url if args.public else "localhost"
+                    if not downloaded or not cached.is_file() or sha256(cached) != expected_hash:
+                        raise ValueError("Fresh-profile download or cached SHA-256 verification failed")
+                    entry["cached_weights_sha256"] = expected_hash
+                    outputs = sorted(out_dir.glob("*_classified.la*")) if out_dir.exists() else []
+                    if len(outputs) != 1:
+                        raise ValueError(f"Expected one classified output, found {len(outputs)}")
+                    problems, labels[label] = check(source_path, outputs[0], codes)
+                    entry.update(output=str(outputs[0]), points=len(labels[label]), problems=problems)
+                    if problems:
+                        failed = True
+                    if sha256(source_path) != source_hash:
+                        raise ValueError("The source input file was modified")
             except Exception as exc:
                 entry["error"] = f"{type(exc).__name__}: {exc}"
                 failed = True
@@ -332,13 +351,16 @@ def main():
             print(label, json.dumps(entry), flush=True)
         if set(labels) != {"qgis3", "qgis4"}:
             raise ValueError("Both QGIS versions must produce validated outputs")
-        ids3, ids4 = class_ids(labels["qgis3"], DEFAULT_CODES), class_ids(labels["qgis4"], CUSTOM_CODES)
-        if ids3.shape != ids4.shape:
-            raise ValueError("Cross-runtime output lengths differ")
-        agreement = float(np.mean(ids3 == ids4))
-        report.update(qgis3_vs_qgis4_label_agreement=agreement, minimum_agreement=MIN_AGREEMENT)
-        if agreement < MIN_AGREEMENT:
-            raise ValueError(f"Cross-runtime class agreement {agreement:.6f} is below {MIN_AGREEMENT}")
+        if TARGET.get("locked"):
+            report["refused_in_both_runtimes"] = True
+        else:
+            ids3, ids4 = class_ids(labels["qgis3"], DEFAULT_CODES), class_ids(labels["qgis4"], CUSTOM_CODES)
+            if ids3.shape != ids4.shape:
+                raise ValueError("Cross-runtime output lengths differ")
+            agreement = float(np.mean(ids3 == ids4))
+            report.update(qgis3_vs_qgis4_label_agreement=agreement, minimum_agreement=MIN_AGREEMENT)
+            if agreement < MIN_AGREEMENT:
+                raise ValueError(f"Cross-runtime class agreement {agreement:.6f} is below {MIN_AGREEMENT}")
     except Exception as exc:
         report["error"] = f"{type(exc).__name__}: {exc}"
         failed = True

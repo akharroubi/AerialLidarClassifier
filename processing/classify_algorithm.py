@@ -43,7 +43,7 @@ from qgis.PyQt.QtCore import QVariant
 
 from ..config import PLUGIN_NAME, TILE_DEFAULT_BUFFER_M
 from ..core.memory import bytes_per_tile_point, plan_processing
-from ..core.registry import CLASSIFIERS, MODELS
+from ..core.registry import CLASSIFIERS, MODELS, classifier_for_model, model_locked
 from ..utils.class_mapping import output_codes_json, output_model_spec, supports_output_codes, validate_model_output_field
 from ..utils.compat import scoped_enum
 from ..utils.las_units import UNIT_OVERRIDES, resolve_units
@@ -121,6 +121,11 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
         parts = []
         for index, classifier in enumerate(CLASSIFIERS):
             parts.append(f"<p><b>{index} - {classifier.display_name}</b>: {classifier.description}</p>")
+            if classifier.locked:
+                parts.append(
+                    f"<p><i>Not run by the plugin.</i> {classifier.access} "
+                    f"<a href=\"{classifier.access_url}\">{classifier.access_url}</a>. "
+                    "Choosing it stops the algorithm with this message.</p>")
             for spec in classifier.engines:
                 if len(classifier.engines) == 1:
                     role = "Model"
@@ -935,11 +940,12 @@ class ClassifyPointCloudAlgorithm(_ClassifyAlgorithmBase):
 
     def _intro_help(self) -> str:
         return (
-            "<p>Deep-learning semantic segmentation of airborne, Mobile Mapping and "
-            "railway point clouds (LAS / LAZ / COPC). Choose the classifier for the "
-            "acquisition type: Airborne, Mobile mapping or Railway. The Mobile Mapping "
-            "(nine classes) and Railway (seven classes) models have editable output "
-            "codes.</p>"
+            "<p>Deep-learning semantic segmentation of airborne and Mobile Mapping "
+            "point clouds (LAS / LAZ / COPC). Choose the classifier for the "
+            "acquisition type: Airborne or Mobile mapping (nine classes, editable "
+            "output codes). The Railway and Power lines classifiers are listed but "
+            "not run by the plugin: access is granted through the author's live "
+            "Cohort, and choosing them stops the algorithm with that message.</p>"
         )
 
     def _models_help(self) -> str:
@@ -947,10 +953,13 @@ class ClassifyPointCloudAlgorithm(_ClassifyAlgorithmBase):
 
     def _choice_help(self) -> str:
         return (
-            "<li><b>Classifier</b> - Airborne (0), Mobile mapping (1) or Railway (2). "
-            "Mobile mapping and Railway need an NVIDIA CUDA GPU. Airborne uses "
-            "LitePT-L on NVIDIA CUDA GPUs and the SegFormer 3D engine elsewhere; "
-            "the log says which engine ran and why. "
+            "<li><b>Classifier</b> - Airborne (0), Mobile mapping (1), Railway (2) "
+            "or Power lines (3). Railway and Power lines are not run by the plugin: "
+            "access is granted through the author's live Cohort "
+            "(https://maven.com/geomatics/qgis3d) and choosing them stops the "
+            "algorithm with that message. Mobile mapping needs an NVIDIA CUDA GPU. "
+            "Airborne uses LitePT-L on NVIDIA CUDA GPUs and the SegFormer 3D engine "
+            "elsewhere; the log says which engine ran and why. "
             "The weights download automatically the first time a model is used "
             "(SHA-256 verified). Scripts and models from versions 1.0 to 1.2 use "
             "the algorithm <code>aeriallidar:classify_lidar</code> and its "
@@ -971,8 +980,11 @@ class ClassifyPointCloudAlgorithm(_ClassifyAlgorithmBase):
 
     def _requested_engines(self, parameters, context, feedback):
         index = self._enum_index(parameters, self.CLASSIFIER, context, len(CLASSIFIERS),
-                                 "0 Airborne, 1 Mobile mapping, 2 Railway")
+                                 "0 Airborne, 1 Mobile mapping, 2 Railway, 3 Power lines")
         classifier = CLASSIFIERS[index]
+        if classifier.locked:
+            raise QgsProcessingException(self.tr(
+                f"{classifier.display_name}: not run by the plugin. {classifier.access_message()}"))
         return classifier, classifier.engines
 
 
@@ -1036,4 +1048,9 @@ class ClassifyLidarAlgorithm(_ClassifyAlgorithmBase):
         index = self._enum_index(
             parameters, self.MODEL, context, len(MODELS),
             "0 LitePT-L Airborne, 1 SegFormer 3D, 2 LitePT-L Mobile Mapping, 3 LitePT-L Railway")
-        return None, (MODELS[index],)
+        spec = MODELS[index]
+        if model_locked(spec.id):
+            classifier = classifier_for_model(spec.id)
+            raise QgsProcessingException(self.tr(
+                f"{spec.display_name} is not run by the plugin. {classifier.access_message()}"))
+        return None, (spec,)

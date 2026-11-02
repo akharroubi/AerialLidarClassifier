@@ -2,22 +2,23 @@
 name=LiDAR AI Classifier
 qgisMinimumVersion=3.34
 qgisMaximumVersion=4.99
-description=Classify airborne, mobile mapping and railway LiDAR point clouds with deep learning (LitePT-L).
-version=1.3.3
+description=Classify airborne and mobile mapping LiDAR point clouds with deep learning (LitePT-L); railway and power line models through the author's Cohort.
+version=1.3.4
 author=Abderrazzaq Kharroubi (GeoScITY Lab, University of Liege)
 email=akharroubi2@gmail.com
 license=GPL-3.0-or-later
 
-about=Classifies airborne, mobile mapping and railway LiDAR point clouds
-    (LAS / LAZ / COPC) with deep-learning models. Three classifiers:
+about=Classifies airborne and mobile mapping LiDAR point clouds
+    (LAS / LAZ / COPC) with deep-learning models. Two free classifiers:
     Airborne (LitePT-L at 10 cm on NVIDIA GPUs, the UrbanFiltering 3D
     SegFormer from NRCan's TreeAIBox on other computers; standard ASPRS
-    codes), Mobile mapping (LitePT-L at 5 cm: ground, low and high
+    codes) and Mobile mapping (LitePT-L at 5 cm: ground, low and high
     vegetation, buildings, pole-like objects, vehicles, fences and
-    barriers, wires) and Railway (LitePT-L at 5 cm: ground and track bed,
-    rails, masts and poles, overhead wires, vegetation, fences). Mobile
-    mapping and railway class codes are editable; both need an NVIDIA
-    CUDA GPU.
+    barriers, wires; editable class codes; NVIDIA CUDA GPU required).
+    The Railway classifier (rails, masts, wires, ground, vegetation,
+    fences) and the Power lines classifier (power line corridors) are
+    reserved for the participants of the author's live Cohort; the plugin
+    shows where to get access.
     External dependencies: PyTorch, laspy, lazrs, timm, scipy and, on
     NVIDIA GPUs, spconv. A one-click setup installs them into a separate
     per-user folder on first use (no admin rights, nothing to
@@ -32,7 +33,7 @@ tracker=https://github.com/akharroubi/AerialLidarClassifier/issues
 repository=https://github.com/akharroubi/AerialLidarClassifier
 homepage=https://github.com/akharroubi/AerialLidarClassifier
 
-tags=lidar,point cloud,classification,semantic segmentation,deep learning,litept,point transformer,segformer,machine learning,pytorch,asprs,las,laz,copc,aerial,treeaibox,mobile mapping,mls,mms,railway,rail,catenary
+tags=lidar,point cloud,classification,semantic segmentation,deep learning,litept,point transformer,segformer,machine learning,pytorch,asprs,las,laz,copc,aerial,treeaibox,mobile mapping,mls,mms,railway,rail,catenary,power lines,powerline,transmission line
 
 category=Analysis
 icon=icon.png
@@ -43,6 +44,18 @@ hasProcessingProvider=yes
 server=False
 
 changelog=
+    1.3.4
+        - The Railway classifier is reserved for the participants of the
+          author's live Cohort It stays in the list; selecting it
+          shows where access is granted, with a button to the Cohort page,
+          and Run stays disabled. Processing stops with the same message
+          for CLASSIFIER=2 and for MODEL=3 in the 1.0 to 1.2 algorithm.
+          The model, its published weights, saved codes and parameter
+          indexes are unchanged; Setup no longer downloads its weights.
+        - New Power lines classifier entry (CLASSIFIER=3): the power line
+          corridor model is not distributed with the plugin; the entry
+          shows where access is granted.
+        - Airborne and Mobile mapping are not affected and stay free.
     1.3.3
         - "CUDA driver error: unknown error" with the automatic GPU memory
           allocator on Windows: the failure of some drivers is intermittent

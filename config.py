@@ -17,6 +17,13 @@ _LOG = logging.getLogger(__name__)
 PLUGIN_NAME = "LiDAR AI Classifier"
 SETTINGS_PREFIX = "AerialLidarClassifier"
 
+# The author's live course on Maven. Also the page where access to the
+# classifiers that are not part of the free plugin is granted
+# (core/registry.py, Classifier.access). Plain URL, no tracking; the
+# widgets add constant campaign tags.
+COURSE_URL = "https://maven.com/geomatics/qgis3d"
+COURSE_TITLE = "LiDAR Point Clouds Processing in QGIS"
+
 
 def _read_plugin_version() -> str:
     """Read ``version=`` from metadata.txt.
