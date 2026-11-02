@@ -1095,7 +1095,12 @@ class ClassifierDockWidget(QDockWidget):
                 "Use Edit output codes to choose the code of each class."
             )
         else:
-            if previous_editable:
+            # Also when the dock opens on a locked editable-code classifier
+            # (1.3.3 saved Railway with the field reading 'classification'):
+            # the saved airborne name must survive, not be replaced by it.
+            opens_on_editable = (previous_id is None and spec is not None
+                                 and supports_output_codes(spec))
+            if previous_editable or opens_on_editable:
                 self.field_edit.setText(self._airborne_field_name)
             self._airborne_field_name = self.field_edit.text().strip() or "classification"
             self.field_edit.setToolTip(self._airborne_field_tooltip)

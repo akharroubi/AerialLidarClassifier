@@ -522,6 +522,40 @@ class RailChecks(unittest.TestCase):
                     expected = (registry.MODELS[index],) if name == 'MODEL' else registry.CLASSIFIERS[index].engines
                     self.assertEqual(resolved[1], expected)
 
+    def test_dock_opened_on_locked_railway_keeps_the_airborne_field_name(self):
+        """1.3.3 saved Railway selected, so field_name reads 'classification' while
+        airborne_field_name holds the user's raw-ID name: after the 1.3.4 lock, the
+        dock opens on Railway and Airborne must still get 'my_raw_ids'."""
+        panel_module = module('gui.main_panel')
+        prefix = config.SETTINGS_PREFIX
+        settings = {f'{prefix}/settings_version': 3, f'{prefix}/classifier_id': 'railway',
+                    f'{prefix}/field_name': 'classification',
+                    f'{prefix}/airborne_field_name': 'my_raw_ids'}
+
+        class Settings:
+            def value(self, key, default=None, **kwargs):
+                return settings.get(key, default)
+
+            def setValue(self, key, value):
+                settings[key] = value
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(panel_module, 'QgsSettings', Settings))
+            stack.enter_context(patch.object(panel_module, 'get_gpu_info', return_value={'available': False}))
+            stack.enter_context(patch.object(manager_module.ModelManager, 'is_model_available', return_value=True))
+            panel = panel_module.ClassifierDockWidget(None)
+            try:
+                self.assertEqual(panel.model_combo.currentData(), 'railway')
+                self.assertFalse(panel.access_card.isHidden())
+                self.assertEqual(panel.field_edit.text(), 'my_raw_ids')
+                self.assertTrue(panel.field_edit.isEnabled())
+                panel.model_combo.setCurrentIndex(0)
+                self.assertEqual(panel.field_edit.text(), 'my_raw_ids')
+                panel._save_settings()
+                self.assertEqual(settings[f'{prefix}/airborne_field_name'], 'my_raw_ids')
+            finally:
+                panel.close()
+
     def test_rail_weights_are_published_not_bundled(self):
         self.assertEqual(RAIL.weights_urls, (
             'https://github.com/akharroubi/AerialLidarClassifier/releases/download/v1.3/'
@@ -549,9 +583,10 @@ class RailChecks(unittest.TestCase):
             def setValue(self, key, value):
                 settings[key] = value
 
-        with patch.object(panel_module, 'QgsSettings', Settings), \
-             patch.object(panel_module, 'get_gpu_info', return_value={'available': False}), \
-             patch.object(manager_module.ModelManager, 'is_model_available', return_value=True):
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(panel_module, 'QgsSettings', Settings))
+            stack.enter_context(patch.object(panel_module, 'get_gpu_info', return_value={'available': False}))
+            stack.enter_context(patch.object(manager_module.ModelManager, 'is_model_available', return_value=True))
             panel = panel_module.ClassifierDockWidget(None)
             try:
                 self.assertEqual(panel.field_edit.text(), 'my_raw_ids')

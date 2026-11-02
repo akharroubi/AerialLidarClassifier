@@ -184,7 +184,8 @@ class _ClassifyAlgorithmBase(QgsProcessingAlgorithm):
             "Mapping, 1-7 for Railway). Values must be "
             "integers 0-255; omitted classes use model defaults. Repeated values "
             "merge classes. This parameter applies only to the Mobile Mapping and Railway "
-            "models and the existing classification field. Model IDs identify mapping rows; "
+            "models (Railway: Cohort members) and the existing classification field. "
+            "Model IDs identify mapping rows; "
             "no extra label field is added. "
             "Processing uses this explicit parameter, independently of dock settings.</li>"
             "<li><b>Compute device</b> - <i>Auto</i> uses CUDA when "
@@ -1028,7 +1029,10 @@ class ClassifyLidarAlgorithm(_ClassifyAlgorithmBase):
     def _choice_help(self) -> str:
         return (
             "<li><b>Model</b> - 0 LitePT-L Airborne, 1 SegFormer 3D Airborne, "
-            "2 LitePT-L Mobile Mapping, 3 LitePT-L Railway. The LitePT-L models need an "
+            "2 LitePT-L Mobile Mapping, 3 LitePT-L Railway. Since 1.3.4 the Railway "
+            "model (3) is not run by the plugin: access is granted through the "
+            "author's live Cohort (https://maven.com/geomatics/qgis3d) and choosing it "
+            "stops the algorithm with that message. The LitePT-L models need an "
             "NVIDIA CUDA GPU. The weights download automatically the first time a model "
             "is used (SHA-256 verified).</li>"
         )

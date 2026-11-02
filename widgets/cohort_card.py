@@ -13,7 +13,7 @@ from qgis.PyQt.QtWidgets import (
     QFrame, QHBoxLayout, QLabel, QPushButton, QToolButton, QVBoxLayout,
 )
 
-from ..config import COURSE_TITLE, COURSE_URL, SETTINGS_PREFIX
+from ..config import COURSE_TITLE, COURSE_URL, PLUGIN_VERSION, SETTINGS_PREFIX
 
 COHORT_URL = COURSE_URL
 COHORT_TITLE = COURSE_TITLE
@@ -64,9 +64,15 @@ def open_cohort(placement="menu"):
 
 
 def cohort_hidden():
-    """True once the user has hidden the invitation."""
+    """True when the user hid the invitation in this plugin version.
+
+    The x stores the version it was clicked in, so every new release shows
+    the card once more (new models get announced) and the x hides it again
+    until the next one. The boolean of 1.1 to 1.3.3 counts as an older
+    version: the card comes back with 1.3.4.
+    """
     try:
-        return bool(QgsSettings().value(_HIDE_KEY, False, type=bool))
+        return str(QgsSettings().value(_HIDE_KEY, "") or "") == PLUGIN_VERSION
     except Exception:
         return False
 
@@ -111,8 +117,8 @@ class CohortCard(QFrame):
             close.setText("×")
             close.setAutoRaise(True)
             close.setToolTip(
-                "Hide this invitation. The Cohort stays listed in the plugin "
-                "menu and in About."
+                "Hide this invitation until the next plugin version. The Cohort "
+                "stays listed in the plugin menu and in About."
             )
             close.setAccessibleName("Hide Cohort invitation")
             close.clicked.connect(self._dismiss)
@@ -145,5 +151,5 @@ class CohortCard(QFrame):
             self.hide()
 
     def _dismiss(self):
-        QgsSettings().setValue(_HIDE_KEY, True)
+        QgsSettings().setValue(_HIDE_KEY, PLUGIN_VERSION)
         self.hide()

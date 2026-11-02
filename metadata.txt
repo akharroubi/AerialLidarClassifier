@@ -47,7 +47,7 @@ server=False
 changelog=
     1.3.4
         - The Railway classifier is reserved for the participants of the
-          author's live Cohort It stays in the list; selecting it
+          author's live Cohort. It stays in the list; selecting it
           shows where access is granted, with a button to the Cohort page,
           and Run stays disabled. Processing stops with the same message
           for CLASSIFIER=2 and for MODEL=3 in the 1.0 to 1.2 algorithm.
@@ -60,7 +60,8 @@ changelog=
           two locked entries read "(members only)" in the classifier list.
         - Cohort invitation (dock card, About, message after a run, plugin
           menu) reworded: "Like the plugin? Help it grow. The live Cohort
-          funds the next models and releases." Softer card design.
+          funds the next models and releases." Softer card design; hiding
+          it with its x lasts until the next plugin version.
     1.3.3
         - "CUDA driver error: unknown error" with the automatic GPU memory
           allocator on Windows: the failure of some drivers is intermittent

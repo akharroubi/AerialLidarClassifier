@@ -842,9 +842,9 @@ Government of Canada.
 reports and pull requests are welcome on the
 [issue tracker](https://github.com/akharroubi/AerialLidarClassifier/issues).
 
-**Course.** [LiDAR Point Clouds Processing in QGIS](https://maven.com/geomatics/qgis3d?utm_source=github&utm_medium=readme&utm_campaign=qgis3d),
-a live cohort by the author. The plugin links to it from the dock (the card can
-be hidden with its x button), the About dialog and the plugin menu. The links
+**Cohort.** [LiDAR Point Clouds Processing in QGIS](https://maven.com/geomatics/qgis3d?utm_source=github&utm_medium=readme&utm_campaign=qgis3d),
+a live Cohort by the author. The plugin links to it from the dock (the card can
+be hidden with its x button until the next plugin version), the About dialog and the plugin menu. The links
 carry fixed campaign tags only; the plugin sends no usage data.
 
 ---

@@ -68,8 +68,30 @@ class ReleaseChecks(unittest.TestCase):
             self.assertTrue(url.startswith('https://maven.com/geomatics/qgis3d?'))
             self.assertIn('utm_content=panel', url)
             card._dismiss()
-            self.assertTrue(card_module.CohortCard().isHidden())
-            self.assertTrue(settings[card_module._HIDE_KEY])
+            self.assertEqual(settings[card_module._HIDE_KEY], card_module.PLUGIN_VERSION)
+            # Every unshown widget reports isHidden() in Qt: judge the card the
+            # way the dock does, as a child of a parent that is then shown.
+            from qgis.PyQt.QtWidgets import QWidget
+
+            def shows():
+                host = QWidget()
+                card = card_module.CohortCard(parent=host)
+                host.show()
+                try:
+                    return card.isVisible()
+                finally:
+                    host.close()
+
+            self.assertTrue(card_module.cohort_hidden())
+            self.assertFalse(shows())
+            # Hidden in an older version (1.1 to 1.3.3 stored a boolean) or in
+            # another version: the card shows again in this one.
+            for stale in (True, 'true', '1.3.3', '9.9.9', ''):
+                settings[card_module._HIDE_KEY] = stale
+                self.assertFalse(card_module.cohort_hidden(), stale)
+                self.assertTrue(shows(), stale)
+            settings[card_module._HIDE_KEY] = card_module.PLUGIN_VERSION
+            self.assertFalse(shows())
 
     def test_waveform_payloads_refused_instead_of_lost(self):
         safety = module('utils.output_safety')

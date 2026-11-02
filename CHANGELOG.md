@@ -24,6 +24,9 @@ and the project follows [Semantic Versioning](https://semver.org/).
   plugin menu) now reads "Like the plugin? Help it grow. The live Cohort
   funds the next models and releases." with a softer, minimal card design;
   the access notice of the locked classifiers uses the same design.
+- Hiding the invitation with its x now lasts until the next plugin version:
+  each release shows the card once more, so new models get announced. The
+  card hidden in 1.1 to 1.3.3 comes back with this version.
 
 ### Added
 - **Power lines classifier** entry (`CLASSIFIER=3`): the power line corridor
