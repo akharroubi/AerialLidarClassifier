@@ -95,7 +95,7 @@ class AerialLidarClassifierPlugin:
         from .widgets.cohort_card import open_cohort
         training = self._add_action(
             QIcon(":/images/themes/default/mActionHelpContents.svg"),
-            tr("Live LiDAR course with the plugin author"), lambda: open_cohort("menu"),
+            tr("See the Cohort (it funds the next models)"), lambda: open_cohort("menu"),
         )
         self.iface.addPluginToMenu(MENU_LABEL, training)
 

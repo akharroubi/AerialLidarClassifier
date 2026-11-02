@@ -26,8 +26,9 @@ about=Classifies airborne and mobile mapping LiDAR point clouds
     feet are converted from their CRS; tiling and streaming handle files
     larger than RAM. Model weights are CC BY-NC 4.0 (railway: CC BY-NC-SA 4.0). Documentation:
     https://github.com/akharroubi/AerialLidarClassifier
-    The plugin author teaches a live cohort, LiDAR Point Clouds
-    Processing in QGIS: https://maven.com/geomatics/qgis3d?utm_source=plugins.qgis.org&utm_medium=listing&utm_campaign=qgis3d
+    Like the plugin? Help it grow: the author's live Cohort, LiDAR Point
+    Clouds Processing in QGIS, funds the next models and releases:
+    https://maven.com/geomatics/qgis3d?utm_source=plugins.qgis.org&utm_medium=listing&utm_campaign=qgis3d
 
 tracker=https://github.com/akharroubi/AerialLidarClassifier/issues
 repository=https://github.com/akharroubi/AerialLidarClassifier
@@ -56,7 +57,10 @@ changelog=
           corridor model is not distributed with the plugin; the entry
           shows where access is granted.
         - Airborne and Mobile mapping are not affected and stay free. The
-          two locked entries read "(Cohort access)" in the classifier list.
+          two locked entries read "(members only)" in the classifier list.
+        - Cohort invitation (dock card, About, message after a run, plugin
+          menu) reworded: "Like the plugin? Help it grow. The live Cohort
+          funds the next models and releases." Softer card design.
     1.3.3
         - "CUDA driver error: unknown error" with the automatic GPU memory
           allocator on Windows: the failure of some drivers is intermittent

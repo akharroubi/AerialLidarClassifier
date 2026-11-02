@@ -306,7 +306,7 @@ class Classifier:
     @property
     def list_label(self) -> str:
         """The name shown in selectors: locked classifiers say so before a click."""
-        return f"{self.display_name} (Cohort access)" if self.locked else self.display_name
+        return f"{self.display_name} (members only)" if self.locked else self.display_name
 
     def access_message(self) -> str:
         """The access text with the page to visit, for logs and Processing."""
@@ -338,9 +338,8 @@ RAILWAY = Classifier(
     # author's Cohort. Its ModelSpec stays declared: the legacy Processing
     # MODEL index 3, saved output codes and cached weights keep their meaning.
     access=(
-        "Access to the Railway model is granted through the live Cohort "
-        f"{COURSE_TITLE}, taught by the plugin author. The Airborne and "
-        "Mobile mapping classifiers stay free."
+        "The Railway model is available to the members of the live Cohort "
+        f"{COURSE_TITLE}, taught by the plugin author."
     ),
     access_button="Join the Cohort",
 )
@@ -353,9 +352,8 @@ POWER_LINES = Classifier(
     ),
     engines=(),
     access=(
-        "Access to the Power lines model is granted through the live Cohort "
-        f"{COURSE_TITLE}, taught by the plugin author. The Airborne and "
-        "Mobile mapping classifiers stay free."
+        "The Power lines model is available to the members of the live Cohort "
+        f"{COURSE_TITLE}, taught by the plugin author."
     ),
     access_button="Join the Cohort",
 )

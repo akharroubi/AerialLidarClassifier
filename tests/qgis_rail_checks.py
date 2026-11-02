@@ -113,8 +113,8 @@ class RailChecks(unittest.TestCase):
         self.assertEqual(algorithm.name(), 'classify_point_cloud')
         classifier = algorithm.parameterDefinition('CLASSIFIER')
         self.assertEqual(classifier.options(), [c.list_label for c in registry.CLASSIFIERS])
-        self.assertEqual(classifier.options()[2:], ['Railway classifier (Cohort access)',
-                                                   'Power lines classifier (Cohort access)'])
+        self.assertEqual(classifier.options()[2:], ['Railway classifier (members only)',
+                                                   'Power lines classifier (members only)'])
         self.assertEqual(classifier.defaultValue(), 0)
         self.assertIsNone(algorithm.parameterDefinition('MODEL'))
         self.assertFalse(algorithm.flags() & processing._ALG_DEPRECATED)
@@ -558,7 +558,7 @@ class RailChecks(unittest.TestCase):
                 self.assertTrue(panel.mms_codes_row.isHidden())
                 self.assertEqual([panel.model_combo.itemText(i) for i in range(panel.model_combo.count())],
                                  ['Airborne classifier', 'Mobile mapping classifier',
-                                  'Railway classifier (Cohort access)', 'Power lines classifier (Cohort access)'])
+                                  'Railway classifier (members only)', 'Power lines classifier (members only)'])
                 # 1.2 saved the LitePT-L Airborne model id: Airborne classifier, which
                 # runs its SegFormer 3D engine on this GPU-less test machine.
                 self.assertEqual(panel.model_combo.currentData(), 'airborne')
@@ -590,14 +590,14 @@ class RailChecks(unittest.TestCase):
                 self.assertFalse(panel.model_gate_ok)
                 self.assertEqual(panel.model_gate_message, registry.RAILWAY.access_message())
                 self.assertIn(ACCESS_URL, panel.model_gate_message)
-                self.assertIn('Access through the Cohort', panel.model_label.text())
+                self.assertIn('Members only', panel.model_label.text())
                 self.assertFalse(panel.access_card.isHidden())
-                self.assertEqual(panel.access_card.title.text(), 'Railway classifier: access through the Cohort')
+                self.assertEqual(panel.access_card.text.text(), 'The Railway model is available to the members of the live Cohort LiDAR Point Clouds Processing in QGIS, taught by the plugin author.')
                 self.assertEqual(panel.access_card.text.text(), registry.RAILWAY.access)
                 self.assertEqual(panel.access_card.button.text(), 'Join the Cohort \u2197')
                 self.assertFalse(panel.import_btn.isEnabled())
                 self.assertFalse(panel.run_btn.isEnabled())
-                self.assertIn('access through the Cohort', panel.run_btn.toolTip())
+                self.assertIn('members only', panel.run_btn.toolTip())
                 with patch.object(access_module.QDesktopServices, 'openUrl', return_value=True) as browser:
                     panel.access_card.button.click()
                     url = browser.call_args.args[0].toString()
@@ -615,7 +615,7 @@ class RailChecks(unittest.TestCase):
                 self.assertEqual(panel.field_edit.text(), 'my_raw_ids')
                 self.assertFalse(panel.model_gate_ok)
                 self.assertFalse(panel.access_card.isHidden())
-                self.assertEqual(panel.access_card.title.text(), 'Power lines classifier: access through the Cohort')
+                self.assertTrue(panel.access_card.text.text().startswith('The Power lines model is available to the members'))
                 self.assertFalse(panel.run_btn.isEnabled())
                 panel._edit_output_codes()
                 panel._import_model_file()
@@ -647,12 +647,12 @@ class RailChecks(unittest.TestCase):
                 # The saved custom fence code (65) shows at once, with its meaning.
                 self.assertIn("Fence</td><td align='right'>&nbsp;&nbsp;65</td><td>&nbsp;&nbsp;User definable", tips[2])
                 self.assertIn('#E31A1C', tips[2])
-                self.assertIn('<i>Access to the Railway model is granted through the live Cohort', tips[2])
+                self.assertIn('<i>The Railway model is available to the members of the live Cohort', tips[2])
                 self.assertIn('<b>Power lines classifier</b>', tips[3])
-                self.assertIn('<i>Access to the Power lines model is granted', tips[3])
+                self.assertIn('<i>The Power lines model is available to the members', tips[3])
                 self.assertNotIn('<table', tips[3])
                 self.assertEqual(panel.model_combo.toolTip(), tips[3])
-                self.assertTrue(panel.model_label.toolTip().startswith('Access to the Power lines model'))
+                self.assertTrue(panel.model_label.toolTip().startswith('The Power lines model is available'))
                 self.assertTrue(panel.model_label.toolTip().endswith(tips[3]))
                 panel.model_combo.setCurrentIndex(0)
                 self.assertTrue(panel.mms_codes_row.isHidden())

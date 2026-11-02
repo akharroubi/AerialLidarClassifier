@@ -57,11 +57,11 @@ The classified output is an ordinary LAS or LAZ file. For QGIS builds that
 reject files with existing extra attributes, the plugin can prepare a COPC
 viewing copy when loading the result.
 
-> **Learn it with the author.** Abderrazzaq Kharroubi, who wrote this plugin,
-> teaches *LiDAR Point Clouds Processing in QGIS*, a live cohort on
-> classification, terrain models, COPC and 3D editing.
-> [See the syllabus and the next dates](https://maven.com/geomatics/qgis3d?utm_source=github&utm_medium=readme&utm_campaign=qgis3d).
-> The course is optional and paid; the plugin is and stays free.
+> **Like the plugin? Help it grow.** The live Cohort funds the next models
+> and releases: *LiDAR Point Clouds Processing in QGIS*, taught by the
+> author (classification, terrain models, COPC and 3D editing).
+> [See the Cohort](https://maven.com/geomatics/qgis3d?utm_source=github&utm_medium=readme&utm_campaign=qgis3d).
+> Optional and paid; the plugin is and stays free.
 
 ---
 

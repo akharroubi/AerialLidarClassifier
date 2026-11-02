@@ -1147,7 +1147,7 @@ class ClassifierDockWidget(QDockWidget):
             self.import_btn.setToolTip(
                 f"{classifier.display_name}: no weights to import; see the notice below.")
             self.model_label.setText(
-                f"<span style='color:{_WARN};'>●</span> Access through the Cohort")
+                f"<span style='color:{_WARN};'>●</span> Members only")
             classes = self._refresh_classifier_tooltips(device)
             self.model_label.setToolTip(
                 f"{html.escape(classifier.access, quote=False)}<hr>{classes}")
@@ -1562,8 +1562,8 @@ class ClassifierDockWidget(QDockWidget):
         if classifier.locked:
             # Before the file and folder advice: nothing runs this classifier.
             # The full text is in the card at the top and in the log.
-            return (f"{classifier.display_name}: access through the Cohort. "
-                    "Use the button in the classifier strip above.")
+            return (f"{classifier.display_name}: members only. "
+                    "Use the Cohort button in the classifier strip above.")
         if not self.files:
             return "Add LAS / LAZ / COPC files to the list above."
         if not self.output_widget.filePath():
@@ -1742,7 +1742,8 @@ class ClassifierDockWidget(QDockWidget):
         bar = self.iface.messageBar()
         folder = outputs[0].parent if outputs else None
         try:
-            from ..widgets.cohort_card import cohort_hidden, open_cohort
+            from ..widgets.cohort_card import (
+                    COHORT_BUTTON, COHORT_HOOK, COHORT_LINE, cohort_hidden, open_cohort)
             item = bar.createMessage(PLUGIN_NAME, summary)
             if folder is not None:
                 open_btn = QPushButton("Open folder")
@@ -1750,10 +1751,8 @@ class ClassifierDockWidget(QDockWidget):
                     lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder))))
                 item.layout().addWidget(open_btn)
             if not cohort_hidden():
-                course_btn = QPushButton("Go further: live course ↗")
-                course_btn.setToolTip(
-                    "Optional paid cohort taught by the plugin author. "
-                    "Opens Maven in your browser.")
+                course_btn = QPushButton(COHORT_BUTTON)
+                course_btn.setToolTip(f"{COHORT_HOOK}: {COHORT_LINE}")
                 course_btn.clicked.connect(lambda: open_cohort("success"))
                 item.layout().addWidget(course_btn)
             bar.pushWidget(item, Qgis.MessageLevel.Success, 15)

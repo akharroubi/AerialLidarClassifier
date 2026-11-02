@@ -61,8 +61,8 @@ class AboutDialog(QDialog):
             "model for NVIDIA GPUs. Without a compatible NVIDIA GPU the "
             "Airborne classifier runs the SegFormer 3D engine (GPU or CPU). "
             "Mobile mapping (nine classes) has editable codes.\n\n"
-            "The Railway and Power lines classifiers are reserved for the "
-            "participants of the author's live Cohort below."
+            "The Railway and Power lines classifiers are for the members of "
+            "the author's live Cohort below."
         )
         desc.setWordWrap(True)
         desc.setAlignment(Qt.AlignmentFlag.AlignCenter)

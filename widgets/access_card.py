@@ -1,19 +1,21 @@
 """Access notice for a classifier the free plugin does not run.
 
 Shown in the dock's classifier strip when the selected classifier has an
-``access`` text (core/registry.py): a title, the sentence saying where
-access is granted, and one button that opens that page (Maven) in the
-browser. Nothing opens by itself and the card cannot be hidden: it is the
-run gate of that classifier, not an advertisement, so the "hide course
-invitation" setting of the cohort card does not apply to it.
+``access`` text (core/registry.py): one sentence saying who the model is
+available to, and one button that opens the Cohort page in the browser.
+Nothing opens by itself and the card cannot be hidden: it is the run gate
+of that classifier, not an invitation, so the "hide Cohort invitation"
+setting of the cohort card does not apply to it.
 """
 from urllib.parse import urlencode
 
-from qgis.PyQt.QtCore import QUrl
+from qgis.PyQt.QtCore import QUrl, Qt
 from qgis.PyQt.QtGui import QDesktopServices
 from qgis.PyQt.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout
 
-_ACCENT = "#FFA500"  # the wire / power line colour of the class tables
+from .cohort_card import soft_card_style
+
+_ACCENT = "217, 130, 43"  # a soft amber: the wire colour of the class tables, toned down
 
 
 def access_url(classifier):
@@ -34,23 +36,11 @@ class AccessCard(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("accessCard")
-        self.setStyleSheet(
-            "QFrame#accessCard {"
-            " border: 1px solid palette(mid);"
-            f" border-left: 3px solid {_ACCENT};"
-            " border-radius: 4px; }"
-        )
+        self.setStyleSheet(soft_card_style("accessCard", _ACCENT))
         self._classifier = None
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 6, 6, 6)
-        layout.setSpacing(4)
-
-        self.title = QLabel("")
-        self.title.setWordWrap(True)
-        font = self.title.font()
-        font.setBold(True)
-        self.title.setFont(font)
-        layout.addWidget(self.title)
+        layout.setContentsMargins(12, 8, 8, 8)
+        layout.setSpacing(6)
 
         self.text = QLabel("")
         self.text.setWordWrap(True)
@@ -60,6 +50,7 @@ class AccessCard(QFrame):
         row.addStretch(1)
         self.button = QPushButton("")
         self.button.setAutoDefault(False)
+        self.button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.button.clicked.connect(self._open)
         row.addWidget(self.button)
         layout.addLayout(row)
@@ -71,7 +62,6 @@ class AccessCard(QFrame):
         if classifier is None or not classifier.locked:
             self.hide()
             return
-        self.title.setText(f"{classifier.display_name}: access through the Cohort")
         self.text.setText(classifier.access or classifier.access_message())
         self.button.setText(classifier.access_button + " ↗")
         self.button.setToolTip(f"Opens {classifier.access_url} in your browser.")

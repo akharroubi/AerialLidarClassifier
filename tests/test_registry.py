@@ -162,7 +162,7 @@ def test_locked_classifiers_point_to_the_course_and_keep_their_models():
     assert not registry.model_locked("unknown") and not registry.model_locked(None)
     assert [c.list_label for c in registry.CLASSIFIERS] == [
         "Airborne classifier", "Mobile mapping classifier",
-        "Railway classifier (Cohort access)", "Power lines classifier (Cohort access)"]
+        "Railway classifier (members only)", "Power lines classifier (members only)"]
     assert registry.select_engine(registry.POWER_LINES, "cuda", lambda spec, device: True) is None
     for bad in (None, "", "unknown"):
         for lookup in (registry.get_classifier, registry.classifier_for_model):

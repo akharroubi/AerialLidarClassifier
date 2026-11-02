@@ -1,7 +1,7 @@
-"""Optional course invitation. Opens Maven only after a user's click.
+"""Cohort invitation: "Like the plugin? Help it grow". Opens the page only after a click.
 
 One setting controls every in-app placement: hiding the card in the
-panel also hides the course button of the "classification complete"
+panel also hides the Cohort button of the "classification complete"
 message. The plugin menu entry and the About dialog stay available.
 """
 from urllib.parse import urlencode
@@ -17,12 +17,38 @@ from ..config import COURSE_TITLE, COURSE_URL, SETTINGS_PREFIX
 
 COHORT_URL = COURSE_URL
 COHORT_TITLE = COURSE_TITLE
+# The one message of every placement (dock card, About, success bar, menu).
+COHORT_HOOK = "Like the plugin? Help it grow"
+COHORT_LINE = "The live Cohort funds the next models and releases."
+COHORT_BUTTON = "See the Cohort ↗"
 COHORT_PITCH = (
-    "Learn classification, terrain models, COPC and 3D editing live "
-    "with Abderrazzaq Kharroubi, the author of this plugin."
+    "Classification, terrain models, COPC and 3D editing, live with "
+    "Abderrazzaq Kharroubi, the author of this plugin."
 )
+COHORT_TOOLTIP = f"{COHORT_TITLE}: {COHORT_LINE} Optional and paid; the plugin stays free."
 _HIDE_KEY = f"{SETTINGS_PREFIX}/hide_cohort_card"
-_ACCENT = "#228B22"  # vegetation green of the plugin icon
+_ACCENT = "34, 139, 34"  # vegetation green of the plugin icon, as RGB for rgba()
+
+
+def soft_card_style(object_name, accent_rgb):
+    """Minimal, soft look shared by the invitation and the access notice:
+    a faint tint, a hairline of the accent, rounded corners, pill buttons.
+    Palette-independent, so it reads the same on light and dark themes."""
+    return (
+        f"QFrame#{object_name} {{"
+        f" background: rgba({accent_rgb}, 0.07);"
+        f" border: 1px solid rgba({accent_rgb}, 0.28);"
+        " border-radius: 8px; }"
+        f"QFrame#{object_name} QPushButton {{"
+        " background: transparent;"
+        f" border: 1px solid rgba({accent_rgb}, 0.6);"
+        " border-radius: 11px; padding: 3px 12px; }"
+        f"QFrame#{object_name} QPushButton:hover {{"
+        f" background: rgba({accent_rgb}, 0.16); }}"
+        f"QFrame#{object_name} QPushButton:pressed {{"
+        f" background: rgba({accent_rgb}, 0.28); }}"
+        f"QFrame#{object_name} QToolButton {{ border: none; background: transparent; }}"
+    )
 
 
 def cohort_url(placement):
@@ -46,47 +72,38 @@ def cohort_hidden():
 
 
 class CohortCard(QFrame):
-    """Course invitation.
+    """Cohort invitation.
 
     ``placement="panel"`` is the compact block under the Run button
     (two short text lines beside the button); any other placement shows
-    the full title and pitch.
+    the title of the Cohort and its pitch as well.
     """
 
     def __init__(self, placement="panel", dismissible=True, parent=None):
         super().__init__(parent)
         self.setObjectName("cohortCard")
-        self.setStyleSheet(
-            "QFrame#cohortCard {"
-            " border: 1px solid palette(mid);"
-            f" border-left: 3px solid {_ACCENT};"
-            " border-radius: 4px; }"
-        )
+        self.setStyleSheet(soft_card_style("cohortCard", _ACCENT))
         compact = placement == "panel"
         layout = QHBoxLayout(self) if compact else QVBoxLayout(self)
-        layout.setContentsMargins(10, 6, 6, 6)
-        layout.setSpacing(8 if compact else 6)
+        layout.setContentsMargins(12, 8, 8, 8)
+        layout.setSpacing(10 if compact else 6)
 
-        title = QLabel("Go further with LiDAR in QGIS" if compact else COHORT_TITLE)
-        title.setToolTip(COHORT_TITLE + "\n" + COHORT_PITCH)
+        title = QLabel(COHORT_HOOK)
+        title.setToolTip(COHORT_TOOLTIP)
         title.setWordWrap(True)
         font = title.font()
         font.setBold(True)
         title.setFont(font)
-        note = QLabel("Live cohort by the plugin author. Optional, paid."
-                      if compact else
-                      "Live cohort taught by the plugin author. Optional "
-                      "paid course; the plugin stays free.")
-        note.setToolTip("The course is optional and paid. The plugin is and "
-                        "stays free.")
+        note = QLabel(COHORT_LINE)
+        note.setToolTip(COHORT_TOOLTIP)
         note.setWordWrap(True)
         small = note.font()
         small.setPointSizeF(max(7.0, small.pointSizeF() * 0.9))
         note.setFont(small)
-        button = QPushButton("See the syllabus ↗" if compact
-                             else "View syllabus && next cohort ↗")
+        button = QPushButton(COHORT_BUTTON)
         button.setAutoDefault(False)
-        button.setToolTip("Opens the course page on Maven in your browser.")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        button.setToolTip(f"Opens the Cohort page ({COHORT_URL}) in your browser.")
         button.clicked.connect(lambda: open_cohort(placement))
         close = None
         if dismissible:
@@ -94,10 +111,10 @@ class CohortCard(QFrame):
             close.setText("×")
             close.setAutoRaise(True)
             close.setToolTip(
-                "Hide this course invitation. The course stays listed in "
-                "the plugin menu and in About."
+                "Hide this invitation. The Cohort stays listed in the plugin "
+                "menu and in About."
             )
-            close.setAccessibleName("Hide course invitation")
+            close.setAccessibleName("Hide Cohort invitation")
             close.clicked.connect(self._dismiss)
 
         if compact:
@@ -116,7 +133,7 @@ class CohortCard(QFrame):
             if close is not None:
                 top.addWidget(close, 0, Qt.AlignmentFlag.AlignTop)
             layout.addLayout(top)
-            pitch = QLabel(COHORT_PITCH)
+            pitch = QLabel(f"<b>{COHORT_TITLE}</b>. {COHORT_PITCH}")
             pitch.setWordWrap(True)
             layout.addWidget(pitch)
             bottom = QHBoxLayout()

@@ -18,8 +18,12 @@ and the project follows [Semantic Versioning](https://semver.org/).
   indexes do not move. Setup no longer downloads the railway weights.
 - The Airborne and Mobile mapping classifiers are not affected and stay free.
 - In the classifier list (dock and Processing) the two locked entries read
-  "Railway classifier (Cohort access)" and "Power lines classifier (Cohort
-  access)", so the status is visible before a click.
+  "Railway classifier (members only)" and "Power lines classifier (members
+  only)", so the status is visible before a click.
+- The Cohort invitation (dock card, About, the message after a run and the
+  plugin menu) now reads "Like the plugin? Help it grow. The live Cohort
+  funds the next models and releases." with a softer, minimal card design;
+  the access notice of the locked classifiers uses the same design.
 
 ### Added
 - **Power lines classifier** entry (`CLASSIFIER=3`): the power line corridor
