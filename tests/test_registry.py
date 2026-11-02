@@ -160,6 +160,9 @@ def test_locked_classifiers_point_to_the_course_and_keep_their_models():
     for spec in (registry.LITEPT_L_DALES, registry.SEGFORMER3D_URBANFILTERING, registry.LITEPT_L_MLS):
         assert not registry.model_locked(spec.id)
     assert not registry.model_locked("unknown") and not registry.model_locked(None)
+    assert [c.list_label for c in registry.CLASSIFIERS] == [
+        "Airborne classifier", "Mobile mapping classifier",
+        "Railway classifier (Cohort access)", "Power lines classifier (Cohort access)"]
     assert registry.select_engine(registry.POWER_LINES, "cuda", lambda spec, device: True) is None
     for bad in (None, "", "unknown"):
         for lookup in (registry.get_classifier, registry.classifier_for_model):

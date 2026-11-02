@@ -55,7 +55,8 @@ changelog=
         - New Power lines classifier entry (CLASSIFIER=3): the power line
           corridor model is not distributed with the plugin; the entry
           shows where access is granted.
-        - Airborne and Mobile mapping are not affected and stay free.
+        - Airborne and Mobile mapping are not affected and stay free. The
+          two locked entries read "(Cohort access)" in the classifier list.
     1.3.3
         - "CUDA driver error: unknown error" with the automatic GPU memory
           allocator on Windows: the failure of some drivers is intermittent

@@ -973,7 +973,7 @@ class ClassifyPointCloudAlgorithm(_ClassifyAlgorithmBase):
             QgsProcessingParameterEnum(
                 self.CLASSIFIER,
                 self.tr("Classifier"),
-                options=[classifier.display_name for classifier in CLASSIFIERS],
+                options=[classifier.list_label for classifier in CLASSIFIERS],
                 defaultValue=0,
             )
         )

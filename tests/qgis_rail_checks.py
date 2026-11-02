@@ -112,7 +112,9 @@ class RailChecks(unittest.TestCase):
         algorithm.initAlgorithm()
         self.assertEqual(algorithm.name(), 'classify_point_cloud')
         classifier = algorithm.parameterDefinition('CLASSIFIER')
-        self.assertEqual(classifier.options(), [c.display_name for c in registry.CLASSIFIERS])
+        self.assertEqual(classifier.options(), [c.list_label for c in registry.CLASSIFIERS])
+        self.assertEqual(classifier.options()[2:], ['Railway classifier (Cohort access)',
+                                                   'Power lines classifier (Cohort access)'])
         self.assertEqual(classifier.defaultValue(), 0)
         self.assertIsNone(algorithm.parameterDefinition('MODEL'))
         self.assertFalse(algorithm.flags() & processing._ALG_DEPRECATED)
@@ -555,8 +557,8 @@ class RailChecks(unittest.TestCase):
                 self.assertEqual(panel.field_edit.text(), 'my_raw_ids')
                 self.assertTrue(panel.mms_codes_row.isHidden())
                 self.assertEqual([panel.model_combo.itemText(i) for i in range(panel.model_combo.count())],
-                                 ['Airborne classifier', 'Mobile mapping classifier', 'Railway classifier',
-                                  'Power lines classifier'])
+                                 ['Airborne classifier', 'Mobile mapping classifier',
+                                  'Railway classifier (Cohort access)', 'Power lines classifier (Cohort access)'])
                 # 1.2 saved the LitePT-L Airborne model id: Airborne classifier, which
                 # runs its SegFormer 3D engine on this GPU-less test machine.
                 self.assertEqual(panel.model_combo.currentData(), 'airborne')

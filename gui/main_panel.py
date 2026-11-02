@@ -468,7 +468,7 @@ class ClassifierDockWidget(QDockWidget):
         row.addWidget(QLabel("Classifier:"))
         self.model_combo = QComboBox()
         for classifier in CLASSIFIERS:
-            self.model_combo.addItem(classifier.display_name, classifier.id)
+            self.model_combo.addItem(classifier.list_label, classifier.id)
         self.model_combo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.model_combo.setMinimumContentsLength(10)

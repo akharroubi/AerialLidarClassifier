@@ -303,6 +303,11 @@ class Classifier:
         """True when the plugin does not run this classifier (see ``access``)."""
         return bool(self.access) or not self.engines
 
+    @property
+    def list_label(self) -> str:
+        """The name shown in selectors: locked classifiers say so before a click."""
+        return f"{self.display_name} (Cohort access)" if self.locked else self.display_name
+
     def access_message(self) -> str:
         """The access text with the page to visit, for logs and Processing."""
         text = self.access or f"{self.display_name}: no model is distributed with the plugin."

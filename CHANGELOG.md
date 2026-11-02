@@ -17,6 +17,9 @@ and the project follows [Semantic Versioning](https://semver.org/).
   saved output codes keep their meaning and the `MODEL` and `CLASSIFIER`
   indexes do not move. Setup no longer downloads the railway weights.
 - The Airborne and Mobile mapping classifiers are not affected and stay free.
+- In the classifier list (dock and Processing) the two locked entries read
+  "Railway classifier (Cohort access)" and "Power lines classifier (Cohort
+  access)", so the status is visible before a click.
 
 ### Added
 - **Power lines classifier** entry (`CLASSIFIER=3`): the power line corridor
